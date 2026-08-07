@@ -188,17 +188,44 @@ void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
         return;
     }
 
-    // comm.c's process_input(): "assume the existence of ... process_input
-    // in user.c until proven wrong" -- an object with no process_input()
-    // defined just silently does nothing with the line (VM::callFunction()
-    // already returns void for an undefined function, matching real
-    // FluffOS's own ip->iflags &= ~HAS_PROCESS_INPUT fallback closely
-    // enough for this driver's current scope, which has no
-    // parse_command()/add_action() command parser to fall back to
-    // further).
+    // comm.c's process_input() (static void process_input(interactive_t*,
+    // char*), confirmed by direct reading): if the object's own
+    // process_input() apply exists, its *return value* decides what
+    // actually reaches parse_command() -- a string return is the line to
+    // dispatch instead of the original (real mud-shell/alias/history
+    // preprocessing, confirmed live in this mudlib's own std/user/
+    // nmsh.c), a truthy non-string return means the input was fully
+    // consumed and nothing dispatches at all, and anything else
+    // (function genuinely undefined, or returns a falsy number) falls
+    // through to dispatching the original line unchanged -- matching
+    // real comm.c's "if (!ret) ... parse_command(user_command, ...)" /
+    // "if (ret->type == T_STRING) parse_command(buf, ...)" / "if
+    // (ret->type != T_NUMBER || !ret->u.number) parse_command(user_command,
+    // ...)" three-way branch exactly.
     auto obj = conn.boundObject();
     if (!obj) return;
-    vm.callFunction(obj, "process_input", {Value(line)});
+
+    std::string toDispatch = line;
+    Value processed = vm.callFunction(obj, "process_input", {Value(line)});
+    if (std::holds_alternative<std::string>(processed.data)) {
+        toDispatch = std::get<std::string>(processed.data);
+    } else if (std::holds_alternative<int64_t>(processed.data)) {
+        if (std::get<int64_t>(processed.data) != 0) return; // fully consumed
+    }
+    // monostate (process_input undefined) or any other falsy/non-string
+    // return: dispatch the original line, untouched.
+
+    // real parse_command(): matches against command_giver's own action
+    // table (see VM::dispatchCommand()'s own comment for the exact
+    // add_action/enable_commands semantics this backs). A dispatched-but-
+    // unhandled line (no action matched, or every match declined) is not
+    // an error at this layer -- real notify_no_command()'s own "what?"
+    // style default failure message is a mudlib-level concern
+    // (std/living.c's own cmd_hook() already sends one via
+    // "if(query_client()) receive(\"<error>\");" plus its own SOUL_D/
+    // CHAT_D fallback chain), not something this driver needs to inject
+    // on its own.
+    vm.dispatchCommand(obj, toDispatch);
 }
 
 void Server::handleConnection(Connection& conn) {

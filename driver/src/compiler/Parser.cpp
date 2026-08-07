@@ -1438,28 +1438,30 @@ std::vector<std::unique_ptr<ObjectVarDecl>> Parser::parseObjectVarDeclRest(DeclP
     // std/living.c's own "static private int __Locked, __LastAged;"
     // makes both names private, not just the first.
     bool isPrivate = prefix.isPrivate;
-    auto makeDecl = [isPrivate](const std::string& type, bool isArray, const std::string& name) {
+    auto makeDecl = [isPrivate](const std::string& type, bool isArray, const std::string& name,
+                                 AstPtr initializer) {
         auto decl = std::make_unique<ObjectVarDecl>();
         decl->type = type;
         decl->isArray = isArray;
         decl->name = name;
         decl->isPrivate = isPrivate;
+        decl->initializer = std::move(initializer);
         return decl;
     };
 
-    // Declaration-time initializers ("type name = expr;") are real,
-    // standard LPC (confirmed against the FluffOS reference driver's
-    // grammar), but no real site in secure/daemon/master.c uses this
-    // shape, so it is deliberately not parsed here. A specific,
-    // identifiable error is thrown rather than either a generic parse
-    // error or silently misinterpreting "=" as something else, so a
-    // future file that does use this shape fails loudly.
+    // Declaration-time initializers ("type name = expr;") -- real,
+    // standard LPC, confirmed live needed by secure/daemon/wiztools.c's
+    // own "string *REISSUED_TOOLS = ({ ... });" (surfaced walking the
+    // admin-bootstrap path, see Ast.hpp's ObjectVarDecl comment). Only a
+    // single expression per name is parsed here; CodeGen::generate()
+    // decides how it actually gets evaluated (once per instance, before
+    // create() runs).
+    AstPtr firstInit;
     if (checkText("=")) {
-        throw NotImplementedError(
-            "object variable initializer at declaration time (\"" + prefix.type +
-            " " + prefix.name + " = ...\")");
+        advance();
+        firstInit = parseExpr();
     }
-    decls.push_back(makeDecl(prefix.type, prefix.isArray, prefix.name));
+    decls.push_back(makeDecl(prefix.type, prefix.isArray, prefix.name, std::move(firstInit)));
 
     while (checkText(",")) {
         advance();
@@ -1475,13 +1477,13 @@ std::vector<std::unique_ptr<ObjectVarDecl>> Parser::parseObjectVarDeclRest(DeclP
 
         Token nameTok = expect(TokenType::Ident, "object variable declaration name");
 
+        AstPtr init;
         if (checkText("=")) {
-            throw NotImplementedError(
-                "object variable initializer at declaration time (\"" + prefix.type +
-                " " + nameTok.text + " = ...\")");
+            advance();
+            init = parseExpr();
         }
 
-        decls.push_back(makeDecl(prefix.type, isArray, nameTok.text));
+        decls.push_back(makeDecl(prefix.type, isArray, nameTok.text, std::move(init)));
     }
 
     expectText(";", "object variable declaration");

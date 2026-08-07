@@ -47,6 +47,18 @@ public:
 private:
     std::shared_ptr<CompiledProgram> compile(const std::string& filename);
 
+    // Runs "$objvarinit" (see CodeGen::generate()'s own comment) on obj
+    // for program and, first, every program it inherits (parent-before-
+    // child, matching real LPC's own object-variable-initializer
+    // ordering) -- called once per new instance, immediately before
+    // "create", from both loadObject() and cloneObject() below. Each
+    // level uses VM::callFunctionInProgram() rather than the normal
+    // tiered lookup specifically so a parent's own initializers still
+    // run even when a child also declares (and therefore also
+    // synthesizes its own same-named "$objvarinit" for) initialized
+    // variables of its own.
+    void runObjectVarInitializers(const std::shared_ptr<LpcObject>& obj, const CompiledProgram& program);
+
     // real int_load_object()'s own virtual-object fallback (simulate.c):
     // when a plain load_object()/find_object() names a path with no
     // matching ".c" file on disk, the real driver does not treat that

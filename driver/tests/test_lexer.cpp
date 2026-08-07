@@ -1889,42 +1889,41 @@ static void testObjectVarDeclArrayStarParses() {
     std::cout << "testObjectVarDeclArrayStarParses OK\n";
 }
 
-static void testObjectVarDeclInitializerThrowsNotImplemented() {
+static void testObjectVarDeclParsesInitializerExpression() {
     // Declaration-time initializers are real, standard LPC (confirmed
-    // against the FluffOS reference driver's grammar), but no real site
-    // in master.c uses this shape, so it is deliberately rejected with a
-    // specific error rather than silently mis-parsed.
+    // against the FluffOS reference driver's grammar) -- surfaced live
+    // needed by secure/daemon/wiztools.c's own "string *REISSUED_TOOLS =
+    // ({ ... });" (see Ast.hpp's ObjectVarDecl comment and
+    // CodeGen::generate()'s own "$objvarinit" synthesis).
     std::string src = "int x = 5;\n";
     lpcdriver::Lexer lexer(src);
     lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
 
-    bool threw = false;
-    try {
-        parser.parseProgram();
-    } catch (const lpcdriver::NotImplementedError&) {
-        threw = true;
-    }
-    assert(threw);
+    assert(program->objectVars.size() == 1);
+    assert(program->objectVars[0]->name == "x");
+    auto* init = dynamic_cast<lpcdriver::IntLiteral*>(program->objectVars[0]->initializer.get());
+    assert(init != nullptr && init->value == 5);
 
-    std::cout << "testObjectVarDeclInitializerThrowsNotImplemented OK\n";
+    std::cout << "testObjectVarDeclParsesInitializerExpression OK\n";
 }
 
-static void testObjectVarDeclInitializerInCommaListThrowsNotImplemented() {
-    // Same rejection, but for the second-or-later name in a
-    // comma-separated list, not just the first.
+static void testObjectVarDeclParsesInitializerInCommaList() {
+    // Same shape, but for the second-or-later name in a comma-separated
+    // list, not just the first: "a" has no initializer, "b" does.
     std::string src = "int a, b = 5;\n";
     lpcdriver::Lexer lexer(src);
     lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
 
-    bool threw = false;
-    try {
-        parser.parseProgram();
-    } catch (const lpcdriver::NotImplementedError&) {
-        threw = true;
-    }
-    assert(threw);
+    assert(program->objectVars.size() == 2);
+    assert(program->objectVars[0]->name == "a");
+    assert(program->objectVars[0]->initializer == nullptr);
+    assert(program->objectVars[1]->name == "b");
+    auto* init = dynamic_cast<lpcdriver::IntLiteral*>(program->objectVars[1]->initializer.get());
+    assert(init != nullptr && init->value == 5);
 
-    std::cout << "testObjectVarDeclInitializerInCommaListThrowsNotImplemented OK\n";
+    std::cout << "testObjectVarDeclParsesInitializerInCommaList OK\n";
 }
 
 static void testRealBlockingLinesObjectVarDecl() {
@@ -2114,10 +2113,13 @@ static void testObjectVariablePersistsAcrossSeparateCalls() {
     lpcdriver::ObjectManager objects(config);
     lpcdriver::VM vm(objects, config);
 
-    // Before any write, the slot holds its default (monostate), the same
-    // way a declared-but-not-yet-assigned LPC object variable reads as 0.
+    // Before any write, the slot holds real LPC's own default: the
+    // integer 0 (see LpcObject.cpp's own comment -- not this driver's
+    // separate monostate "no value" sentinel, which real LPC has no
+    // equivalent of at the ordinary-declared-variable level).
     lpcdriver::Value before = vm.callFunction(obj, "read_counter", {});
-    assert(std::holds_alternative<std::monostate>(before.data));
+    assert(std::holds_alternative<int64_t>(before.data));
+    assert(std::get<int64_t>(before.data) == 0);
 
     vm.callFunction(obj, "write_counter",
                      std::vector<lpcdriver::Value>{lpcdriver::Value(static_cast<int64_t>(7))});
@@ -2158,9 +2160,11 @@ static void testObjectVariableIsPerInstanceNotSharedAcrossObjects() {
     assert(std::get<int64_t>(aResult.data) == 99);
 
     // objB is a separate LpcObject instance (even though compiled from
-    // the same source), so its own storage must be untouched.
+    // the same source), so its own storage must be untouched -- still at
+    // real LPC's own default (0), not objA's write.
     lpcdriver::Value bResult = vm.callFunction(objB, "read_counter", {});
-    assert(std::holds_alternative<std::monostate>(bResult.data));
+    assert(std::holds_alternative<int64_t>(bResult.data));
+    assert(std::get<int64_t>(bResult.data) == 0);
 
     std::cout << "testObjectVariableIsPerInstanceNotSharedAcrossObjects OK\n";
 }
@@ -5603,6 +5607,409 @@ static void testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariabl
     std::cout << "testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariable OK\n";
 }
 
+// ---------------------------------------------------------------------
+// add_action()/enable_commands() command dispatch subsystem. Grounded in
+// fluffos-2.9-ds2.08/add_action.c directly (not guessed) and this
+// mudlib's own std/living.c, std/room/exits.c, std/room/senses.c,
+// std/Object.c, std/user/nmsh.c real usage -- see STATUS.md's own
+// recon/design writeup and citations.
+// ---------------------------------------------------------------------
+
+static void testEnvironmentDefaultsToNullBeforeAnyMove() {
+    ObjectVarHarness harness;
+    harness.writeFile("/env_lone.c", "object probe() { return environment(this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/env_lone");
+    assert(ob != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::monostate>(result.data));
+    std::cout << "testEnvironmentDefaultsToNullBeforeAnyMove OK\n";
+}
+
+static void testMoveObjectUpdatesEnvironmentAndInventory() {
+    ObjectVarHarness harness;
+    harness.writeFile("/mo_room.c", "void init() {}\n");
+    harness.writeFile("/mo_item.c",
+        "object probe_env() { return environment(this_object()); }\n"
+        "void go(object dest) { move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/mo_room");
+    auto item = harness.objects.cloneObject("/mo_item");
+    assert(room != nullptr && item != nullptr);
+
+    harness.vm.callFunction(item, "go", {lpcdriver::Value(room)});
+
+    lpcdriver::Value env = harness.vm.callFunction(item, "probe_env", {});
+    auto* envPtr = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&env.data);
+    assert(envPtr != nullptr && *envPtr == room);
+    assert(room->inventory().size() == 1);
+    assert(room->inventory()[0] == item);
+
+    std::cout << "testMoveObjectUpdatesEnvironmentAndInventory OK\n";
+}
+
+static void testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions() {
+    // Mirrors std/room.c's real init() -> std/room/exits.c/senses.c's
+    // own add_action() calls, and the O_ENABLE_COMMANDS gate
+    // setup_new_commands() checks before ever calling init() on behalf
+    // of a mover (add_action.c: "if (item->flags & O_ENABLE_COMMANDS) {
+    // ... apply(APPLY_INIT, dest, ...) ... }").
+    ObjectVarHarness harness;
+    harness.writeFile("/ea_room.c",
+        "void init() { add_action(\"cmd_look\", \"look\"); }\n"
+        "int cmd_look(string arg) { return 1; }\n");
+    harness.writeFile("/ea_silent_mover.c", "void go(object dest) { move_object(dest); }\n");
+    harness.writeFile("/ea_enabled_mover.c",
+        "void go(object dest) { enable_commands(); move_object(dest); }\n");
+
+    auto room1 = harness.objects.cloneObject("/ea_room");
+    auto silent = harness.objects.cloneObject("/ea_silent_mover");
+    assert(room1 != nullptr && silent != nullptr);
+    harness.vm.callFunction(silent, "go", {lpcdriver::Value(room1)});
+    assert(harness.vm.dispatchCommand(silent, "look") == false);
+
+    auto room2 = harness.objects.cloneObject("/ea_room");
+    auto enabled = harness.objects.cloneObject("/ea_enabled_mover");
+    assert(room2 != nullptr && enabled != nullptr);
+    harness.vm.callFunction(enabled, "go", {lpcdriver::Value(room2)});
+    assert(harness.vm.dispatchCommand(enabled, "look") == true);
+
+    std::cout << "testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions OK\n";
+}
+
+static void testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs() {
+    ObjectVarHarness harness;
+    harness.writeFile("/av_room.c",
+        "string last_arg;\n"
+        "void init() { add_action(\"cmd_look\", \"look\"); }\n"
+        "int cmd_look(string arg) { last_arg = arg; return 1; }\n"
+        "string query_last_arg() { return last_arg; }\n");
+    harness.writeFile("/av_mover.c", "void go(object dest) { enable_commands(); move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/av_room");
+    auto mover = harness.objects.cloneObject("/av_mover");
+    assert(room != nullptr && mover != nullptr);
+    harness.vm.callFunction(mover, "go", {lpcdriver::Value(room)});
+
+    assert(harness.vm.dispatchCommand(mover, "look at sign") == true);
+    lpcdriver::Value arg = harness.vm.callFunction(room, "query_last_arg", {});
+    assert(std::holds_alternative<std::string>(arg.data));
+    assert(std::get<std::string>(arg.data) == "at sign");
+
+    // A verb the room never registered does not match anything.
+    assert(harness.vm.dispatchCommand(mover, "dance") == false);
+
+    std::cout << "testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs OK\n";
+}
+
+static void testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord() {
+    // Mirrors std/living.c's own real "add_action(\"cmd_hook\", \"\", 1)"
+    // shape exactly: an empty verb with flag 1 matches every typed word
+    // (real V_SHORT semantics), the handler receives only the text after
+    // the first word, and query_verb() still returns the full first word,
+    // not the (empty) matched prefix -- confirmed against add_action.c's
+    // f_add_action() flag handling and this driver's own CLAUDE.md-
+    // documented "flag 1 to add_action is V_SHORT" gotcha.
+    ObjectVarHarness harness;
+    harness.writeFile("/ch_mover.c",
+        "string seen_verb;\n"
+        "string seen_arg;\n"
+        "void register_hook() { add_action(\"cmd_hook\", \"\", 1); }\n"
+        "int cmd_hook(string arg) {\n"
+        "    seen_verb = query_verb();\n"
+        "    seen_arg = arg;\n"
+        "    return 1;\n"
+        "}\n"
+        "string query_seen_verb() { return seen_verb; }\n"
+        "string query_seen_arg() { return seen_arg; }\n");
+    auto mover = harness.objects.cloneObject("/ch_mover");
+    assert(mover != nullptr);
+
+    // add_action() outside any dispatch/move context needs an explicit
+    // command_giver -- mirrors the real live sequence (secure/std/
+    // login.c's own "exec(__Player, this_object()); ... __Player->
+    // setup();", confirmed by direct reading: exec() rebinds the
+    // connection to the new player *before* setup() -> init_living() ->
+    // add_action() ever runs, so command_giver already resolves to the
+    // player itself by then) without needing a real Connection/
+    // OutputContext here. current_object must equal command_giver for
+    // add_action()'s own nearness check to pass, so the registration
+    // happens inside a function called *on* mover, not from the test
+    // driver directly.
+    harness.vm.pushCommandGiver(mover);
+    harness.vm.callFunction(mover, "register_hook", {});
+    harness.vm.popCommandGiver();
+
+    assert(harness.vm.dispatchCommand(mover, "smile warmly") == true);
+
+    lpcdriver::Value verb = harness.vm.callFunction(mover, "query_seen_verb", {});
+    assert(std::holds_alternative<std::string>(verb.data));
+    assert(std::get<std::string>(verb.data) == "smile");
+
+    lpcdriver::Value arg = harness.vm.callFunction(mover, "query_seen_arg", {});
+    assert(std::holds_alternative<std::string>(arg.data));
+    assert(std::get<std::string>(arg.data) == "warmly");
+
+    std::cout << "testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord OK\n";
+}
+
+static void testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy() {
+    // real add_action.c's own doc comment: "If it was the wrong command,
+    // the parser will continue searching for another command, until one
+    // returns true." A more-recently-added (checked-first) handler that
+    // declines must not stop the search.
+    ObjectVarHarness harness;
+    // add_action() always prepends (real add_action.c: "adding to the top
+    // of the list doesn't harm anything"), so registering cmd_accept
+    // *first* and cmd_decline *second* puts cmd_decline at the front,
+    // checked first -- exactly the ordering that would silently mask
+    // this bug if the search stopped at the first match instead of
+    // continuing past a falsy return.
+    harness.writeFile("/dc_room.c",
+        "void init() {\n"
+        "    add_action(\"cmd_accept\", \"go\");\n"
+        "    add_action(\"cmd_decline\", \"go\");\n"
+        "}\n"
+        "int cmd_decline(string arg) { return 0; }\n"
+        "int cmd_accept(string arg) { return 1; }\n");
+    harness.writeFile("/dc_mover.c", "void go(object dest) { enable_commands(); move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/dc_room");
+    auto mover = harness.objects.cloneObject("/dc_mover");
+    assert(room != nullptr && mover != nullptr);
+    harness.vm.callFunction(mover, "go", {lpcdriver::Value(room)});
+
+    // cmd_decline is checked first (most recently added), returns 0;
+    // the search must fall through to cmd_accept, not stop there.
+    assert(harness.vm.dispatchCommand(mover, "go north") == true);
+
+    std::cout << "testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy OK\n";
+}
+
+static void testThisPlayerReturnsCommandGiverDuringDispatch() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tp_room.c",
+        "void init() { add_action(\"cmd_who_am_i\", \"whoami\"); }\n"
+        "object cmd_who_am_i(string arg) { return this_player(); }\n");
+    harness.writeFile("/tp_mover.c", "void go(object dest) { enable_commands(); move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/tp_room");
+    auto mover = harness.objects.cloneObject("/tp_mover");
+    assert(room != nullptr && mover != nullptr);
+    harness.vm.callFunction(mover, "go", {lpcdriver::Value(room)});
+
+    // dispatchCommand() itself does not hand back the handler's return
+    // value, so stash it on the room object instead, the same pattern
+    // testAddActionExactVerbMatchDispatchesWithRemainderAsArgument uses.
+    harness.writeFile("/tp_room2.c",
+        "object last_caller;\n"
+        "void init() { add_action(\"cmd_who_am_i\", \"whoami\"); }\n"
+        "int cmd_who_am_i(string arg) { last_caller = this_player(); return 1; }\n"
+        "object query_last_caller() { return last_caller; }\n");
+    auto room2 = harness.objects.cloneObject("/tp_room2");
+    auto mover2 = harness.objects.cloneObject("/tp_mover");
+    assert(room2 != nullptr && mover2 != nullptr);
+    harness.vm.callFunction(mover2, "go", {lpcdriver::Value(room2)});
+
+    assert(harness.vm.dispatchCommand(mover2, "whoami") == true);
+    lpcdriver::Value caller = harness.vm.callFunction(room2, "query_last_caller", {});
+    auto* callerPtr = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&caller.data);
+    assert(callerPtr != nullptr && *callerPtr == mover2);
+
+    std::cout << "testThisPlayerReturnsCommandGiverDuringDispatch OK\n";
+}
+
+static void testQueryVerbReturnsZeroOutsideOfDispatch() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qv_lone.c", "mixed probe() { return query_verb(); }\n");
+    auto ob = harness.objects.cloneObject("/qv_lone");
+    assert(ob != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::monostate>(result.data));
+    std::cout << "testQueryVerbReturnsZeroOutsideOfDispatch OK\n";
+}
+
+// ---------------------------------------------------------------------
+// set_privs()/query_privs() (real object_t::privs). Surfaced live
+// compiling/running std/living.c and std/money.c.
+// ---------------------------------------------------------------------
+
+static void testQueryPrivsReturnsZeroWhenNeverSet() {
+    ObjectVarHarness harness;
+    harness.writeFile("/priv_lone.c", "mixed probe() { return query_privs(this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/priv_lone");
+    assert(ob != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::monostate>(result.data));
+    std::cout << "testQueryPrivsReturnsZeroWhenNeverSet OK\n";
+}
+
+static void testSetPrivsThenQueryPrivsRoundTripsAndClearsOnNonStringArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/priv_set.c",
+        "void set_it(string s) { set_privs(this_object(), s); }\n"
+        "void clear_it() { set_privs(this_object(), 0); }\n"
+        "mixed probe() { return query_privs(this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/priv_set");
+    assert(ob != nullptr);
+
+    harness.vm.callFunction(ob, "set_it", {lpcdriver::Value(std::string("wizards:thurtea"))});
+    lpcdriver::Value set = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::string>(set.data));
+    assert(std::get<std::string>(set.data) == "wizards:thurtea");
+
+    harness.vm.callFunction(ob, "clear_it", {});
+    lpcdriver::Value cleared = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::monostate>(cleared.data));
+
+    std::cout << "testSetPrivsThenQueryPrivsRoundTripsAndClearsOnNonStringArgument OK\n";
+}
+
+// ---------------------------------------------------------------------
+// Object variable initializer VM execution ("$objvarinit", see
+// CodeGen::generate()'s own comment). Surfaced live compiling secure/
+// daemon/wiztools.c's own "string *REISSUED_TOOLS = ({ ... });".
+// ---------------------------------------------------------------------
+
+static void testObjectVarInitializerRunsBeforeCreate() {
+    ObjectVarHarness harness;
+    harness.writeFile("/vi_lone.c",
+        "int x = 5;\n"
+        "int seen_at_create;\n"
+        "void create() { seen_at_create = x; }\n"
+        "int query_x() { return x; }\n"
+        "int query_seen_at_create() { return seen_at_create; }\n");
+    auto ob = harness.objects.cloneObject("/vi_lone");
+    assert(ob != nullptr);
+
+    lpcdriver::Value x = harness.vm.callFunction(ob, "query_x", {});
+    assert(std::holds_alternative<int64_t>(x.data));
+    assert(std::get<int64_t>(x.data) == 5);
+
+    // create() read the already-initialized value, not 0/void -- proves
+    // ordering, not just that the initializer eventually ran at all.
+    lpcdriver::Value seen = harness.vm.callFunction(ob, "query_seen_at_create", {});
+    assert(std::holds_alternative<int64_t>(seen.data));
+    assert(std::get<int64_t>(seen.data) == 5);
+
+    std::cout << "testObjectVarInitializerRunsBeforeCreate OK\n";
+}
+
+static void testObjectVarInitializerRunsOnFileWithNoCreateAtAll() {
+    // secure/daemon/wiztools.c's own real shape: an initializer with no
+    // create() function in the file at all.
+    ObjectVarHarness harness;
+    harness.writeFile("/vi_no_create.c",
+        "string *tools = ({ \"a\", \"b\", \"c\" });\n"
+        "int query_count() { return sizeof(tools); }\n");
+    auto ob = harness.objects.cloneObject("/vi_no_create");
+    assert(ob != nullptr);
+    lpcdriver::Value count = harness.vm.callFunction(ob, "query_count", {});
+    assert(std::holds_alternative<int64_t>(count.data));
+    assert(std::get<int64_t>(count.data) == 3);
+
+    std::cout << "testObjectVarInitializerRunsOnFileWithNoCreateAtAll OK\n";
+}
+
+static void testObjectVarInitializerParentRunsBeforeChild() {
+    ObjectVarHarness harness;
+    harness.writeFile("/vi_parent.c", "string tag = \"parent\";\n");
+    harness.writeFile("/vi_child.c",
+        "inherit \"/vi_parent\";\n"
+        "string child_tag = tag + \"-child\";\n"
+        "string query_tag() { return tag; }\n"
+        "string query_child_tag() { return child_tag; }\n");
+    auto ob = harness.objects.cloneObject("/vi_child");
+    assert(ob != nullptr);
+
+    lpcdriver::Value tag = harness.vm.callFunction(ob, "query_tag", {});
+    assert(std::holds_alternative<std::string>(tag.data));
+    assert(std::get<std::string>(tag.data) == "parent");
+
+    // child_tag's own initializer read the parent's already-initialized
+    // "tag" -- proves the parent's own "$objvarinit" ran first.
+    lpcdriver::Value childTag = harness.vm.callFunction(ob, "query_child_tag", {});
+    assert(std::holds_alternative<std::string>(childTag.data));
+    assert(std::get<std::string>(childTag.data) == "parent-child");
+
+    std::cout << "testObjectVarInitializerParentRunsBeforeChild OK\n";
+}
+
+// int undefinedp(mixed) / int nullp(mixed). Surfaced live: daemon/
+// multi.c's own query_prevent_login().
+static void testUndefinedpTrueOnlyForVoidNotZeroOrOtherTypes() {
+    // A bare unassigned local/object variable is real LPC's own 0
+    // default now (see LpcObject.cpp's own comment), not this driver's
+    // separate monostate sentinel -- environment() on an object with no
+    // environment set is a genuine, reliable source of monostate to
+    // test undefinedp()/nullp() against instead.
+    lpcdriver::Value result = runProbe(
+        "mixed never_set;\n"
+        "never_set = environment(this_object());\n"
+        "return undefinedp(never_set) * 1000 + nullp(never_set) * 100 +\n"
+        "       undefinedp(0) * 10 + undefinedp(\"\");\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    // never_set (environment() with nothing set -> monostate) is
+    // undefined by both names; a real 0 and an empty string are not.
+    assert(std::get<int64_t>(result.data) == 1100);
+    std::cout << "testUndefinedpTrueOnlyForVoidNotZeroOrOtherTypes OK\n";
+}
+
+// ---------------------------------------------------------------------
+// OpCode::Call's fallback to obj->program() when a bare call resolves
+// against neither the currently-executing file's own functions nor its
+// own inherited chain. Surfaced live: std/user/nmsh.c's own
+// process_input() calling the bare name "query_client", a function only
+// std/user.c (which inherits nmsh.c) defines -- real LPC compiles each
+// file independently, so a parent cannot know at its own compile time
+// that some future child will provide a name it references; this can
+// only resolve at runtime, against whatever the real running object
+// turns out to be.
+// ---------------------------------------------------------------------
+
+static void testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pc_parent.c",
+        "string probe() { return only_in_child(); }\n");
+    harness.writeFile("/pc_child.c",
+        "inherit \"/pc_parent\";\n"
+        "string only_in_child() { return \"from child\"; }\n");
+    auto obj = harness.objects.cloneObject("/pc_child");
+    assert(obj != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "from child");
+
+    std::cout << "testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime OK\n";
+}
+
+static void testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride() {
+    // The critical, opposite case this fallback must never break: a
+    // file's own internal call to a name it (or its own ancestors)
+    // already defines must keep resolving lexically, not virtually
+    // dispatch to a child's override -- real LPC does not do C++-style
+    // virtual dispatch for a parent's own internal self-calls.
+    ObjectVarHarness harness;
+    harness.writeFile("/pl_parent.c",
+        "string helper() { return \"parent helper\"; }\n"
+        "string probe() { return helper(); }\n");
+    harness.writeFile("/pl_child.c",
+        "inherit \"/pl_parent\";\n"
+        "string helper() { return \"child helper\"; }\n");
+    auto obj = harness.objects.cloneObject("/pl_child");
+    assert(obj != nullptr);
+
+    // probe() is only defined in the parent; its own internal call to
+    // helper() must still resolve to the parent's own helper(), not the
+    // child's override, even though the child's is what a direct
+    // "obj->helper()" call_other would reach.
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "parent helper");
+
+    std::cout << "testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -5683,8 +6090,8 @@ int main() {
     testObjectVarDeclThenFunctionBothParse();
     testFunctionDeclarationStillParsesAfterPrefixRefactor();
     testObjectVarDeclArrayStarParses();
-    testObjectVarDeclInitializerThrowsNotImplemented();
-    testObjectVarDeclInitializerInCommaListThrowsNotImplemented();
+    testObjectVarDeclParsesInitializerExpression();
+    testObjectVarDeclParsesInitializerInCommaList();
     testRealBlockingLinesObjectVarDecl();
     testCodegenEmitsPushObjectVarForRead();
     testCodegenEmitsStoreObjectVarForWrite();
@@ -5839,6 +6246,22 @@ int main() {
     testToIntParsesALeadingIntegerFromAStringIgnoringTrailingGarbage();
     testToIntReturnsZeroForAStringWithNoLeadingNumber();
     testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariable();
+    testEnvironmentDefaultsToNullBeforeAnyMove();
+    testMoveObjectUpdatesEnvironmentAndInventory();
+    testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions();
+    testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs();
+    testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord();
+    testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy();
+    testThisPlayerReturnsCommandGiverDuringDispatch();
+    testQueryVerbReturnsZeroOutsideOfDispatch();
+    testQueryPrivsReturnsZeroWhenNeverSet();
+    testSetPrivsThenQueryPrivsRoundTripsAndClearsOnNonStringArgument();
+    testObjectVarInitializerRunsBeforeCreate();
+    testObjectVarInitializerRunsOnFileWithNoCreateAtAll();
+    testObjectVarInitializerParentRunsBeforeChild();
+    testUndefinedpTrueOnlyForVoidNotZeroOrOtherTypes();
+    testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime();
+    testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride();
     std::cout << "all tests passed\n";
     return 0;
 }

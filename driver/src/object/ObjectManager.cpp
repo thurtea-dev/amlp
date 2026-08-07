@@ -502,6 +502,7 @@ std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& filename
     // one).
     if (vm_) {
         try {
+            runObjectVarInitializers(obj, *program);
             vm_->callFunction(obj, "create", {});
         } catch (const std::exception& e) {
             std::cerr << "[object] create() failed for " << filename << ": " << e.what() << "\n";
@@ -513,6 +514,15 @@ std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& filename
     return obj;
 }
 
+void ObjectManager::runObjectVarInitializers(const std::shared_ptr<LpcObject>& obj,
+                                              const CompiledProgram& program) {
+    if (!vm_) return;
+    for (const auto& parent : program.inheritedPrograms) {
+        if (parent) runObjectVarInitializers(obj, *parent);
+    }
+    vm_->callFunctionInProgram(obj, program, "$objvarinit", {});
+}
+
 std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& filename) {
     auto program = compile(filename);
     if (!program) return nullptr;
@@ -521,6 +531,7 @@ std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& filenam
 
     if (vm_) {
         try {
+            runObjectVarInitializers(obj, *program);
             vm_->callFunction(obj, "create", {});
         } catch (const std::exception& e) {
             std::cerr << "[object] create() failed for " << filename << ": " << e.what() << "\n";

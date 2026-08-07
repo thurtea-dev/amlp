@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <utility>
 
 namespace lpcdriver {
 
@@ -58,6 +59,24 @@ private:
     std::vector<std::shared_ptr<lpcdriver::LpcObject>>& callStack_;
     std::vector<std::shared_ptr<lpcdriver::LpcObject>>& objectChangeStack_;
     bool objectChanged_ = false;
+};
+
+// RAII push/pop of VM's commandGiverStack_ (real save_command_giver()/
+// restore_command_giver(), add_action.c), used around each leg of
+// VM::moveObject()'s init()-calling sequence so a thrown exception (an
+// init() body's own runtime error) still pops correctly rather than
+// leaving a stale command_giver behind for whatever runs next.
+class CommandGiverGuard {
+public:
+    CommandGiverGuard(lpcdriver::VM& vm, const std::shared_ptr<lpcdriver::LpcObject>& ob) : vm_(vm) {
+        vm_.pushCommandGiver(ob);
+    }
+    ~CommandGiverGuard() { vm_.popCommandGiver(); }
+    CommandGiverGuard(const CommandGiverGuard&) = delete;
+    CommandGiverGuard& operator=(const CommandGiverGuard&) = delete;
+
+private:
+    lpcdriver::VM& vm_;
 };
 
 // Resolves a bare function-call name against a program's own functions
@@ -267,6 +286,17 @@ Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
     return run(*found.program, *found.fn, std::move(args), obj);
 }
 
+Value VM::callFunctionInProgram(const std::shared_ptr<LpcObject>& obj, const CompiledProgram& program,
+                                 const std::string& functionName, std::vector<Value> args) {
+    if (!obj) return Value{};
+    for (const auto& fn : program.functions) {
+        if (fn.name == functionName) {
+            return run(program, fn, std::move(args), obj);
+        }
+    }
+    return Value{};
+}
+
 Value VM::applyMaster(const std::string& applyName, std::vector<Value> args) {
     auto master = objects_.masterObject();
     if (!master) {
@@ -314,6 +344,22 @@ std::vector<std::shared_ptr<LpcObject>> VM::allPreviousObjects() const {
         if (*it) result.push_back(*it);
     }
     return result;
+}
+
+std::shared_ptr<LpcObject> VM::commandGiver() const {
+    return commandGiverStack_.empty() ? nullptr : commandGiverStack_.back();
+}
+
+void VM::pushCommandGiver(const std::shared_ptr<LpcObject>& ob) {
+    commandGiverStack_.push_back(ob);
+}
+
+void VM::popCommandGiver() {
+    if (!commandGiverStack_.empty()) commandGiverStack_.pop_back();
+}
+
+std::string VM::currentVerb() const {
+    return verbStack_.empty() ? std::string() : verbStack_.back();
 }
 
 // See VM.hpp's own comment for the overall contract. The lazy-
@@ -373,6 +419,153 @@ std::string VM::resolveMudlibPath(const std::string& lpcPath) const {
     return config_.mudlibRoot() + lpcPath;
 }
 
+// See VM.hpp's own comment. Implements two of real setup_new_commands()'s
+// (add_action.c) three visitation legs -- the ones this mudlib's own
+// confirmed real usage needs (the destination handing its own verbs to
+// the mover, and already-present command-enabled occupants exchanging
+// init() calls with the mover) -- and skips the third (dest itself being
+// command-enabled, i.e. moving into another living object's own
+// inventory rather than a room): "rare" per the reference source's own
+// comment, and not reachable by anything this mudlib's own confirmed
+// boot/movement path does (every real move() call site moves a living
+// into a room, never into another living).
+//
+// Also simplified versus the reference source in one more way, flagged
+// rather than silently assumed safe: real setup_new_commands() rechecks
+// "if (item->super != dest) return;" after every single apply(), because
+// an init() body is free to move `item` again before returning (its own
+// comment: "Beware that init() in the room may have moved 'item' !").
+// This does not re-check that -- the occupant loop below iterates a
+// snapshot of dest's inventory taken before any init() runs, so it is
+// safe against the list itself changing size, but an init() that calls
+// move_object() on `item` mid-loop will still finish running the rest of
+// this function against the *old* dest/item relationship. No real init()
+// on this mudlib's confirmed path (Object.c, room/exits.c, room/
+// senses.c, living.c's own init_living()) calls move()/move_object() at
+// all, so this has not been reachable to verify against real behavior.
+void VM::moveObject(const std::shared_ptr<LpcObject>& item, const std::shared_ptr<LpcObject>& dest) {
+    if (!item || !dest || item == dest) return;
+
+    if (auto oldEnv = item->environment().lock()) {
+        auto& oldInv = oldEnv->inventory();
+        oldInv.erase(std::remove(oldInv.begin(), oldInv.end(), item), oldInv.end());
+    }
+    item->setEnvironment(dest);
+    dest->inventory().push_back(item);
+
+    // Leg 1: dest's own init() hands dest's actions to item (command_giver
+    // = item) -- e.g. a room's exits.c/senses.c registering movement and
+    // search verbs onto the player who just walked in.
+    if (item->commandsEnabled()) {
+        CommandGiverGuard guard(*this, item);
+        callFunction(dest, "init", {});
+    }
+
+    // Leg 2: every other object already present exchanges init() calls
+    // with the mover, in the same order real setup_new_commands() uses
+    // (an occupant's init() reaches item first, then item's own init()
+    // reaches the occupant) -- matters for which entry ends up more
+    // recently added, and therefore checked first at dispatch time.
+    // Snapshotting dest's inventory here (not iterating it live) avoids
+    // undefined iterator behavior if an init() call below moves anything
+    // else in or out of dest.
+    std::vector<std::shared_ptr<LpcObject>> occupants = dest->inventory();
+    for (auto& ob : occupants) {
+        if (ob == item) continue;
+        if (ob->commandsEnabled()) {
+            CommandGiverGuard guard(*this, ob);
+            callFunction(item, "init", {});
+        }
+        if (item->commandsEnabled()) {
+            CommandGiverGuard guard(*this, item);
+            callFunction(ob, "init", {});
+        }
+    }
+}
+
+namespace {
+// Splits a typed line into its first whitespace-delimited word (the
+// verb, real query_verb()'s raw material) and the remainder (the
+// argument string every add_action-registered function receives, real
+// LPC convention -- whitespace immediately following the verb is
+// consumed, not left as a leading space in the argument).
+std::pair<std::string, std::string> splitVerbAndArg(const std::string& line) {
+    size_t start = line.find_first_not_of(" \t");
+    if (start == std::string::npos) return {std::string(), std::string()};
+    size_t verbEnd = line.find_first_of(" \t", start);
+    if (verbEnd == std::string::npos) return {line.substr(start), std::string()};
+    std::string verb = line.substr(start, verbEnd - start);
+    size_t argStart = line.find_first_not_of(" \t", verbEnd);
+    std::string arg = (argStart == std::string::npos) ? std::string() : line.substr(argStart);
+    return {verb, arg};
+}
+} // namespace
+
+// See VM.hpp's own comment. real parse_command()/user_parser()
+// (add_action.c): walk giver's action table (built incrementally by
+// moveObject() above, not rebuilt here -- matches real semantics, the
+// table persists across commands until the next move) and call the
+// first matching handler that returns truthy, trying further matches if
+// one returns falsy.
+bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::string& line) {
+    if (!giver) return false;
+    auto [verb, arg] = splitVerbAndArg(line);
+    if (verb.empty()) return false;
+
+    // Snapshot: a handler is free to call add_action()/remove_action()
+    // on itself (this mudlib's own do_sit-style one-shot actions do),
+    // which would otherwise mutate giver->actions() out from under a
+    // live iteration.
+    std::vector<LpcObject::ActionEntry> actions = giver->actions();
+    for (const auto& entry : actions) {
+        bool matches;
+        if (entry.flag == 0) {
+            matches = (entry.verb == verb);
+        } else {
+            // V_SHORT (1) / V_NOSPACE (2): entry.verb only has to be a
+            // leading-characters prefix of the typed verb -- real
+            // semantics, and an empty entry.verb (living.c's own
+            // catch-all "add_action(\"cmd_hook\", \"\", 1)") trivially
+            // matches every typed verb, since every string starts with
+            // the empty prefix.
+            matches = verb.size() >= entry.verb.size() &&
+                verb.compare(0, entry.verb.size(), entry.verb) == 0;
+        }
+        if (!matches) continue;
+
+        auto owner = entry.owner.lock();
+        if (!owner) continue; // real: an action whose owner died is skipped, not an error.
+
+        std::string handlerArg = arg;
+        if (entry.flag == 2 && !entry.verb.empty()) {
+            // V_NOSPACE: the function argument is everything after the
+            // matched *prefix itself*, not after the first whole word.
+            // No real call site in this mudlib uses flag 2 (every real
+            // catch-all use found is flag 1), so this matches the
+            // documented behavior but has not been live-verified against
+            // real FluffOS the way the flag-1 path has.
+            std::string rest = verb.substr(entry.verb.size());
+            handlerArg = arg.empty() ? rest : rest + " " + arg;
+        }
+
+        // real query_verb() always returns the full typed verb, not the
+        // matched prefix -- even for a V_SHORT/V_NOSPACE partial match.
+        verbStack_.push_back(verb);
+        CommandGiverGuard giverGuard(*this, giver);
+        Value result;
+        try {
+            result = callFunction(owner, entry.functionName, {Value(handlerArg)});
+        } catch (...) {
+            verbStack_.pop_back();
+            throw;
+        }
+        verbStack_.pop_back();
+
+        if (isTruthy(result)) return true;
+    }
+    return false;
+}
+
 Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
               std::vector<Value> args, const std::shared_ptr<LpcObject>& obj) {
     evalCost_ = 0;
@@ -387,7 +580,12 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
     // ObjectFrameGuard's own comment for the real-semantics citation.
     ObjectFrameGuard objectFrameGuard(callStack_, objectChangeStack_, obj);
 
-    std::vector<Value> locals(fn.numLocals);
+    // Real int64_t 0 per slot, not monostate -- see LpcObject.cpp's own
+    // comment on variables_'s identical initialization for the citation;
+    // a declared-but-not-yet-assigned local reads as 0 in real LPC too,
+    // and the args loop below overwrites whichever slots are actually
+    // parameters immediately after anyway.
+    std::vector<Value> locals(fn.numLocals, Value(int64_t{0}));
     for (size_t i = 0; i < args.size() && i < locals.size(); ++i) {
         locals[i] = std::move(args[i]);
     }
@@ -775,8 +973,36 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     } else {
                         localStack.emplace_back(Value(static_cast<int64_t>(lv + rv)));
                     }
+                } else if (std::holds_alternative<std::shared_ptr<Mapping>>(lhs.data) &&
+                           std::holds_alternative<std::shared_ptr<Mapping>>(rhs.data)) {
+                    // real LPC "m1 + m2": union of both mappings, keys
+                    // from m2 winning on conflict (grammar.y/mapping.c's
+                    // own add_mapping() semantics -- confirmed by
+                    // reference source, matches every real LPC driver's
+                    // documented "+" on two mappings).
+                    auto leftMap = std::get<std::shared_ptr<Mapping>>(lhs.data);
+                    auto rightMap = std::get<std::shared_ptr<Mapping>>(rhs.data);
+                    auto result = std::make_shared<Mapping>();
+                    if (leftMap) result->entries = leftMap->entries;
+                    if (rightMap) {
+                        for (const auto& entry : rightMap->entries) {
+                            bool replaced = false;
+                            for (auto& existing : result->entries) {
+                                if (valuesEqual(existing.first, entry.first)) {
+                                    existing.second = entry.second;
+                                    replaced = true;
+                                    break;
+                                }
+                            }
+                            if (!replaced) result->entries.push_back(entry);
+                        }
+                    }
+                    localStack.emplace_back(Value(result));
                 } else {
-                    throw LpcRuntimeError("Add: unsupported operand types");
+                    throw LpcRuntimeError(
+                        "Add: unsupported operand types (lhs kind " +
+                        std::to_string(lhs.data.index()) + ", rhs kind " +
+                        std::to_string(rhs.data.index()) + ")");
                 }
                 ++ip;
                 break;
@@ -1009,6 +1235,30 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 localStack.erase(localStack.end() - argc, localStack.end());
 
                 FunctionLookupResult found = findFunctionInChain(program, funcName);
+                if (!found.program && &program != &obj->program()) {
+                    // program is whichever file's own bytecode is
+                    // currently executing, not necessarily obj's own
+                    // most-derived program -- e.g. std/user/nmsh.c's own
+                    // process_input() calling the bare name
+                    // "query_client", a function nmsh.c neither defines
+                    // nor inherits itself, only std/user.c (which
+                    // inherits nmsh.c) does. Real LPC compiles each file
+                    // independently and has no way to know at nmsh.c's
+                    // own compile time that some future child will
+                    // provide it, so a call like this can only ever be
+                    // resolved at runtime, against whatever the actual
+                    // running object turns out to be -- confirmed live
+                    // needed (this exact call site). This fallback tries
+                    // exactly that, but only *after* the normal lexical-
+                    // scope search above has already failed: a file's
+                    // own internal calls must still resolve to its own
+                    // (or its own ancestors') definitions first, real
+                    // LPC does not virtually dispatch a parent's
+                    // internal self-calls to a child's override, so this
+                    // must never run before the search above, only as a
+                    // last resort when that search found nothing at all.
+                    found = findFunctionInChain(obj->program(), funcName);
+                }
                 if (found.program) {
                     Value result = run(*found.program, *found.fn, std::move(callArgs), obj);
                     localStack.push_back(std::move(result));
@@ -1214,7 +1464,15 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
         // run() call (a caller's own active catch frame if this was a
         // nested call, or the outermost ObjectManager/Server.cpp safety
         // net if not -- see run()'s own comment above catchFrames).
-        if (catchFrames.empty()) throw;
+        // Tagging the file and function here (once, at the innermost
+        // frame that had no catch() of its own to absorb it) matches
+        // this driver's existing convention of naming the file in every
+        // other [object]-prefixed diagnostic -- without it, an uncaught
+        // error several calls deep only ever reports its own generic
+        // message, not where it actually happened.
+        if (catchFrames.empty()) {
+            throw LpcRuntimeError(obj->filename() + "::" + fn.name + "(): " + e.what());
+        }
 
         // Unwind to the innermost still-active catch() (LIFO, matching
         // real FluffOS's own nested do_catch() call stack -- see

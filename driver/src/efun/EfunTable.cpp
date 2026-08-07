@@ -43,6 +43,30 @@ bool EfunTable::exists(const std::string& name) const {
 
 namespace {
 
+// Resolves real command_giver for the add_action()/enable_commands()
+// subsystem's own efuns (this_player(), add_action(), remove_action()):
+// VM::commandGiver()'s own explicit stack when one is active (set by
+// VM::moveObject()'s init()-calling sequence or VM::dispatchCommand()'s
+// own handler call), falling back to whichever connection is currently
+// driving this call otherwise -- e.g. code running from create()/
+// setup() during login/account creation, before any command has ever
+// been dispatched, which is exactly when this mudlib's own std/
+// living.c calls add_action("cmd_hook", "", 1) (via init_living(),
+// called directly from std/user.c's setup(), not through a driver-
+// invoked init() apply -- see STATUS.md's own recon notes). This lives
+// here, in the efun layer, rather than inside VM::commandGiver() itself,
+// because OutputContext is part of the "net" library, which "vm" cannot
+// depend on without creating a circular link (net already depends on
+// vm) -- see message()'s own comment for the same OutputContext access
+// pattern already established at this layer.
+std::shared_ptr<LpcObject> resolveCommandGiver(VM& vm) {
+    if (auto giver = vm.commandGiver()) return giver;
+    if (auto* conn = OutputContext::current()) {
+        if (auto bound = conn->boundObject()) return bound;
+    }
+    return nullptr;
+}
+
 // Recursive, self-delimiting save format used by the save_object()/
 // restore_object() efuns below -- see their own comment for why this
 // driver does not attempt to match real FluffOS's own on-disk save
@@ -696,6 +720,25 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(isMap ? 1 : 0));
     });
 
+    // int undefinedp(mixed) / int nullp(mixed) -- real f__undefinedp():
+    // true only for real FluffOS's distinct "T_UNDEFINED" zero subtype
+    // (a failed lookup/uninitialized value), never for a plain literal
+    // 0 or any other type (func_spec.cpp: "int undefinedp(mixed); int
+    // nullp undefinedp(mixed);" -- nullp is a real alias, not a
+    // separate efun). This driver has no int-subtype distinction the
+    // way real FluffOS does; monostate (this driver's own "no value"
+    // state -- what an undefined function call returns, and currently
+    // what an object variable reads as before its first assignment) is
+    // the closest analog, so that is what this checks instead of a
+    // T_NUMBER subtype flag. Surfaced live: daemon/multi.c's own
+    // query_prevent_login().
+    auto undefinedpImpl = [](VM&, std::vector<Value>& args) -> Value {
+        bool isUndefined = !args.empty() && std::holds_alternative<std::monostate>(args[0].data);
+        return Value(static_cast<int64_t>(isUndefined ? 1 : 0));
+    };
+    t.registerEfun("undefinedp", undefinedpImpl);
+    t.registerEfun("nullp", undefinedpImpl);
+
     // int to_int(string | float | int) -- efuns_main.c's f__to_int(),
     // confirmed against the reference source directly (func_spec.cpp:
     // "int to_int _to_int(string | float | int | buffer);"). Surfaced as
@@ -949,6 +992,242 @@ void registerCoreEfuns() {
     });
     t.registerEfun("load_object", [findObjectImpl](VM& vm, std::vector<Value>& args) -> Value {
         return findObjectImpl(vm, args, true);
+    });
+
+    // ------------------------------------------------------------------
+    // add_action()/enable_commands() command dispatch subsystem.
+    // Confirmed against fluffos-2.9-ds2.08/add_action.c directly (not
+    // guessed) and against real usage across this mudlib -- see
+    // STATUS.md's own "add_action/enable_commands command dispatch"
+    // section for the full recon/design writeup and citations.
+    // ------------------------------------------------------------------
+
+    // object environment(void | object) -- real func_spec.cpp signature.
+    t.registerEfun("environment", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> target;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            target = vm.currentObject();
+        }
+        if (!target) return Value{};
+        auto env = target->environment().lock();
+        if (!env) return Value{};
+        return Value(env);
+    });
+
+    // void move_object(object | string dest) -- moves current_object.
+    // The string-path overload resolves the same way real move_object()
+    // does (find_object(), which auto-compiles on a miss -- confirmed
+    // against simulate.c's own find_object() body, see the find_object
+    // efun's own comment just above), matching std/Object.c's own
+    // move()'s "if(!(ob = find_object(dest))) ..." fallback exactly.
+    t.registerEfun("move_object", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("move_object: expected a destination argument");
+        auto item = vm.currentObject();
+        if (!item) return Value{};
+        std::shared_ptr<LpcObject> dest;
+        if (std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            dest = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else if (std::holds_alternative<std::string>(args[0].data)) {
+            dest = vm.findObject(std::get<std::string>(args[0].data));
+        }
+        if (!dest) throw LpcRuntimeError("move_object: destination not found");
+        vm.moveObject(item, dest);
+        return Value{};
+    });
+
+    // void enable_commands() / void disable_commands() -- always act on
+    // current_object (real semantics: neither takes an argument).
+    t.registerEfun("enable_commands", [](VM& vm, std::vector<Value>&) -> Value {
+        if (auto ob = vm.currentObject()) ob->setCommandsEnabled(true);
+        return Value{};
+    });
+    t.registerEfun("disable_commands", [](VM& vm, std::vector<Value>&) -> Value {
+        if (auto ob = vm.currentObject()) ob->setCommandsEnabled(false);
+        return Value{};
+    });
+
+    // void add_action(string fun, string | string* cmd, void | int flag)
+    // -- registers fun (a function on current_object) onto
+    // command_giver's action table under cmd (or once per element, for
+    // the array form -- confirmed real usage: cmds/skills/_mist.c's own
+    // "add_action(\"checkdest\", ({ \"go\", \"enter\" }))", and
+    // add_action.c's own f_add_action() array-handling loop). Only the
+    // string-function-name form is implemented, not the real signature's
+    // "string | function" alternative -- confirmed by grepping every
+    // "add_action((:" call site in this mudlib: there are none, every
+    // real call passes a bare function name.
+    //
+    // real add_action() also requires current_object to be "near"
+    // command_giver (add_action.c's own check: current_object *is*
+    // command_giver, or is in its inventory, or shares its environment,
+    // or *is* its environment) -- implemented the same way, silently
+    // declining rather than erroring on a mismatch ("No need for an
+    // error, they know what they did wrong," the reference source's own
+    // comment).
+    t.registerEfun("add_action", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2) throw LpcRuntimeError("add_action: expected (function, verb) arguments");
+        if (!std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("add_action: only a string function name is supported");
+        }
+        const std::string& fn = std::get<std::string>(args[0].data);
+
+        auto ob = vm.currentObject();
+        auto giver = resolveCommandGiver(vm);
+        if (!ob || !giver) return Value{};
+        bool near = (ob == giver) ||
+            (ob->environment().lock() == giver) ||
+            (giver->environment().lock() == ob) ||
+            (ob->environment().lock() == giver->environment().lock() && ob->environment().lock());
+        if (!near) return Value{};
+
+        int flag = 0;
+        if (args.size() > 2 && std::holds_alternative<int64_t>(args[2].data)) {
+            flag = static_cast<int>(std::get<int64_t>(args[2].data)) & 3;
+        }
+
+        std::vector<std::string> verbs;
+        if (std::holds_alternative<std::string>(args[1].data)) {
+            verbs.push_back(std::get<std::string>(args[1].data));
+        } else if (auto* arr = std::get_if<std::shared_ptr<Array>>(&args[1].data)) {
+            if (*arr) {
+                for (const auto& v : (*arr)->items) {
+                    if (std::holds_alternative<std::string>(v.data)) {
+                        verbs.push_back(std::get<std::string>(v.data));
+                    }
+                }
+            }
+        } else {
+            throw LpcRuntimeError("add_action: expected a string or string array verb argument");
+        }
+
+        for (auto& verb : verbs) {
+            LpcObject::ActionEntry entry;
+            entry.verb = verb;
+            entry.functionName = fn;
+            entry.owner = ob;
+            entry.flag = flag;
+            giver->addAction(std::move(entry));
+        }
+        return Value{};
+    });
+
+    // int remove_action(string act, string verb) -- real signature takes
+    // no object argument; it always targets command_giver (or
+    // current_object if no command_giver is set, add_action.c's own
+    // fallback), removing current_object's own registration of it.
+    t.registerEfun("remove_action", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("remove_action: expected (string act, string verb) arguments");
+        }
+        auto giver = resolveCommandGiver(vm);
+        if (!giver) giver = vm.currentObject();
+        auto ob = vm.currentObject();
+        if (!giver || !ob) return Value(static_cast<int64_t>(0));
+        bool removed = giver->removeAction(ob, std::get<std::string>(args[0].data),
+                                            std::get<std::string>(args[1].data));
+        return Value(static_cast<int64_t>(removed ? 1 : 0));
+    });
+
+    // string query_verb() -- the full typed first word of the line
+    // currently being dispatched (real semantics, even for a
+    // V_SHORT/V_NOSPACE partial match -- see VM::dispatchCommand()).
+    // Returns 0 (real LPC's "no current command" result), not "", when
+    // nothing is being dispatched -- confirmed against real query_verb()
+    // returning 0 outside of command context, not an empty string, which
+    // matters for code that tests "if(query_verb())" rather than
+    // comparing against a specific string.
+    t.registerEfun("query_verb", [](VM& vm, std::vector<Value>&) -> Value {
+        std::string verb = vm.currentVerb();
+        if (verb.empty()) return Value{};
+        return Value(verb);
+    });
+
+    // int exec(object new_ob, object old_ob) -- real replace_interactive()
+    // (efuns_main.c's f_exec(): "replace_interactive((sp-1)->u.ob,
+    // sp->u.ob)"): rebinds the interactive connection currently driving
+    // old_ob over to new_ob instead. Confirmed the missing piece for a
+    // real login to ever actually reach the created player object:
+    // secure/std/login.c's own account-creation flow calls
+    // "exec(__Player, this_object())" once the new character exists, and
+    // without this efun the connection stays bound to the login object
+    // forever, so the player object's own create()/setup() runs but the
+    // player's own typed input never reaches it. Implemented via
+    // Connection::attach(), which already does exactly this rebind (and
+    // the matching InteractiveRegistry update) for the one real
+    // connection this driver tracks per socket -- old_ob is not looked
+    // up independently, it is assumed to be whichever connection is
+    // currently driving this very call (OutputContext::current()), which
+    // matches every real call site in this mudlib (exec() is always
+    // called by old_ob itself, mid-command, never by an unrelated third
+    // object). Any pending input_to() registration on the old object is
+    // dropped rather than carried over -- real login.c's own flow always
+    // finishes its own input_to chain before calling exec(), and a
+    // handler scoped to the login object's own dialogue should not fire
+    // against the new player's first typed line.
+    t.registerEfun("exec", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            return Value(static_cast<int64_t>(0));
+        }
+        auto newOb = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!newOb) return Value(static_cast<int64_t>(0));
+        auto* conn = OutputContext::current();
+        if (!conn) return Value(static_cast<int64_t>(0));
+        conn->takePendingInputTo();
+        conn->attach(newOb);
+        return Value(static_cast<int64_t>(1));
+    });
+
+    // object this_player(void | int) -- real command_giver, falling back
+    // to the connection currently driving the call when no command is
+    // actively being dispatched (e.g. code running from create()/setup()
+    // during login, before this_player() has ever been set by a real
+    // dispatched command) -- the same OutputContext::current() fallback
+    // message() already uses for the analogous "which connection is this
+    // running for" question. Only the default (this_player(0)) form is
+    // implemented; the this_interactive()/this_user() aliases
+    // (this_player(1)) are not, since nothing on this driver's confirmed
+    // path calls this_player() with an argument.
+    t.registerEfun("this_player", [](VM& vm, std::vector<Value>&) -> Value {
+        if (auto giver = resolveCommandGiver(vm)) return Value(giver);
+        return Value{};
+    });
+
+    // string query_privs(object default: this_object()) / void
+    // set_privs(object, int | string) -- real object_t::privs (see
+    // LpcObject.hpp's own comment). Surfaced live compiling/running
+    // std/living.c and std/money.c, both of which call query_privs()
+    // unconditionally on log-relevant lines (not gated behind any
+    // feature this driver's own boot/login path could otherwise skip).
+    // set_privs()'s second argument clears privs back to unset for any
+    // non-string value (real f_set_privs(): "if (!(sp->type == T_STRING))
+    // ob->privs = NULL"), matching the T_NUMBER-vs-T_STRING branch
+    // exactly rather than just treating a falsy second argument as
+    // "clear".
+    t.registerEfun("query_privs", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> target;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            target = vm.currentObject();
+        }
+        if (!target || !target->privs().has_value()) return Value{};
+        return Value(*target->privs());
+    });
+    t.registerEfun("set_privs", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("set_privs: expected an object first argument");
+        }
+        auto target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!target) return Value{};
+        if (args.size() > 1 && std::holds_alternative<std::string>(args[1].data)) {
+            target->setPrivs(std::get<std::string>(args[1].data));
+        } else {
+            target->setPrivs(std::nullopt);
+        }
+        return Value{};
     });
 
     // int time() -- seconds since the Unix epoch, same as the real efun.

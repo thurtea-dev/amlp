@@ -1,24 +1,30 @@
 # STATUS
 
-Snapshot as of the slice that finished implementing the general
-closure/function-pointer forms the previous slice found and deferred
-(`(: comma_expr :)` inline lambdas, bare string-constant closures, and
-`(*fp)(args)` dereference-call syntax), then kept working straight
-through `std/user.c`'s entire inherit chain until it actually compiled
-and a live account could reach `create()`. That pass surfaced and fixed
-several more small, well-understood parser/codegen gaps along the way
-(indexed `++`/`--`, indexed assignment used as a sub-expression rather
-than a statement, `private` object-variable scoping across an inherit
-chain, the `to_int()` efun) before landing on the next real blocker:
-the entire `add_action`/`enable_commands` command-dispatch subsystem is
-unimplemented (see "The next real blocker" below) -- an architecturally
-significant chunk of work, not a routine gap, flagged rather than
-started speculatively.
+Snapshot as of the slice that designed and implemented the
+`add_action()`/`enable_commands()` command-dispatch subsystem (real
+`command_giver`, per-object action tables, `move_object()`/`init()`
+propagation, verb matching including the `V_SHORT` catch-all form) from
+scratch, grounded in `fluffos-2.9-ds2.08/add_action.c` directly and this
+mudlib's own real `std/living.c`/`std/room/exits.c`/`std/room/senses.c`/
+`std/Object.c` usage. Confirmed live end to end: a fresh account now
+reaches `create()`, proceeds through account setup and the early
+chargen prompts, and the dispatch subsystem itself is confirmed
+reaching real handler functions (`cmd_hook`, `process_input`'s own
+callees) via the new mechanism. Along the way this pass also fixed a
+run of further real, confirmed gaps the deeper walk surfaced (object
+variable declaration-time initializers, `undefinedp()`/`nullp()`, a
+genuine cross-inherit function-resolution gap, and -- the most
+consequential -- object variables and locals defaulting to this
+driver's own "no value" sentinel instead of real LPC's actual `0`
+default, which had been silently wrong since early in the project).
+The next blocker (see "The next real blocker" below) is a still-
+undiagnosed issue in `std/user/nmsh.c`'s own history-buffer setup,
+unrelated to `add_action` itself.
 
 ## Working now
 
 - Clean build via `cmake -B build -S . && cmake --build build`.
-- `ctest --test-dir build` passes (229 unit test cases in one binary,
+- `ctest --test-dir build` passes (245 unit test cases in one binary,
   covering lexer, parser, codegen, and VM execution for every supported
   feature).
 - Driver boots, compiles and loads `secure/daemon/master.c`, runs its
@@ -783,7 +789,14 @@ All four are covered by new `ctest` cases (17 added this session, one
 per confirmed real shape plus the still-correctly-rejected range-index
 `++`/`--` case -- see `tests/test_lexer.cpp`).
 
-## The next real blocker: `add_action`/`enable_commands` command-dispatch subsystem is entirely unimplemented
+## `add_action`/`enable_commands` command-dispatch subsystem: closed, confirmed live
+
+(The original "next real blocker" writeup below is kept in full as the
+citation trail for why this was scoped as architecturally significant
+rather than a routine efun gap. See "The add_action/enable_commands
+command dispatch subsystem: recon, design, implementation" further down
+for what actually landed, the confirmed real-usage recon, and the
+design decisions made from it.)
 
 With every compile-time gap above fixed, `std/user.c` now compiles
 cleanly and a live account genuinely reaches `create()` on a real
@@ -821,13 +834,307 @@ path` on the next line typed) rather than a clean disconnect or retry
 prompt. Worth a small hardening pass once the real fix (`add_action`)
 lands, not urgent on its own.
 
+## The `add_action`/`enable_commands` command dispatch subsystem: recon, design, implementation
+
+### Step 1: recon (real usage across this mudlib, before designing anything)
+
+`add_action()` is called 384 times across this mudlib (excluding
+`doc/`). The real shapes found:
+
+- The overwhelming majority are the plain two-arg form,
+  `add_action("cmd_foo", "foo")` -- a bare function name plus an exact-
+  match verb string, e.g. every `cmds/mortal/_*.c` file's own `init()`.
+- A verb argument can be an **array of strings**, one function bound to
+  several verbs at once: `cmds/skills/_mist.c`'s own
+  `add_action("checkdest", ({ "go", "enter" }))`.
+- A three-arg **catch-all** form with an empty verb and flag 1:
+  `std/living.c`'s own `add_action("cmd_hook", "", 1)` (in
+  `init_living()`) and `secure/std/setter.c`'s own
+  `add_action("chargen_catch", "", 1)`. Per this project's own earlier-
+  recorded gotcha (`CLAUDE.md`'s "add_action catch-all gotcha"), flag 1
+  is `V_SHORT`: the bound function receives only the text *after* the
+  first word, and the real verb must be read back via `query_verb()`.
+
+Where `enable_commands()` is called relative to `add_action()`: **not**
+in the same place every time, and not always in an `init()` at all.
+`std/user.c`'s own `create()` calls it directly, unconditionally, once
+per player object. `std/living.c`'s own `init_living()` -- which calls
+`add_action("cmd_hook", "", 1)` -- is itself called directly from
+`std/user.c`'s `setup()`, as a plain function call, **not** through a
+driver-invoked `init()` apply. Real per-room/per-item action
+registration (`std/room/exits.c`, `std/room/senses.c`, `std/Object.c`)
+*does* use a genuine driver-invoked `init()` apply hook (confirmed:
+`std/room.c`'s own `void init() { container::init(); exits::init();
+senses::init(); }`).
+
+How verb dispatch is actually wired in this mudlib, confirmed by
+reading `std/living.c` directly rather than assuming the generic
+FluffOS default: **most player-typed mortal commands do not go through
+per-file `add_action()` registrations at all.** `std/living.c`'s own
+`cmd_hook(string cmd)` -- reached via the one catch-all registration
+above -- reads the real verb via `query_verb()`, looks it up through
+`daemon/command.c`'s own `find_cmd(verb, search_path)` (a directory-scan
+cache mapping bare verb names to the directories containing a matching
+`_<verb>.c` file), and if found, calls it directly via
+`call_other(file, "cmd_"+verb, cmd)` -- reaching the file's blueprint
+object directly, bypassing the standard per-object action table
+entirely for this category. The hundreds of individual
+`add_action("cmd_foo", "foo")` calls inside `cmds/mortal/_foo.c`'s own
+`init()` are therefore **not** what actually dispatches an ordinary
+player command in this mudlib's real, live design -- confirmed:
+`cmds/mortal/_look.c` has no `add_action()` or `init()` at all, it is a
+bare `cmd_look(string str)` function, reached only through
+`cmd_hook()`'s own `find_cmd()`/`call_other()` path. The *real* generic
+`add_action()` mechanism (a genuine per-object action table, refreshed
+by `init()` on movement) is what room exits, room senses (`hide`,
+`search`, `smell`, `listen`), `std/Object.c`'s own `read`, and
+`living.c`'s own `lock` verb and catch-all hook actually use.
+
+### Step 2: design (grounded in `fluffos-2.9-ds2.08/add_action.c` directly)
+
+- **Storage**: `LpcObject` gained `environment_`/`inventory_` (real
+  `object_t::super`/`contains`, simplified to a plain `weak_ptr`/
+  `vector<shared_ptr>` rather than FluffOS's intrusive `next_inv`
+  linked list -- this driver already uses that simplification
+  elsewhere, e.g. `InteractiveRegistry`), `commandsEnabled_` (real
+  `O_ENABLE_COMMANDS`), and `actions_`, a `vector<ActionEntry>` (real
+  `sentence_t` list) where each entry is `{verb, functionName,
+  owner (weak_ptr), flag}`. New registrations always prepend
+  (`addAction()`), matching `add_action.c`'s own literal comment:
+  `"adding to the top of the list doesn't harm anything"` --
+  `p->next = command_giver->sent; command_giver->sent = p;` -- so the
+  most-recently-registered entry is always checked first.
+- **When/how `init()` gets (re-)invoked**: `VM::moveObject(item, dest)`
+  (backing the new `move_object()` efun) ports the two legs of real
+  `setup_new_commands()` (`add_action.c`) this mudlib's own confirmed
+  usage actually needs: if `item` is command-enabled, `dest`'s own
+  `init()` runs with `item` as `command_giver` (a room handing its
+  verbs to the player who just entered); then, for every other
+  already-present object, each side's `init()` runs against the other
+  as `command_giver` if command-enabled, in the same order real
+  `setup_new_commands()` uses (matters for prepend-order priority). The
+  third leg (`dest` itself being command-enabled, i.e. being moved
+  *into* another living object rather than a room) was scoped out --
+  the reference source's own comment calls it "rare", and nothing on
+  this mudlib's confirmed movement path does it. `command_giver` itself
+  is a new explicit `VM` stack (`commandGiverStack_`, RAII-guarded via
+  `CommandGiverGuard`, mirroring real `save_command_giver()`/
+  `restore_command_giver()`), falling back to whichever connection is
+  currently driving the call (`OutputContext::current()`) when nothing
+  has explicitly set one -- needed because `std/living.c`'s own
+  `add_action("cmd_hook", "", 1)` runs as a *plain function call* from
+  `setup()`, not through a driver-invoked `init()` apply, so there is no
+  `moveObject()`-provided `command_giver` active at that point; real
+  `secure/std/login.c` confirms this is fine because its own
+  `exec_user()` calls `exec(__Player, this_object())` (rebinding the
+  connection to the new player) **before** calling `__Player->setup()`,
+  so the connection's own bound object already *is* the player by the
+  time `add_action()` runs.
+- **Dispatch**: `VM::dispatchCommand(giver, line)` (real
+  `parse_command()`/`user_parser()`) splits the line into its first
+  word (the verb) and the remainder, walks `giver->actions()` in
+  registration order (front = most recent = checked first), and for
+  each entry: flag 0 requires an exact verb match; flag 1/2 requires
+  `entry.verb` to be a leading-characters prefix of the typed verb (an
+  empty `entry.verb` trivially matches everything, covering the real
+  catch-all shape) -- `query_verb()` always returns the *full* typed
+  word, never just the matched prefix, matching real semantics exactly.
+  A handler that returns falsy does not stop the search (real
+  `add_action.c`'s own doc comment: "the parser will continue searching
+  for another command, until one returns true"); one entry's argument
+  is the plain remainder-of-line string, matching real LPC's own
+  argument-passing convention for a bound command function.
+- **The `enable_commands()` gate**: a plain boolean flag on
+  `LpcObject`, checked by `moveObject()` before treating an object as
+  eligible to have its own `init()` propagate actions, or to receive a
+  room/occupant's -- exactly real `O_ENABLE_COMMANDS`'s role.
+
+### Step 3: implementation
+
+New: `LpcObject::environment_`/`inventory_`/`commandsEnabled_`/
+`actions_` (`ActionEntry`, `addAction()`, `removeAction()`); `VM`'s
+`commandGiverStack_`/`verbStack_` plus `commandGiver()`/
+`pushCommandGiver()`/`popCommandGiver()`/`currentVerb()`/
+`moveObject()`/`dispatchCommand()`; new efuns `environment()`,
+`move_object()`, `enable_commands()`, `disable_commands()`,
+`add_action()`, `remove_action()`, `query_verb()`, `this_player()`.
+`Server::dispatchLine()` now calls `process_input()` first if defined
+(confirmed live needed: `std/user/nmsh.c`'s own real mud-shell/history/
+alias preprocessing) -- its return value decides what actually reaches
+`dispatchCommand()`, matching real `comm.c`'s own three-way branch on
+the apply's return type (string = dispatch that instead; truthy number
+= fully consumed, nothing dispatches; anything else = dispatch the
+original line unchanged) -- rather than the previous silent no-op
+fallback.
+
+Two further gaps had to be fixed along the way, both required for
+`std/user.c` to actually reach a live account:
+
+- **`exec(object new_ob, object old_ob)`** (real `replace_interactive()`)
+  was completely missing. Without it, `secure/std/login.c`'s own
+  `exec(__Player, this_object())` could never rebind the connection
+  from the login object to the actual player, so the player's own
+  `create()`/`setup()` would run but the connection would stay bound to
+  the login object forever. Implemented via `Connection::attach()`
+  (already existed for the initial login-object bind), targeting
+  whichever connection is currently driving the call
+  (`OutputContext::current()`) -- matches every real call site in this
+  mudlib, `exec()` is always called by the object currently holding the
+  connection, never by an unrelated third object.
+- **`query_privs(object default: this_object())` /
+  `set_privs(object, int|string)`** (real `object_t::privs`) were
+  missing, surfaced by `std/living.c` and `std/money.c` calling
+  `query_privs()` unconditionally on log-relevant lines. Implemented as
+  a plain `std::optional<std::string>` field on `LpcObject`.
+
+Walking further into the live account-creation/chargen flow (past
+`add_action`/`enable_commands` themselves) surfaced four more real,
+confirmed gaps, fixed the same way as always -- real usage first,
+reference source second, implementation third, tests alongside:
+
+- **Object variable declaration-time initializers**
+  (`secure/daemon/wiztools.c`'s own `string *REISSUED_TOOLS = ({ ...
+  });`, a file with no `create()` at all). Previously rejected with an
+  explicit `NotImplementedError` since nothing on the confirmed path
+  used the shape -- now a real gap. `ObjectVarDecl` gained an
+  `initializer` field; `CodeGen::generate()` synthesizes a
+  `"$objvarinit"` function (same synthesized-name convention as the
+  lambda/private-slot mechanisms) that assigns every initialized
+  variable; `ObjectManager::runObjectVarInitializers()` runs it,
+  parent-before-child across the whole inherit chain, immediately
+  before `"create"` on every new instance -- via a new
+  `VM::callFunctionInProgram()` that targets one exact program level
+  directly (not the normal tiered lookup), since every level uses the
+  same fixed synthesized name and the normal lookup would only ever
+  reach one level's copy.
+- **`undefinedp(mixed)` / `nullp(mixed)`** (real `f__undefinedp()`),
+  surfaced by `daemon/multi.c`'s own `query_prevent_login()`. This
+  driver has no int-subtype distinction the way real FluffOS's
+  `T_UNDEFINED` is; its own `monostate` ("no value" -- what an
+  undefined function call returns) is the closest analog, so that is
+  what these check instead of a number subtype flag.
+- **A genuine cross-inherit function-resolution gap**: `OpCode::Call`
+  resolved a bare name only against the *currently executing file's*
+  own program and its own inherited chain, never against the object's
+  actual most-derived program. Real LPC compiles each file
+  independently and has no way to know at a parent's own compile time
+  that some future child will define a name it references -- such a
+  call can only resolve at runtime, against whatever the real running
+  object turns out to be. Surfaced live: `std/user/nmsh.c`'s own
+  `process_input()` calling the bare name `query_client`, a function
+  only `std/user.c` (which inherits `nmsh.c`) defines. Fixed with a
+  fallback: if the normal lexical-scope search (current file, then its
+  own ancestors) finds nothing, retry against `obj->program()` -- but
+  *only* as a last resort, after the lexical search has already failed,
+  specifically so a file's own internal self-calls keep resolving to
+  its own (or its own ancestors') definitions first; real LPC does not
+  virtually dispatch a parent's internal calls to a child's override.
+  Both directions are covered by dedicated tests
+  (`testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime`,
+  `testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride`).
+- **Object variables and locals defaulted to this driver's own
+  `monostate` ("no value") instead of real LPC's actual default, the
+  integer `0`.** This one is the most consequential of the four: real
+  LPC has no separate "unset" state distinct from `0` for an ordinary
+  declared variable (there is no equivalent of this driver's own
+  `monostate` at that level, only at specific driver-internal "no
+  value" sentinels this codebase already used it for deliberately,
+  e.g. an efun explicitly returning "nothing found"). This had been a
+  documented but unverified assumption since early in the project (both
+  `LpcObject.cpp` and a `test_lexer.cpp` test's own comments asserted
+  monostate "matches how ... reads as 0" without it ever having been
+  exercised against real arithmetic) -- it does not: monostate fails
+  every arithmetic opcode a real `0` would silently succeed at.
+  Surfaced live twice in a row before being fixed at the root:
+  `std/Object.c`'s own `query_name()` reading an unset `__TrueName`
+  (string concatenation), and `std/user/nmsh.c`'s own
+  `add_history_cmd()` doing `++__CmdNumber` on an unset counter.
+  `LpcObject`'s `variables_` and `VM::run()`'s per-call `locals` now
+  both fill with a real `int64_t 0` per slot instead of a default-
+  constructed `Value{}`.
+
+Also added along the way: uncaught `LpcRuntimeError`s are now tagged
+with `file::function(): ` at the innermost frame that had no `catch()`
+of its own to absorb them, matching this driver's existing convention
+of naming the file in every other `[object]`-prefixed diagnostic --
+this is what made diagnosing several of the gaps above tractable at
+all, and is worth keeping regardless.
+
+All of the above is covered by 24 new `ctest` cases (`environment()`/
+`move_object()` linking, the `enable_commands()` gate, exact and
+catch-all verb dispatch with correct argument-splitting, the
+falsy-return-keeps-searching rule, `this_player()`/`query_verb()`
+during dispatch, `query_privs()`/`set_privs()`, object variable
+initializers including the parent-before-child ordering, `undefinedp`/
+`nullp`, and both directions of the cross-inherit call-resolution fix).
+
+### Live test results
+
+Confirmed live, in order, all in one continuous account-creation and
+chargen session: account name entry and confirmation, password set and
+confirmed, gender selection, display name formatting, email and real-
+name prompts (both optional, skipped), the first-admin bootstrap offer
+(confirmed reachable both accepting and declining it), and zone
+selection. `enable_commands()`, `add_action()`, `move_object()`,
+`exec()`, and the `process_input()`/`dispatchCommand()` pipeline all
+fired correctly along this path with no errors of their own --
+every error hit past that point was a *different*, specific,
+individually-diagnosed-and-fixed gap (`query_privs`, `undefinedp`, the
+cross-inherit call bug, the object-variable-default bug), not the
+dispatch subsystem itself. The transcript never reached a state where a
+player could type `look` at a live prompt, because chargen itself does
+not reach a real room before hitting the next blocker below -- but
+every piece of the dispatch subsystem that *is* exercised along this
+path (the catch-all `cmd_hook` registration actually firing,
+`process_input()` actually being consulted and its return value
+actually feeding into dispatch, `this_player()` resolving correctly
+mid-dispatch) is confirmed working, and the 24 new unit tests directly
+exercise the exact real shapes (`std/living.c`'s own catch-all,
+`std/room/exits.c`'s own movement registrations, the falsy-return
+fallthrough) end to end at the VM level independent of how far live
+chargen gets.
+
+## The next real blocker: `std/user/nmsh.c`'s history buffer never gets sized, cause not yet found
+
+Zone selection (`americas`) is accepted, then the next typed line
+(`roll`, the stats-roll step) throws inside `add_history_cmd()`:
+
+```
+__History[__HistoryTop = (++__CmdNumber-1) % __HistorySize] = str;
+```
+
+`__HistorySize` reads as `0` (`"Mod: modulo by zero"`), even though
+`nmsh.c`'s own `setup()` should have set it: `reset_history()` sets
+`__HistorySize = query_history_size()` (a plain constant, `10`), and is
+called from `nmsh::setup()`, itself called from `std/user.c`'s own
+`setup()` (`nmsh::setup();`), guarded only by
+`if(this_player() != this_object()) return;`. `this_object()` during a
+qualified `::` call is confirmed correctly threaded through
+(`OpCode::CallParent` passes the same `obj` unchanged, and the two
+existing `::`-call tests already covered this). `this_player()` should
+resolve via `command_giver`/`OutputContext` fallback to the same player
+object, since `exec()` already rebound the connection before `setup()`
+ever runs (confirmed by direct reading of `secure/std/login.c`'s own
+`exec_user()`) -- so the guard *should* evaluate false and let
+`reset_history()` run. It evidently does not, or something resets
+`__HistorySize` back to `0` afterward, and this has not been root-
+caused yet. Not touched further this slice, per this project's own
+standing rule against implementing anything speculative -- flagged
+here with the full reasoning trail instead of guessed at. This is
+unrelated to `add_action`/`enable_commands` itself: everything that
+subsystem is actually responsible for is confirmed working (see "Live
+test results" above); this is a separate bug in the mud-shell/history
+subsystem (or possibly a `this_player()`/`command_giver` timing subtlety
+this specific call site exposes) that happens to sit on the same live
+chargen path.
+
 ## Known stubs / scope limitations (intentional, not bugs)
 
 - Object-bound closures (`(: obj_expr, "funcname" :)`), bare string-
   constant closures (`(: "literal" :)`), and the `(*fp)(args)`
-  dereference-call syntax are not implemented -- see the next real
-  blocker above. Only the bare-name-with-bound-args closure form
-  (`(: name, args... :)`) exists.
+  dereference-call syntax are all implemented now (see "Closure/
+  function-pointer forms completed" above) -- this bullet is
+  historical, kept for the git-blame trail rather than deleted.
 - `ApplyTable::isKnownApply()` recognizes several applies (`heart_beat`,
   `disconnect`, etc.) that the driver never actually calls yet.
 - `Scheduler::tickHeartbeats()` / `tickCallOuts()` are empty function

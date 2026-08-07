@@ -21,6 +21,21 @@ public:
 
     Value applyMaster(const std::string& applyName, std::vector<Value> args);
 
+    // Calls functionName only if it is declared *directly* in program
+    // (never searching program's own inheritedPrograms the way
+    // callFunction()'s tiered findFunctionInChain() does) -- needed for
+    // ObjectManager::runObjectVarInitializers(), which must run each
+    // inherit-chain level's own synthesized "$objvarinit" separately
+    // (real object-variable-initializer semantics: a parent's own
+    // initializers run too, not just a child's, and every level uses the
+    // same fixed synthesized name -- see CodeGen::generate()'s own
+    // comment -- so the normal shadowing-aware lookup would only ever
+    // reach one level's copy). Silently returns void if functionName is
+    // not declared at this exact level, matching callFunction()'s own
+    // "undefined function is not an error" convention.
+    Value callFunctionInProgram(const std::shared_ptr<LpcObject>& obj, const CompiledProgram& program,
+                                 const std::string& functionName, std::vector<Value> args);
+
     std::shared_ptr<LpcObject> cloneObject(const std::string& filename);
 
     // real destruct(): removes obj from the object table (thin wrapper
@@ -121,6 +136,49 @@ public:
     // paths never depend on the driver's own current working directory.
     std::string resolveMudlibPath(const std::string& lpcPath) const;
 
+    // real command_giver (comm.h): the object whose typed input is
+    // currently being parsed against an action table, and the object
+    // add_action() registers onto. Tracked as an explicit stack (rather
+    // than currentObject()'s callStack_) because it changes on a
+    // different, coarser rhythm than current_object -- it is set once
+    // per dispatched command line, and separately save/restored around
+    // each leg of moveObject()'s init()-calling sequence (real
+    // save_command_giver()/restore_command_giver(), add_action.c), not
+    // pushed on every function call the way current_object is. Returns
+    // null if nothing has set one (e.g. add_action() called outside any
+    // dispatch or moveObject() context -- real add_action() silently
+    // no-ops in that case too, see EfunTable.cpp's own comment).
+    std::shared_ptr<LpcObject> commandGiver() const;
+    void pushCommandGiver(const std::shared_ptr<LpcObject>& ob);
+    void popCommandGiver();
+
+    // real query_verb(): the first word of the line currently being
+    // dispatched against an action table, exactly as typed (not the
+    // matched verb prefix -- see dispatchCommand()'s own comment on
+    // V_SHORT). Empty when nothing is currently being dispatched.
+    std::string currentVerb() const;
+
+    // real setup_new_commands() (add_action.c), the mechanism that
+    // (re)builds the relevant objects' action tables whenever something
+    // moves. Called by the move_object() efun with item = the object
+    // being moved (current_object at the point of the efun call) and
+    // dest = its new environment. See VM.cpp's own comment for exactly
+    // which of real setup_new_commands()'s three visitation legs this
+    // implements and why the rest were scoped out.
+    void moveObject(const std::shared_ptr<LpcObject>& item, const std::shared_ptr<LpcObject>& dest);
+
+    // real parse_command()/user_parser() (add_action.c): matches line's
+    // first word against giver's currently-registered action table
+    // (built by the moveObject() calls above, not rebuilt here) and
+    // calls the first matching handler that returns truthy, trying
+    // further matches if one returns falsy ("the parser will continue
+    // searching for another command", add_action.c's own doc comment).
+    // Returns true if any handler ran and returned truthy (a command
+    // was actually handled), false otherwise (no match, or every match
+    // declined) -- Server::dispatchLine uses this to decide whether to
+    // fall back to a "what?" style message.
+    bool dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::string& line);
+
 private:
     Value run(const CompiledProgram& program, const FunctionEntry& fn,
               std::vector<Value> args, const std::shared_ptr<LpcObject>& obj);
@@ -136,6 +194,13 @@ private:
     // last -- see previousObject()/allPreviousObjects() and run()'s own
     // comment on how an object change is detected.
     std::vector<std::shared_ptr<LpcObject>> objectChangeStack_;
+    // See commandGiver()/pushCommandGiver()/popCommandGiver().
+    std::vector<std::shared_ptr<LpcObject>> commandGiverStack_;
+    // See currentVerb(); pushed/popped alongside dispatchCommand()'s own
+    // handler calls, a separate stack from commandGiverStack_ since a
+    // command() efun call (not yet implemented) would need to nest a
+    // new verb without necessarily changing the command_giver.
+    std::vector<std::string> verbStack_;
 };
 
 } // namespace lpcdriver

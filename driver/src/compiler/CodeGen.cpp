@@ -937,6 +937,13 @@ CompiledProgram CodeGen::generate(const Program& program,
     // functions that reference them does not matter (this driver already
     // fully separates parsing from codegen, unlike a single-pass real
     // LPC compiler, so this is a deliberate, harmless simplification).
+    // (slot, initializer expr) for every object var declared with a
+    // "= expr" initializer, collected here and compiled into a
+    // synthesized "$objvarinit" function below -- see this function's
+    // own comment further down for why a dedicated function is needed
+    // rather than just running these inline right here.
+    std::vector<std::pair<int, const AstNode*>> pendingVarInitializers;
+
     for (const auto& varDecl : program.objectVars) {
         if (objectVars_.count(varDecl->name)) {
             throw LpcRuntimeError(
@@ -961,9 +968,50 @@ CompiledProgram CodeGen::generate(const Program& program,
         objectVars_[varDecl->name] = slot;
         result.objectVarNames.push_back(
             varDecl->isPrivate ? "$private#" + std::to_string(slot) : varDecl->name);
+        if (varDecl->initializer) {
+            pendingVarInitializers.emplace_back(slot, varDecl->initializer.get());
+        }
     }
 
     result.inherits = program.inherits;
+
+    // "type name = expr;" object variable initializers (see Ast.hpp's
+    // ObjectVarDecl comment) have no dedicated apply real LPC calls for
+    // them -- they run as part of the object's own implicit
+    // initialization, before create(). This driver makes that explicit:
+    // a synthesized "$objvarinit" function (a name no real LPC
+    // identifier can equal, same convention as the lambda/private-slot
+    // synthesized names elsewhere in this file) assigns each one, and
+    // ObjectManager calls it (walking the inherit chain parent-first)
+    // immediately before "create" on every new instance -- see
+    // ObjectManager::runObjectVarInitializers(). Built via the same
+    // per-function reset/entryPoint/FunctionEntry pattern the real
+    // function-compilation loop below uses, so an initializer expression
+    // containing its own closure literal ("(: ... :)") still gets its
+    // pending lambda drained correctly.
+    if (!pendingVarInitializers.empty()) {
+        locals_.clear();
+        nextLocalSlot_ = 0;
+        loopStack_.clear();
+        foreachCounter_ = 0;
+        switchCounter_ = 0;
+        indexAssignCounter_ = 0;
+
+        FunctionEntry entry;
+        entry.name = "$objvarinit";
+        entry.entryPoint = static_cast<uint32_t>(result.code.size());
+        entry.numArgs = 0;
+
+        for (const auto& [slot, initExpr] : pendingVarInitializers) {
+            emitExpr(*initExpr);
+            result.code.push_back(Instruction{OpCode::StoreObjectVar, slot, 0});
+        }
+        result.code.push_back(Instruction{OpCode::Return, 0, 0});
+
+        entry.numLocals = static_cast<uint8_t>(nextLocalSlot_);
+        result.functions.push_back(entry);
+        emitPendingLambdas();
+    }
 
     for (const auto& fn : program.functions) {
         // Prototype-only declarations (e.g. "void create();" in a header)

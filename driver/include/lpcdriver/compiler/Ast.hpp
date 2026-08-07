@@ -403,6 +403,17 @@ struct ObjectVarDecl : AstNode {
     // own code (ordinary resolveVariable() lookups here still use it)
     // while staying invisible to, and non-collidable with, any child.
     bool isPrivate = false;
+    // "type name = expr;" -- real, standard LPC (confirmed against the
+    // FluffOS reference driver's grammar), needed live by secure/daemon/
+    // wiztools.c's own "string *REISSUED_TOOLS = ({ ... });". Evaluated
+    // once per object instance, before create() runs (there is no
+    // dedicated grammar-level "initializer" production in real LPC;
+    // real compilers thread this into the object's own implicit
+    // initialization sequence the same way this driver does -- see
+    // CodeGen::generate()'s own synthesized "$objvarinit" function and
+    // ObjectManager::runObjectVarInitializers()). Null when this
+    // variable has no initializer, the overwhelmingly common case.
+    AstPtr initializer;
 };
 
 struct Program : AstNode {
