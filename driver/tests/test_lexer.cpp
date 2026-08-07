@@ -2501,10 +2501,18 @@ static void testPrefixAndPostfixIncDecParseToIncDecExpr() {
     std::cout << "testPrefixAndPostfixIncDecParseToIncDecExpr OK\n";
 }
 
-static void testPostfixIncDecOnNonVariableTargetThrows() {
+// "arr[0]++" is a real, supported indexed target (see Ast.hpp's
+// IncDecExpr comment; confirmed live against std/living.c's own
+// "healing[\"intox\"]--"), so this no longer belongs in a "throws" test
+// -- see testPostfixIncDecOnIndexedTargetParsesToIndexedIncDecExpr and
+// testIndexedPostfixIncDecVmExecutionReturnsOldValueAndMutates below for
+// its own coverage. A range-index target ("arr[0..1]++") still is not a
+// real lvalue in LPC (matches real grammar.y's own restricted "lvalue"
+// nonterminal), so that is what still throws here.
+static void testPostfixIncDecOnRangeIndexTargetThrows() {
     std::string src =
         "void probe() {\n"
-        "    arr[0]++;\n"
+        "    arr[0..1]++;\n"
         "}\n";
     lpcdriver::Lexer lexer(src);
     lpcdriver::Parser parser(lexer.tokenize());
@@ -2517,7 +2525,66 @@ static void testPostfixIncDecOnNonVariableTargetThrows() {
     }
     assert(threw);
 
-    std::cout << "testPostfixIncDecOnNonVariableTargetThrows OK\n";
+    std::cout << "testPostfixIncDecOnRangeIndexTargetThrows OK\n";
+}
+
+static void testPostfixIncDecOnIndexedTargetParsesToIndexedIncDecExpr() {
+    std::string src =
+        "void probe() {\n"
+        "    healing[\"intox\"]--;\n"
+        "}\n";
+    lpcdriver::Lexer lexer(src);
+    lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    auto* stmt = dynamic_cast<lpcdriver::ExprStmt*>(body[0].get());
+    assert(stmt != nullptr);
+    auto* incDec = dynamic_cast<lpcdriver::IncDecExpr*>(stmt->expr.get());
+    assert(incDec != nullptr);
+    assert(incDec->prefix == false);
+    assert(incDec->op == lpcdriver::IncDecOp::Dec);
+    assert(incDec->name.empty());
+    assert(incDec->indexTarget != nullptr);
+    auto* target = dynamic_cast<lpcdriver::VarRefExpr*>(incDec->indexTarget.get());
+    assert(target != nullptr && target->name == "healing");
+    auto* key = dynamic_cast<lpcdriver::StringLiteral*>(incDec->indexKey.get());
+    assert(key != nullptr && key->value == "intox");
+
+    std::cout << "testPostfixIncDecOnIndexedTargetParsesToIndexedIncDecExpr OK\n";
+}
+
+static void testIndexedPostfixIncDecVmExecutionReturnsOldValueAndMutates() {
+    // Mirrors testPostfixIncrementVmExecutionReturnsOldValueAndMutates
+    // below, but on a mapping-indexed target -- std/living.c's own real
+    // shape ("healing[\"intox\"]--"), confirmed against the reference
+    // driver's grammar.y restricted "lvalue" nonterminal covering both
+    // a bare variable and an indexed target.
+    lpcdriver::Value result = runProbe(
+        "mapping m;\n"
+        "m = ([]);\n"
+        "m[\"x\"] = 5;\n"
+        "int y;\n"
+        "y = m[\"x\"]--;\n"
+        "return y * 100 + m[\"x\"];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 504); // y == 5 (old value), m["x"] == 4
+
+    std::cout << "testIndexedPostfixIncDecVmExecutionReturnsOldValueAndMutates OK\n";
+}
+
+static void testIndexedPrefixIncDecVmExecutionReturnsNewValueAndMutates() {
+    lpcdriver::Value result = runProbe(
+        "mapping m;\n"
+        "m = ([]);\n"
+        "m[\"x\"] = 5;\n"
+        "int y;\n"
+        "y = ++m[\"x\"];\n"
+        "return y * 100 + m[\"x\"];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 606); // y == 6 (new value), m["x"] == 6
+
+    std::cout << "testIndexedPrefixIncDecVmExecutionReturnsNewValueAndMutates OK\n";
 }
 
 static void testPrefixIncrementVmExecutionReturnsNewValueAndMutates() {
@@ -5210,6 +5277,332 @@ static void testCompoundIndexAssignOnArrayElement() {
     std::cout << "testCompoundIndexAssignOnArrayElement OK\n";
 }
 
+// ---------------------------------------------------------------------
+// Indexed assignment used as a sub-expression rather than a standalone
+// statement ("if(!(m[\"class\"] = cl)) ..."). Found live compiling
+// std/user/more.c's own line 20 -- see Ast.hpp's IndexAssignExpr
+// comment for why this needs its own AST node/codegen, distinct from
+// the statement-only IndexAssignStmt the tests above already cover.
+// ---------------------------------------------------------------------
+
+static void testIndexAssignAsSubExpressionParsesToIndexAssignExpr() {
+    std::string src =
+        "void probe(string cl) {\n"
+        "    mapping m;\n"
+        "    if(!(m[\"class\"] = cl)) m[\"class\"] = \"info\";\n"
+        "}\n";
+    lpcdriver::Lexer lexer(src);
+    lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    auto* ifStmt = dynamic_cast<lpcdriver::IfStmt*>(body[1].get());
+    assert(ifStmt != nullptr);
+    auto* notExpr = dynamic_cast<lpcdriver::UnaryExpr*>(ifStmt->condition.get());
+    assert(notExpr != nullptr && notExpr->op == lpcdriver::UnaryOp::Not);
+    auto* idxAssign = dynamic_cast<lpcdriver::IndexAssignExpr*>(notExpr->operand.get());
+    assert(idxAssign != nullptr);
+    assert(idxAssign->isCompound == false);
+    auto* target = dynamic_cast<lpcdriver::VarRefExpr*>(idxAssign->target.get());
+    assert(target != nullptr && target->name == "m");
+    auto* key = dynamic_cast<lpcdriver::StringLiteral*>(idxAssign->index.get());
+    assert(key != nullptr && key->value == "class");
+
+    std::cout << "testIndexAssignAsSubExpressionParsesToIndexAssignExpr OK\n";
+}
+
+static void testIndexAssignAsSubExpressionVmExecutionMatchesMoreCShape() {
+    // Mirrors std/user/more.c's own
+    // "if(!(__More[\"class\"] = cl)) __More[\"class\"] = \"info\";"
+    // exactly: a non-empty cl leaves the assigned value in place, and
+    // the assignment's own value (not 0/1) is what the "!" tests.
+    lpcdriver::Value result = runProbe(
+        "mapping m;\n"
+        "m = ([]);\n"
+        "string cl;\n"
+        "cl = \"combat\";\n"
+        "if(!(m[\"class\"] = cl)) m[\"class\"] = \"info\";\n"
+        "return m[\"class\"];\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "combat");
+
+    std::cout << "testIndexAssignAsSubExpressionVmExecutionMatchesMoreCShape OK\n";
+}
+
+static void testIndexAssignAsSubExpressionFallsThroughOnEmptyString() {
+    // An empty string is falsy in LPC, so "!(m[\"class\"] = cl)" is true
+    // and the fallback assignment runs, exactly like more.c's own
+    // "__More[\"class\"] = \"info\"" default when no class was passed.
+    lpcdriver::Value result = runProbe(
+        "mapping m;\n"
+        "m = ([]);\n"
+        "string cl;\n"
+        "cl = \"\";\n"
+        "if(!(m[\"class\"] = cl)) m[\"class\"] = \"info\";\n"
+        "return m[\"class\"];\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "info");
+
+    std::cout << "testIndexAssignAsSubExpressionFallsThroughOnEmptyString OK\n";
+}
+
+// ---------------------------------------------------------------------
+// "(: comma_expr :)" inline lambdas -- the general fallback grammar.y
+// keeps distinct from the bare-identifier closure literal form covered
+// above (see Ast.hpp's InlineLambdaExpr comment). Found live compiling
+// std/user/editor.c's own "(: previous_object(), \"abort\" :)" (line
+// 31) and "(: \"return_to_edit\" :)" (line 64).
+// ---------------------------------------------------------------------
+
+static void testInlineLambdaWithCallExpressionFirstOperandParsesAsInlineLambdaExpr() {
+    std::string src =
+        "void probe() {\n"
+        "    mixed f;\n"
+        "    f = (: previous_object(), \"abort\" :);\n"
+        "}\n";
+    lpcdriver::Lexer lexer(src);
+    lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    auto* assignStmt = dynamic_cast<lpcdriver::AssignStmt*>(body[1].get());
+    assert(assignStmt != nullptr);
+    auto* lambda = dynamic_cast<lpcdriver::InlineLambdaExpr*>(assignStmt->value.get());
+    assert(lambda != nullptr);
+    assert(lambda->bodyExprs.size() == 2);
+    auto* firstCall = dynamic_cast<lpcdriver::CallExpr*>(lambda->bodyExprs[0].get());
+    assert(firstCall != nullptr && firstCall->callee == "previous_object");
+    auto* secondStr = dynamic_cast<lpcdriver::StringLiteral*>(lambda->bodyExprs[1].get());
+    assert(secondStr != nullptr && secondStr->value == "abort");
+
+    std::cout << "testInlineLambdaWithCallExpressionFirstOperandParsesAsInlineLambdaExpr OK\n";
+}
+
+static void testInlineLambdaBareStringConstantParsesAsInlineLambdaExpr() {
+    std::string src =
+        "void probe() {\n"
+        "    mixed f;\n"
+        "    f = (: \"return_to_edit\" :);\n"
+        "}\n";
+    lpcdriver::Lexer lexer(src);
+    lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    auto* assignStmt = dynamic_cast<lpcdriver::AssignStmt*>(body[1].get());
+    assert(assignStmt != nullptr);
+    auto* lambda = dynamic_cast<lpcdriver::InlineLambdaExpr*>(assignStmt->value.get());
+    assert(lambda != nullptr);
+    assert(lambda->bodyExprs.size() == 1);
+    auto* str = dynamic_cast<lpcdriver::StringLiteral*>(lambda->bodyExprs[0].get());
+    assert(str != nullptr && str->value == "return_to_edit");
+
+    std::cout << "testInlineLambdaBareStringConstantParsesAsInlineLambdaExpr OK\n";
+}
+
+static void testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTime() {
+    // Confirms the grammar.y citation in Ast.hpp's InlineLambdaExpr
+    // comment: a body ending in a string constant really does just
+    // return that string when funcall()'d, it does not call a same-
+    // named method -- exactly std/user/editor.c's own real (if
+    // arguably surprising) behavior for "(: previous_object(),
+    // \"abort\" :)". Also confirms the body runs at call time, not
+    // construction time: side_effect is still 0 right after building
+    // the closure, and only becomes 1 once evaluate() actually calls it.
+    //
+    // Uses an object variable, not a runProbe() local: real LPC forbids
+    // a functional literal's body from touching the *enclosing
+    // function's* own locals (grammar.y's "Illegal to use local
+    // variable in functional", confirmed live -- this driver's own
+    // synthesized lambda function has its own separate locals_ scope
+    // from the function that constructed it, same restriction). An
+    // object variable has no such problem: it lives on the object, not
+    // a call frame, and CodeGen's objectVars_ is shared across every
+    // function in one generate() call, including synthesized lambdas.
+    // create() explicitly zeroes side_effect/before rather than relying
+    // on any assumed default-initialized value: this driver leaves a
+    // freshly-declared object variable as void until first assigned
+    // (unlike real LPC's own auto-zeroed int), so reading one before an
+    // explicit assignment is not a meaningful thing for this test to
+    // depend on either way.
+    ObjectVarHarness harness;
+    harness.writeFile("/lambda_probe.c",
+        "int side_effect;\n"
+        "int before;\n"
+        "mixed called;\n"
+        "void create() { side_effect = 0; before = 0; called = 0; }\n"
+        "int probe() {\n"
+        "    mixed f;\n"
+        "    f = (: side_effect = 1, \"abort\" :);\n"
+        "    before = side_effect;\n"
+        "    called = evaluate(f);\n"
+        "    return before * 1000 + side_effect * 100 + (called == \"abort\");\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/lambda_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    // before == 0 (not yet run), side_effect == 1 (ran once evaluate()
+    // called it), called == "abort" (the string, not a method call).
+    assert(std::get<int64_t>(result.data) == 101);
+
+    std::cout << "testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTime OK\n";
+}
+
+// ---------------------------------------------------------------------
+// "(*fp)(args...)" call-through-a-function-pointer-value syntax --
+// desugars to the "evaluate" efun (see grammar.y's own "'(' '*'
+// comma_expr ')' '(' expr_list ')'" production and Parser.cpp's own
+// comment at the recognition site). Found live compiling
+// std/user/editor.c's own "(*__Callback)(__Arguments)" and
+// std/user/more.c's own "(*__More[\"endfun\"])(__More[\"args\"])".
+// ---------------------------------------------------------------------
+
+static void testFunctionPointerCallThroughParsesToForcedEvaluateCall() {
+    std::string src =
+        "void probe(function cb, mixed args) {\n"
+        "    (*cb)(args);\n"
+        "}\n";
+    lpcdriver::Lexer lexer(src);
+    lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    auto* exprStmt = dynamic_cast<lpcdriver::ExprStmt*>(body[0].get());
+    assert(exprStmt != nullptr);
+    auto* call = dynamic_cast<lpcdriver::CallExpr*>(exprStmt->expr.get());
+    assert(call != nullptr);
+    assert(call->callee == "evaluate");
+    assert(call->forceEfun == true);
+    assert(call->args.size() == 2);
+    auto* fpArg = dynamic_cast<lpcdriver::VarRefExpr*>(call->args[0].get());
+    assert(fpArg != nullptr && fpArg->name == "cb");
+    auto* argsArg = dynamic_cast<lpcdriver::VarRefExpr*>(call->args[1].get());
+    assert(argsArg != nullptr && argsArg->name == "args");
+
+    std::cout << "testFunctionPointerCallThroughParsesToForcedEvaluateCall OK\n";
+}
+
+static void testFunctionPointerCallThroughOnIndexedTargetParses() {
+    // std/user/more.c's own real shape: the pointer clause is itself an
+    // indexed expression, not a bare identifier.
+    std::string src =
+        "void probe(mapping m) {\n"
+        "    (*m[\"endfun\"])(m[\"args\"]);\n"
+        "}\n";
+    lpcdriver::Lexer lexer(src);
+    lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    auto* exprStmt = dynamic_cast<lpcdriver::ExprStmt*>(body[0].get());
+    auto* call = dynamic_cast<lpcdriver::CallExpr*>(exprStmt->expr.get());
+    assert(call != nullptr && call->forceEfun && call->callee == "evaluate");
+    assert(call->args.size() == 2);
+    auto* fpArg = dynamic_cast<lpcdriver::IndexExpr*>(call->args[0].get());
+    assert(fpArg != nullptr);
+
+    std::cout << "testFunctionPointerCallThroughOnIndexedTargetParses OK\n";
+}
+
+static void testFunctionPointerCallThroughVmExecutionCallsClosure() {
+    // "sizeof" is a real efun registerCoreEfuns() actually registers
+    // (unlike the short-circuit tests' deliberately-undefined marker
+    // names), so a correct array-length result here confirms the
+    // "(*f)(...)" desugaring genuinely reached
+    // evaluate()->VM::callClosure(), not just that it parsed.
+    lpcdriver::Value result = runProbe(
+        "mixed f;\n"
+        "f = (: sizeof :);\n"
+        "return (*f)(({ 1, 2, 3, 4 }));\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 4);
+    std::cout << "testFunctionPointerCallThroughVmExecutionCallsClosure OK\n";
+}
+
+// ---------------------------------------------------------------------
+// int to_int(string | float | int) -- efuns_main.c's f__to_int().
+// Surfaced live compiling std/user/more.c, std/living.c, and
+// std/user.c itself.
+// ---------------------------------------------------------------------
+
+static void testToIntPassesThroughAnInt() {
+    lpcdriver::Value result = runProbe("return to_int(42);\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+    std::cout << "testToIntPassesThroughAnInt OK\n";
+}
+
+static void testToIntTruncatesAFloatTowardZero() {
+    lpcdriver::Value result = runProbe("return to_int(5.9) * 100 + to_int(-5.9);\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    // f__to_int()'s real "(long) sp->u.real" cast truncates toward
+    // zero, not round-to-nearest or floor: 5.9 -> 5, -5.9 -> -5.
+    assert(std::get<int64_t>(result.data) == 495);
+    std::cout << "testToIntTruncatesAFloatTowardZero OK\n";
+}
+
+static void testToIntParsesALeadingIntegerFromAStringIgnoringTrailingGarbage() {
+    lpcdriver::Value result = runProbe("return to_int(\"10x\");\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    // Real f__to_int()'s own documented behavior: "to_int(\"10x\") == 10".
+    assert(std::get<int64_t>(result.data) == 10);
+    std::cout << "testToIntParsesALeadingIntegerFromAStringIgnoringTrailingGarbage OK\n";
+}
+
+static void testToIntReturnsZeroForAStringWithNoLeadingNumber() {
+    lpcdriver::Value result = runProbe("return to_int(\"nothing here\");\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+    std::cout << "testToIntReturnsZeroForAStringWithNoLeadingNumber OK\n";
+}
+
+// ---------------------------------------------------------------------
+// "private" object variable scoping -- a private object variable is
+// invisible to (and non-collidable with) an inheriting child's own
+// variable of the same name, though it still occupies a real slot in
+// the flattened per-object layout. Found live compiling std/user.c:
+// std/living.c's own "static private int __Locked, __LastAged;" and
+// std/user.c's separate, unrelated "static int __LastAged;" previously
+// collided as a codegen error ("object variable already declared").
+// ---------------------------------------------------------------------
+
+static void testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariable() {
+    ObjectVarHarness harness;
+    harness.writeFile("/priv_parent.c",
+        "static private int tag;\n"
+        "void create() { tag = 1; }\n"
+        "int query_parent_tag() { return tag; }\n");
+    harness.writeFile("/priv_child.c",
+        "inherit \"/priv_parent\";\n"
+        "static int tag;\n"
+        "void create() {\n"
+        "    ::create();\n"
+        "    tag = 2;\n"
+        "}\n"
+        "int query_child_tag() { return tag; }\n");
+
+    // Compiling priv_child must not throw "object variable \"tag\"
+    // already declared" -- that is the exact bug this test guards.
+    auto obj = harness.objects.cloneObject("/priv_child");
+    assert(obj != nullptr);
+
+    // Both variables are real and independent: the parent's own private
+    // "tag" is still 1 (set by its own create(), reachable only through
+    // the parent's own inherited function), and the child's separate
+    // "tag" is 2 (set by the child's own create(), reachable only
+    // through the child's own function).
+    lpcdriver::Value parentResult = harness.vm.callFunction(obj, "query_parent_tag", {});
+    assert(std::holds_alternative<int64_t>(parentResult.data));
+    assert(std::get<int64_t>(parentResult.data) == 1);
+
+    lpcdriver::Value childResult = harness.vm.callFunction(obj, "query_child_tag", {});
+    assert(std::holds_alternative<int64_t>(childResult.data));
+    assert(std::get<int64_t>(childResult.data) == 2);
+
+    std::cout << "testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariable OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -5311,7 +5704,10 @@ int main() {
     testForLoopWithDeclInitAndIncDecUpdateVmExecution();
     testIncDecOperatorsTokenize();
     testPrefixAndPostfixIncDecParseToIncDecExpr();
-    testPostfixIncDecOnNonVariableTargetThrows();
+    testPostfixIncDecOnRangeIndexTargetThrows();
+    testPostfixIncDecOnIndexedTargetParsesToIndexedIncDecExpr();
+    testIndexedPostfixIncDecVmExecutionReturnsOldValueAndMutates();
+    testIndexedPrefixIncDecVmExecutionReturnsNewValueAndMutates();
     testPrefixIncrementVmExecutionReturnsNewValueAndMutates();
     testPostfixIncrementVmExecutionReturnsOldValueAndMutates();
     testBareCallToLocalFunctionEmitsCallOpcode();
@@ -5429,6 +5825,20 @@ int main() {
     testCompoundIndexAssignOnSingleLevelMapping();
     testCompoundIndexAssignOnChainedNestedMappingMatchesRealUserCShape();
     testCompoundIndexAssignOnArrayElement();
+    testIndexAssignAsSubExpressionParsesToIndexAssignExpr();
+    testIndexAssignAsSubExpressionVmExecutionMatchesMoreCShape();
+    testIndexAssignAsSubExpressionFallsThroughOnEmptyString();
+    testInlineLambdaWithCallExpressionFirstOperandParsesAsInlineLambdaExpr();
+    testInlineLambdaBareStringConstantParsesAsInlineLambdaExpr();
+    testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTime();
+    testFunctionPointerCallThroughParsesToForcedEvaluateCall();
+    testFunctionPointerCallThroughOnIndexedTargetParses();
+    testFunctionPointerCallThroughVmExecutionCallsClosure();
+    testToIntPassesThroughAnInt();
+    testToIntTruncatesAFloatTowardZero();
+    testToIntParsesALeadingIntegerFromAStringIgnoringTrailingGarbage();
+    testToIntReturnsZeroForAStringWithNoLeadingNumber();
+    testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariable();
     std::cout << "all tests passed\n";
     return 0;
 }

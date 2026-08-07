@@ -61,12 +61,18 @@ struct Mapping {
 // this mudlib is constructed and called within the same short-lived
 // scope (never persisted across a redefinition or module reload), so
 // the two approaches are behaviorally identical for anything this
-// driver runs -- see VM::callClosure()'s own comment. Object-bound
-// closures ("(: obj, \"func\" :)"), $1/$(name)-placeholder inline
-// lambdas, and bare string-constant closures ("(: \"literal\" :)") are
-// real LPC forms too but are not implemented: none of them are used
-// anywhere on this driver's current boot/login/account-creation path
-// (see STATUS.md's closure recon notes for the full count).
+// driver runs -- see VM::callClosure()'s own comment. The general
+// "(: comma_expr :)" inline-lambda form -- which covers what looks
+// syntactically like an object-bound closure ("(: obj, \"func\" :)",
+// confirmed via grammar.y to actually be a plain comma expression, not
+// a dedicated call form -- see Ast.hpp's InlineLambdaExpr) and a bare
+// string-constant closure ("(: \"literal\" :)") -- is also implemented,
+// but not through this struct's functionName field: CodeGen compiles
+// its body to its own synthesized FunctionEntry and stores that
+// synthesized name here instead (see CodeGen.cpp's PendingLambda). Only
+// $1/$(name)-placeholder inline lambda parameters remain unimplemented:
+// nothing on this driver's current boot/login/account-creation path
+// uses them (see STATUS.md's closure recon notes for the full count).
 struct Closure {
     // The object active when this closure literal was constructed
     // (real funptr_hdr_t::owner, "current_object" at bind time).

@@ -1,26 +1,24 @@
 # STATUS
 
-Snapshot as of the slice that implemented `master()->compile_object()`
-(real FluffOS's virtual-object compile hook) -- the blocker the
-previous (closures) slice found in `secure/daemon/master.c`'s
-`player_object()`. That mechanism now works end to end and correctly
-triggers a real compile of `/std/user`, which surfaced a run of small,
-well-understood parser/VM gaps (fixed this slice: the `status` type
-keyword, function declarations with only modifiers and no return type,
-a bare `{ }` block statement, `<N` from-the-end indexing, compound
-assignment on an indexed target) before landing on a genuinely
-*uncertain* one: `std/user.c`'s own inherited `std/user/editor.c` uses
-the object-bound closure form `(: obj_expr, "funcname" :)` (and a bare
-string-constant closure form, and the `(*fp)(args)` dereference-call
-syntax) in a way that this driver's own reading of the FluffOS
-reference grammar cannot confidently reconcile with how that same
-syntax is clearly *intended* to behave elsewhere in this mudlib (see
-"The next real blocker" below) -- flagged rather than guessed at.
+Snapshot as of the slice that finished implementing the general
+closure/function-pointer forms the previous slice found and deferred
+(`(: comma_expr :)` inline lambdas, bare string-constant closures, and
+`(*fp)(args)` dereference-call syntax), then kept working straight
+through `std/user.c`'s entire inherit chain until it actually compiled
+and a live account could reach `create()`. That pass surfaced and fixed
+several more small, well-understood parser/codegen gaps along the way
+(indexed `++`/`--`, indexed assignment used as a sub-expression rather
+than a statement, `private` object-variable scoping across an inherit
+chain, the `to_int()` efun) before landing on the next real blocker:
+the entire `add_action`/`enable_commands` command-dispatch subsystem is
+unimplemented (see "The next real blocker" below) -- an architecturally
+significant chunk of work, not a routine gap, flagged rather than
+started speculatively.
 
 ## Working now
 
 - Clean build via `cmake -B build -S . && cmake --build build`.
-- `ctest --test-dir build` passes (212 unit test cases in one binary,
+- `ctest --test-dir build` passes (229 unit test cases in one binary,
   covering lexer, parser, codegen, and VM execution for every supported
   feature).
 - Driver boots, compiles and loads `secure/daemon/master.c`, runs its
@@ -525,7 +523,13 @@ function declarations, a bare block statement, `<N` indexing, and
 compound indexed assignment, each found by literally trying to compile
 `std/user.c` and reading whatever line the parser choked on next.
 
-## The next real blocker: object-bound/string-constant closures (confirmed: comma-expression, not a dedicated form)
+## Object-bound/string-constant closures and `(*fp)(args)`: closed, confirmed live
+
+(Recon and disconfirmation below are unchanged from when this section
+was still "the next real blocker" -- kept in full as the citation trail
+for *why* the general lambda form was implemented the way it was. See
+"Closure/function-pointer forms completed" further down for what
+actually landed and how.)
 
 `std/user.c`'s own body now compiles cleanly. It `inherit`s several
 files, including `std/user/editor.c`, which does not:
@@ -674,7 +678,7 @@ this mudlib's own maintainers have not yet found. Confirmed live: a
 instruction not to implement anything speculative once the reference
 source's own runtime invocation code settles the question.
 
-What is still genuinely worth implementing, independent of the above
+What was still genuinely worth implementing, independent of the above
 (both are ordinary comma-expression-adjacent forms once the general
 lambda body is compiled correctly, not the ambiguous case): the bare
 string-constant closure `(: "literal" :)` (a `NODE_STRING` body,
@@ -683,11 +687,139 @@ per the same grammar/codegen just confirmed -- the compiler's own
 `yywarn` even flags it as likely a mistake, but it still compiles and
 runs) and the `(*fp)(args)` dereference-call syntax (confirmed to
 desugar to the same `call_function_pointer()` path `evaluate()`/
-`funcall()` already use). Neither was implemented this slice: `std/
-user/editor.c`, the one file confirmed to need them, also needs the
-general lambda form working first (now confirmed and ready to
-implement), so implementing all three together in the next pass is
-more efficient than doing this one in isolation.
+`funcall()` already use). All three landed together in the next pass
+-- see the next section.
+
+## Closure/function-pointer forms completed: general inline lambda, bare string-constant closures, and `(*fp)(args)`
+
+Implemented exactly what the recon above concluded, no more:
+
+- **General inline lambda** (`Ast.hpp`'s new `InlineLambdaExpr`,
+  `grammar.y`'s `L_FUNCTION_OPEN comma_expr ':' ')'`). The parser tells
+  this apart from the existing bare-name closure literal the same way
+  real LPC's LALR grammar does: only a bare identifier immediately
+  followed by `,` or `:` is the bare-name form; anything else (a call
+  expression, a string literal, ...) falls through to a general
+  comma-separated expression list. `CodeGen` cannot emit a lambda's
+  body in place (every function in one `CompiledProgram` shares a
+  single flat `code` array addressed by `entryPoint`, so splicing a
+  second `Return` into the middle of the enclosing function's own
+  instructions would return out of the wrong function) -- it queues
+  each one (`CodeGen::PendingLambda`) and compiles it right after the
+  enclosing function's own `Return`, as its own synthesized
+  `FunctionEntry` (name prefixed `$lambda#`, a sequence no real LPC
+  identifier can ever equal), reached at call time through the exact
+  same `findFunctionInChain()` lookup an ordinary bare-name closure
+  already uses. No VM changes were needed for this reason.
+- **Bare string-constant closure** (`(: "literal" :)`) is not a special
+  case at all once the above works: it is the trivial one-element case
+  of the same comma-separated body.
+- **`(*fp)(args...)` dereference-call syntax** (`grammar.y`'s `'('
+  '*' comma_expr ')' '(' expr_list ')'`) desugars at parse time straight
+  to a forced call of the core `evaluate` efun (`CallExpr::forceEfun`,
+  the same mechanism `efun::name(...)` already uses), exactly matching
+  what the reference grammar's own action does
+  (`predefs[evaluate_efun].token`) -- this driver's own `evaluate`/
+  `funcall` efuns already call `VM::callClosure()`, so this too needed
+  no VM changes, only a parser-level rewrite into an ordinary
+  `CallExpr`.
+
+Confirmed live: `std/user/editor.c` (the file that surfaced all three)
+now compiles.
+
+## Further gaps found and fixed while walking `std/user.c`'s full inherit chain
+
+With the closure forms above landing, compilation walked forward
+through `std/user.c`'s inherit chain (`autosave.c`, `editor.c`,
+`files.c`, `nmsh.c`, `more.c`, `refs.c`, `living.c`, then `user.c`
+itself) and hit four more real, confirmed gaps, each fixed the same
+way: real mudlib usage first, reference grammar/codegen second,
+implementation third, tests alongside.
+
+- **Indexed `++`/`--`** (`std/living.c`'s own `healing["intox"]--`).
+  `IncDecExpr` previously only accepted a bare variable name target
+  (real usage grep found exactly 2 prefix and several postfix real call
+  sites using an indexed target instead). `OpCode::IndexAssign` leaves
+  nothing on the stack (correct for its original statement-only caller,
+  `IndexAssignStmt`), so an indexed increment/decrement used as an
+  expression stashes the pre- and post-mutation values in a hidden temp
+  local (never nameable by real LPC source) and pushes back whichever
+  one `prefix` calls for, after the mutation actually runs.
+- **Indexed assignment as a sub-expression** (`std/user/more.c`'s own
+  `if(!(__More["class"] = cl)) ...`). The parser previously only
+  recognized a bare variable name as an assignment target *inside an
+  expression* (index-expression targets were statement-only, via
+  `IndexAssignStmt`). New `IndexAssignExpr` (`Ast.hpp`) plus
+  `CodeGen::emitIndexAssignExpr()` use the same hidden-temp-local
+  approach as the indexed `++`/`--` fix above, for the same underlying
+  reason (`IndexAssign` produces no stack value to chain into the rest
+  of the enclosing expression).
+- **`private` object-variable scoping across an inherit chain**
+  (`std/living.c`'s own `static private int __Locked, __LastAged;`
+  colliding with `std/user.c`'s separate, unrelated `static int
+  __LastAged;`). Real LPC scopes a `private` object variable to the
+  file that declares it -- invisible to, and non-collidable with, a
+  child's own variable of the same name -- but this driver previously
+  discarded every modifier keyword unrecorded, including `private`,
+  treating every object variable as fully inherited/nameable. Fixed by
+  threading `isPrivate` through `Parser::DeclPrefix` ->
+  `ObjectVarDecl::isPrivate`, and having `CodeGen::generate()` record a
+  private variable's slot in the flattened `objectVarNames` list a
+  child inherits under a synthesized, non-collidable placeholder name
+  (`$private#<slot>`) instead of its real one -- the slot position is
+  still reserved (an inheriting child's own bytecode has to agree with
+  the parent's already-compiled bytecode on where every later slot
+  starts), but the real name stays reachable only from the declaring
+  file's own code.
+- **`to_int(string | float | int)`** (`efuns_main.c`'s `f__to_int()`,
+  surfaced directly by `std/user/more.c`, `std/living.c`, and
+  `std/user.c` itself, not just transitively through the closure
+  chain). Implemented matching real truncate-toward-zero float
+  behavior and real leading-integer string parsing (`to_int("10x") ==
+  10`); the `buffer` case in the real signature is dropped, since this
+  driver has no buffer type in `Value`'s variant at all.
+
+All four are covered by new `ctest` cases (17 added this session, one
+per confirmed real shape plus the still-correctly-rejected range-index
+`++`/`--` case -- see `tests/test_lexer.cpp`).
+
+## The next real blocker: `add_action`/`enable_commands` command-dispatch subsystem is entirely unimplemented
+
+With every compile-time gap above fixed, `std/user.c` now compiles
+cleanly and a live account genuinely reaches `create()` on a real
+player object -- confirmed live end to end (fresh account creation,
+password set/confirmed, `compile_object()` succeeds). `create()` then
+throws immediately:
+
+```
+[object] create() failed for /std/user: undefined function or efun: enable_commands
+```
+
+`enable_commands()` (real `add_action.c`'s `f_enable_commands()`,
+`enable_commands(1)`) is the gate real FluffOS requires before
+`add_action()`-registered commands on an object take effect. Checking
+this driver's own `EfunTable.cpp` found `add_action` itself is not
+registered either -- there is no command-dispatch subsystem here at
+all yet, only the `input_to()`-callback path implemented and confirmed
+live in an earlier slice (see "The connect/input protocol gap: closed,
+confirmed live" above). This is a materially different, larger
+mechanism (a per-object list of verb -> handler-function bindings,
+consulted against typed input that doesn't match any pending
+`input_to()` handler, in add-order with each handler free to decline
+by returning 0 and falling through to the next) -- basic player
+interaction (`look`, movement commands, anything using `add_action`
+rather than `input_to()`) cannot work without it. Flagged rather than
+started speculatively, matching this project's own stopping criteria:
+this is architecturally significant, not a routine language or efun
+gap.
+
+A secondary, smaller issue found alongside this: when `create()` fails
+on a cloned player object, the connection is left in a dead state with
+no error sent to the client (`[net] connection fd=4 input handling
+failed: call_other: first argument must be an object or a string
+path` on the next line typed) rather than a clean disconnect or retry
+prompt. Worth a small hardening pass once the real fix (`add_action`)
+lands, not urgent on its own.
 
 ## Known stubs / scope limitations (intentional, not bugs)
 
@@ -778,4 +910,20 @@ more efficient than doing this one in isolation.
   which would double any side effect they had -- harmless for every
   real call site this mudlib uses (plain variable reads, string-literal
   keys), but not a generally safe transformation. Flagged in
-  `IndexAssignStmt`'s own comment.
+  `IndexAssignStmt`'s own comment. Indexed `++`/`--` and indexed
+  assignment used as a sub-expression (`IndexAssignExpr`, see "Further
+  gaps found and fixed" above) share the exact same double-evaluation
+  property, for the same reason.
+- `to_int()` (see "Further gaps found and fixed" above) does not
+  implement the `buffer` case of its real `string | float | int |
+  buffer` signature -- this driver's `Value` variant has no buffer type
+  at all, and nothing on any path run so far needs one.
+- Object variables declared but never explicitly assigned (e.g. no
+  `create()`, or a `create()` that does not set every declared
+  variable) stay `void`/monostate rather than real LPC's own auto-
+  zeroed default for a declared type (`int` -> `0`, `string` -> `0`
+  read as falsy, etc). Reading one before any assignment and then using
+  it in an arithmetic/string context throws instead of silently acting
+  like `0`. Not yet hit by anything on this driver's confirmed real
+  path (every object variable reached so far is set in `create()`
+  first), but worth fixing before this stops being true.

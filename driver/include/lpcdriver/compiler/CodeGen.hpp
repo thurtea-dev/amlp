@@ -42,6 +42,7 @@ private:
     void emitTernaryExpr(const TernaryExpr& tern);
     void emitCatchExpr(const CatchExpr& catchExpr);
     void emitAssignExpr(const AssignExpr& assign);
+    void emitIndexAssignExpr(const IndexAssignExpr& assign);
     void emitIncDecExpr(const IncDecExpr& incDec);
     void emitStatement(const AstNode& stmt);
     void emitReturnStmt(const ReturnStmt& stmt);
@@ -87,6 +88,11 @@ private:
     int foreachCounter_ = 0;
     // Same idea as foreachCounter_, for switch's own hidden subject local.
     int switchCounter_ = 0;
+    // Same idea again, for emitIndexAssignExpr()'s hidden temp local
+    // (holds the newly assigned value so it can be pushed back onto the
+    // stack after OpCode::IndexAssign, which itself leaves nothing
+    // behind -- see that function's own comment).
+    int indexAssignCounter_ = 0;
 
     CompiledProgram* out_ = nullptr;
     std::unordered_map<std::string, int> locals_;
@@ -95,6 +101,31 @@ private:
     // Program::objectVars before any function body is compiled, and left
     // untouched afterward (unlike locals_, which is per-function).
     std::unordered_map<std::string, int> objectVars_;
+
+    // An InlineLambdaExpr (see Ast.hpp) encountered while compiling some
+    // enclosing function's body cannot have its own bytecode emitted
+    // in-place: that would splice the lambda's Return into the middle of
+    // the enclosing function's own instruction stream, since every
+    // function in a CompiledProgram shares one flat code_ array
+    // addressed only by entryPoint (see generate()'s own per-function
+    // loop). Instead, emitExpr() records the pending body here and emits
+    // an ordinary PushClosure referencing a synthesized name; generate()
+    // drains this list right after finishing the enclosing function's
+    // own Return, compiling each one exactly like a normal top-level
+    // function (own locals_/entryPoint/FunctionEntry) so it lands at a
+    // distinct, self-contained offset. The synthesized name is never a
+    // legal LPC identifier (see nextLambdaId_'s use in CodeGen.cpp), so
+    // it can never collide with a real function and is only ever reached
+    // via the Closure's stored functionName at call time -- the exact
+    // same findFunctionInChain() lookup an ordinary bare-name closure
+    // already uses, no VM.cpp changes needed.
+    struct PendingLambda {
+        std::string name;
+        const InlineLambdaExpr* expr = nullptr;
+    };
+    std::vector<PendingLambda> pendingLambdas_;
+    int nextLambdaId_ = 0;
+    void emitPendingLambdas();
 };
 
 } // namespace lpcdriver

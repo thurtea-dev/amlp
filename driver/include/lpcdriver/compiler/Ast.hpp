@@ -148,6 +148,36 @@ struct ClosureLiteralExpr : AstNode {
     std::vector<AstPtr> boundArgs;
 };
 
+// "(: comma_expr :)" -- the general "inline lambda" closure literal
+// grammar.y keeps as a distinct production from the bare-identifier one
+// above ("L_FUNCTION_OPEN comma_expr ':' ')'", confirmed by direct
+// reading, not guessed: real LPC's LALR grammar has two separate rules
+// here, told apart at parse time by whether the first token is a bare
+// name immediately followed by "," or ":" -- see Parser.cpp's own
+// comment at the "(:" recognition site for the disambiguation and the
+// two confirmed real call sites this covers, std/user/editor.c lines 31
+// and 64). Every expression in bodyExprs is evaluated in order for side
+// effect except the last, whose value becomes the closure's return
+// value when later invoked -- ordinary comma-expression semantics,
+// matching grammar.y's own "comma_expr: expr0 | comma_expr ',' expr0"
+// used for the body. Confirmed via grammar.y's own
+// "if ($2->kind == NODE_STRING) yywarn(\"Function pointer returning
+// string constant is NOT a function call\")": the reference compiler
+// accepts a body ending in a bare string constant and only *warns* that
+// it looks like a mistake, proving the body is real compiled code run
+// at call time (not a disguised "call this method name on this
+// object"), i.e. std/user/editor.c's own
+// "(: previous_object(), \"abort\" :)" really does evaluate
+// previous_object() for effect and then just return the string
+// "abort" when invoked, never actually calling abort() on anything.
+// See CodeGen.cpp's PendingLambda handling for how this compiles to
+// its own anonymous FunctionEntry, and Value.hpp's Closure comment
+// (now superseded for this case) for the prior bare-name-only scope
+// note.
+struct InlineLambdaExpr : AstNode {
+    std::vector<AstPtr> bodyExprs;
+};
+
 struct ExprStmt : AstNode {
     AstPtr expr;
 };
@@ -195,10 +225,20 @@ enum class IncDecOp { Inc, Dec };
 // standalone statements, per the plan); indexed targets like "arr[i]++"
 // are not supported and throw a clear parse error rather than silently
 // misparsing.
+// "name" is used when indexTarget is null (the original bare-variable-
+// only scope this struct started with); a non-null indexTarget/indexKey
+// pair means an indexed target instead, e.g. std/living.c's own
+// "healing[\"intox\"]--" (confirmed live -- the driver previously
+// rejected this real mudlib line the same way IndexAssignExpr's own
+// comment describes for indexed assignment, and for the same reason:
+// only a bare variable name was recognized as a valid ++/-- target).
+// See CodeGen::emitIncDecExpr()'s indexed branch for the codegen.
 struct IncDecExpr : AstNode {
     IncDecOp op = IncDecOp::Inc;
     bool prefix = true;
     std::string name;
+    AstPtr indexTarget;
+    AstPtr indexKey;
 };
 
 struct ArrayLiteralExpr : AstNode {
@@ -237,6 +277,27 @@ struct IndexExpr : AstNode {
 // would double any side effect a more exotic target/index expression
 // happened to have. Flagged here rather than silently assumed safe.
 struct IndexAssignStmt : AstNode {
+    AstPtr target;
+    AstPtr index;
+    AstPtr value;
+    bool isCompound = false;
+    BinOp compoundOp = BinOp::Add;
+};
+
+// The expression-producing counterpart to IndexAssignStmt above, needed
+// when an indexed assignment appears as a sub-expression rather than a
+// standalone statement -- e.g. std/user/more.c's own
+// "if(!(__More[\"class\"] = cl)) ...", confirmed live: the driver's
+// parser previously only recognized a bare variable name as an
+// assignment target inside an expression (see Parser.cpp's own comment
+// at the "sawAssignOp" site) and rejected this real mudlib line
+// outright. Same fields as IndexAssignStmt; see
+// CodeGen::emitIndexAssignExpr() for why this needs its own codegen
+// rather than reusing emitIndexAssignStmt() as-is (OpCode::IndexAssign
+// consumes its three operands and leaves nothing behind, matching
+// statement-context needs, but an expression use needs the assigned
+// value left on the stack afterward).
+struct IndexAssignExpr : AstNode {
     AstPtr target;
     AstPtr index;
     AstPtr value;
@@ -331,6 +392,17 @@ struct ObjectVarDecl : AstNode {
     std::string type;
     bool isArray = false;
     std::string name;
+    // See Parser.hpp's DeclPrefix::isPrivate comment. Consumed by
+    // CodeGen::generate(): a private variable still occupies a real slot
+    // in the flattened per-object layout (an inheriting child's own
+    // code must land at the same slot offsets a parent's already-
+    // compiled bytecode expects), but that slot is recorded under a
+    // synthesized, non-collidable placeholder name in the
+    // CompiledProgram::objectVarNames a child inherits, rather than its
+    // real name -- so the real name stays reachable from this file's
+    // own code (ordinary resolveVariable() lookups here still use it)
+    // while staying invisible to, and non-collidable with, any child.
+    bool isPrivate = false;
 };
 
 struct Program : AstNode {

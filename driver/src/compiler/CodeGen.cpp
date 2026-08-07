@@ -197,10 +197,43 @@ void CodeGen::emitAssignExpr(const AssignExpr& assign) {
 //   prefix  (++x): push old, +1, Dup(new), store  -> leaves new
 //   postfix (x++): push old, Dup(old), +1, store   -> leaves old
 void CodeGen::emitIncDecExpr(const IncDecExpr& incDec) {
+    OpCode deltaOp = (incDec.op == IncDecOp::Inc) ? OpCode::Add : OpCode::Sub;
+
+    if (incDec.indexTarget) {
+        // Indexed target (see Ast.hpp's IncDecExpr comment). Same
+        // approach as emitIndexAssignExpr(): OpCode::IndexAssign leaves
+        // nothing on the stack, so the value this expression needs to
+        // produce (the pre- or post-mutation one, per incDec.prefix) is
+        // stashed in a hidden temp local rather than kept on the stack
+        // across the target/index pushes needed for the write.
+        std::string oldName = "$idxassign#" + std::to_string(indexAssignCounter_++);
+        int oldSlot = declareLocal(oldName);
+        std::string newName = "$idxassign#" + std::to_string(indexAssignCounter_++);
+        int newSlot = declareLocal(newName);
+
+        emitExpr(*incDec.indexTarget);
+        emitExpr(*incDec.indexKey);
+        out_->code.push_back(Instruction{OpCode::Index, 0, 0});
+        out_->code.push_back(Instruction{OpCode::StoreLocal, oldSlot, 0});
+
+        out_->code.push_back(Instruction{OpCode::PushLocal, oldSlot, 0});
+        out_->code.push_back(Instruction{OpCode::PushInt, 1, 0});
+        out_->code.push_back(Instruction{deltaOp, 0, 0});
+        out_->code.push_back(Instruction{OpCode::StoreLocal, newSlot, 0});
+
+        emitExpr(*incDec.indexTarget);
+        emitExpr(*incDec.indexKey);
+        out_->code.push_back(Instruction{OpCode::PushLocal, newSlot, 0});
+        out_->code.push_back(Instruction{OpCode::IndexAssign, 0, 0});
+
+        out_->code.push_back(
+            Instruction{OpCode::PushLocal, incDec.prefix ? newSlot : oldSlot, 0});
+        return;
+    }
+
     ResolvedVar var = resolveVariable(incDec.name);
     OpCode pushOp = (var.kind == VarKind::Local) ? OpCode::PushLocal : OpCode::PushObjectVar;
     OpCode storeOp = (var.kind == VarKind::Local) ? OpCode::StoreLocal : OpCode::StoreObjectVar;
-    OpCode deltaOp = (incDec.op == IncDecOp::Inc) ? OpCode::Add : OpCode::Sub;
 
     out_->code.push_back(Instruction{pushOp, var.slot, 0});
     if (incDec.prefix) {
@@ -275,6 +308,10 @@ void CodeGen::emitExpr(const AstNode& expr) {
         emitAssignExpr(*assign);
         return;
     }
+    if (auto* idxAssign = dynamic_cast<const IndexAssignExpr*>(&expr)) {
+        emitIndexAssignExpr(*idxAssign);
+        return;
+    }
     if (auto* incDec = dynamic_cast<const IncDecExpr*>(&expr)) {
         emitIncDecExpr(*incDec);
         return;
@@ -331,6 +368,19 @@ void CodeGen::emitExpr(const AstNode& expr) {
         int nameIdx = internString(closure->functionName);
         out_->code.push_back(
             Instruction{OpCode::PushClosure, nameIdx, static_cast<int32_t>(closure->boundArgs.size())});
+        return;
+    }
+    if (auto* lambda = dynamic_cast<const InlineLambdaExpr*>(&expr)) {
+        // See CodeGen.hpp's PendingLambda comment: the body is compiled
+        // later, at the enclosing function's own boundary, not here.
+        // "$" can never start (or appear in) a real LPC identifier, so
+        // this name is guaranteed not to collide with anything user code
+        // could reference directly -- the closure only ever reaches it
+        // through the Closure value's own stored functionName.
+        std::string name = "$lambda#" + std::to_string(nextLambdaId_++);
+        pendingLambdas_.push_back(PendingLambda{name, lambda});
+        int nameIdx = internString(name);
+        out_->code.push_back(Instruction{OpCode::PushClosure, nameIdx, 0});
         return;
     }
     throw LpcRuntimeError("codegen: unsupported expression kind this slice");
@@ -489,6 +539,50 @@ void CodeGen::emitIndexAssignStmt(const IndexAssignStmt& stmt) {
     emitExpr(*stmt.index);
     emitExpr(*stmt.value);
     out_->code.push_back(Instruction{OpCode::IndexAssign, 0, 0});
+}
+
+// The expression-producing counterpart above (see Ast.hpp's
+// IndexAssignExpr comment for the real call site, std/user/more.c's own
+// "if(!(__More[\"class\"] = cl)) ..."). OpCode::IndexAssign always
+// consumes its three operands and leaves nothing on the stack -- correct
+// for the statement form above, wrong here, where the assigned value
+// needs to survive as this expression's own result. There is no
+// "duplicate the value under two other stack entries" opcode to route
+// around that in place, so this computes the new value once, stashes it
+// in a hidden temp local (never reachable by name -- see
+// indexAssignCounter_'s own comment), and pushes it back from there
+// after the mutation instead of trying to keep it on the stack across
+// the target/index pushes.
+void CodeGen::emitIndexAssignExpr(const IndexAssignExpr& assign) {
+    std::string tempName = "$idxassign#" + std::to_string(indexAssignCounter_++);
+    int tempSlot = declareLocal(tempName);
+
+    if (assign.isCompound) {
+        emitExpr(*assign.target);
+        emitExpr(*assign.index);
+        out_->code.push_back(Instruction{OpCode::Index, 0, 0});
+        emitExpr(*assign.value);
+        OpCode combineOp;
+        switch (assign.compoundOp) {
+            case BinOp::Add: combineOp = OpCode::Add; break;
+            case BinOp::Sub: combineOp = OpCode::Sub; break;
+            case BinOp::Mul: combineOp = OpCode::Mul; break;
+            case BinOp::Div: combineOp = OpCode::Div; break;
+            case BinOp::Mod: combineOp = OpCode::Mod; break;
+            default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
+        }
+        out_->code.push_back(Instruction{combineOp, 0, 0});
+    } else {
+        emitExpr(*assign.value);
+    }
+    out_->code.push_back(Instruction{OpCode::StoreLocal, tempSlot, 0});
+
+    emitExpr(*assign.target);
+    emitExpr(*assign.index);
+    out_->code.push_back(Instruction{OpCode::PushLocal, tempSlot, 0});
+    out_->code.push_back(Instruction{OpCode::IndexAssign, 0, 0});
+
+    out_->code.push_back(Instruction{OpCode::PushLocal, tempSlot, 0});
 }
 
 void CodeGen::emitIfStmt(const IfStmt& stmt) {
@@ -849,8 +943,24 @@ CompiledProgram CodeGen::generate(const Program& program,
                 "codegen: object variable \"" + varDecl->name + "\" already declared");
         }
         int slot = static_cast<int>(objectVars_.size());
+        // The real name is what this file's own code resolves through
+        // (objectVars_, used for every PushObjectVar/StoreObjectVar in
+        // this compile), regardless of privacy -- privacy only affects
+        // what a *child* sees. A private variable's slot still has to
+        // exist at this same position in result.objectVarNames (an
+        // inheriting child's own new variables must start numbering
+        // after it, matching where this file's own already-compiled
+        // bytecode expects it), but is recorded there under a
+        // synthesized name a real LPC identifier can never equal (see
+        // the lambda/temp-local synthesized-name precedent elsewhere in
+        // this file), so a child can never resolve it by the real name
+        // and is free to declare its own unrelated variable reusing that
+        // name without a collision -- confirmed live: std/living.c's
+        // own "static private int __Locked, __LastAged;" and
+        // std/user.c's separate, unrelated "static int __LastAged;".
         objectVars_[varDecl->name] = slot;
-        result.objectVarNames.push_back(varDecl->name);
+        result.objectVarNames.push_back(
+            varDecl->isPrivate ? "$private#" + std::to_string(slot) : varDecl->name);
     }
 
     result.inherits = program.inherits;
@@ -868,6 +978,7 @@ CompiledProgram CodeGen::generate(const Program& program,
         loopStack_.clear();
         foreachCounter_ = 0;
         switchCounter_ = 0;
+        indexAssignCounter_ = 0;
         for (const auto& param : fn->params) {
             declareLocal(param.name);
         }
@@ -884,10 +995,61 @@ CompiledProgram CodeGen::generate(const Program& program,
 
         entry.numLocals = static_cast<uint8_t>(nextLocalSlot_);
         result.functions.push_back(entry);
+
+        // Any InlineLambdaExpr this function's own body queued (see
+        // CodeGen.hpp's PendingLambda comment) compiles right here, after
+        // this function's Return, so its bytecode lands at its own
+        // distinct offset rather than inside the function above.
+        emitPendingLambdas();
     }
 
     out_ = nullptr;
     return result;
+}
+
+// See CodeGen.hpp's PendingLambda comment for why this exists instead of
+// emitting a lambda's body in place. Each entry compiles exactly like an
+// ordinary top-level function in the loop above (own locals_ scope, own
+// FunctionEntry, ends in Return), except its body is a plain comma-
+// separated expression list rather than a Block: every expression is
+// evaluated for effect except the last, whose value is left on the stack
+// for Return to pick up, matching real LPC's comma-expression semantics
+// for a functional's body (see Ast.hpp's InlineLambdaExpr comment).
+// Index-based, not range-for: compiling one lambda's body can itself
+// queue more (a "(: :)" nested inside this lambda), and copying each
+// entry by value before compiling protects against the vector
+// reallocating out from under a reference when that happens.
+void CodeGen::emitPendingLambdas() {
+    size_t i = 0;
+    while (i < pendingLambdas_.size()) {
+        PendingLambda pending = pendingLambdas_[i];
+        ++i;
+
+        locals_.clear();
+        nextLocalSlot_ = 0;
+        loopStack_.clear();
+        foreachCounter_ = 0;
+        switchCounter_ = 0;
+        indexAssignCounter_ = 0;
+
+        FunctionEntry entry;
+        entry.name = pending.name;
+        entry.entryPoint = static_cast<uint32_t>(out_->code.size());
+        entry.numArgs = 0;
+
+        const auto& bodyExprs = pending.expr->bodyExprs;
+        for (size_t j = 0; j < bodyExprs.size(); ++j) {
+            emitExpr(*bodyExprs[j]);
+            if (j + 1 < bodyExprs.size()) {
+                out_->code.push_back(Instruction{OpCode::Pop, 0, 0});
+            }
+        }
+        out_->code.push_back(Instruction{OpCode::Return, 0, 0});
+
+        entry.numLocals = static_cast<uint8_t>(nextLocalSlot_);
+        out_->functions.push_back(entry);
+    }
+    pendingLambdas_.clear();
 }
 
 } // namespace lpcdriver

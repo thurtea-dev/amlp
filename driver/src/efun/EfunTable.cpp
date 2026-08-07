@@ -696,6 +696,47 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(isMap ? 1 : 0));
     });
 
+    // int to_int(string | float | int) -- efuns_main.c's f__to_int(),
+    // confirmed against the reference source directly (func_spec.cpp:
+    // "int to_int _to_int(string | float | int | buffer);"). Surfaced as
+    // undefined during a live boot test on std/user.c's own inherit
+    // chain (std/user/more.c, std/living.c, std/user.c itself all call
+    // it directly, not just through editor.c, so this is a real,
+    // separate gap, not one that resolves itself once the closure chain
+    // compiles). This driver has no buffer type (see Value.hpp's
+    // ValueVariant), so that case is dropped; the other three match
+    // f__to_int() exactly: an int argument passes through unchanged, a
+    // float truncates toward zero (real f__to_int() does a plain C
+    // "(long) sp->u.real" cast, not round-to-nearest), and a string
+    // parses a leading base-10 integer via strtol() semantics, ignoring
+    // trailing non-digit garbage and returning 0 for a string with no
+    // parseable leading number at all (real f__to_int()'s own comment:
+    // "this means to_int(\"10x\") == 10"). Any other argument type
+    // throws, matching the declared signature rejecting it under real
+    // FluffOS's exact_types argument checking.
+    t.registerEfun("to_int", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) return Value(static_cast<int64_t>(0));
+        const Value& v = args[0];
+        if (std::holds_alternative<int64_t>(v.data)) {
+            return Value(std::get<int64_t>(v.data));
+        }
+        if (std::holds_alternative<double>(v.data)) {
+            return Value(static_cast<int64_t>(std::get<double>(v.data)));
+        }
+        if (std::holds_alternative<std::string>(v.data)) {
+            const std::string& s = std::get<std::string>(v.data);
+            try {
+                size_t consumed = 0;
+                long parsed = std::stol(s, &consumed, 10);
+                if (consumed == 0) return Value(static_cast<int64_t>(0));
+                return Value(static_cast<int64_t>(parsed));
+            } catch (const std::exception&) {
+                return Value(static_cast<int64_t>(0));
+            }
+        }
+        throw LpcRuntimeError("Bad argument 1 to to_int()");
+    });
+
     // int pointerp(mixed) / int arrayp(mixed) -- real aliases of the
     // same efun (func_spec.c: "int pointerp(mixed); int arrayp
     // pointerp(mixed);") -- true only for an array value.

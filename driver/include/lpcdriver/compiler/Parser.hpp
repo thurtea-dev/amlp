@@ -32,6 +32,19 @@ private:
         std::string type;
         bool isArray;
         std::string name;
+        // Whether "private" appeared among this declaration's modifier
+        // keywords. Every other modifier (static, public, protected,
+        // nomask, varargs) is still discarded unrecorded -- see
+        // parseDeclPrefix()'s own comment -- but "private" specifically
+        // has to survive onto ObjectVarDecl: real LPC scopes a private
+        // object variable to the file that declares it, invisible to
+        // (and non-collidable with) an inheriting child's own variable
+        // of the same name (confirmed live: std/living.c's own "static
+        // private int __Locked, __LastAged;" and std/user.c's separate,
+        // unrelated "static int __LastAged;" are two different real
+        // mudlib files that legitimately reuse the same name this way).
+        // See CodeGen::generate()'s own use of ObjectVarDecl::isPrivate.
+        bool isPrivate = false;
     };
     DeclPrefix parseDeclPrefix(const std::string& context);
     std::unique_ptr<FunctionDecl> parseFunctionRest(DeclPrefix prefix);

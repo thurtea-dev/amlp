@@ -162,31 +162,94 @@ AstPtr Parser::parsePrimary() {
     // just above/below already are: by the literal two-character open
     // sequence, since the Lexer tokenizes "(" and ":" separately (no
     // dedicated "(:" token, unlike "::"/"->" -- see Lexer::lexSymbol()).
-    // Only the bare-identifier form is implemented: real LPC also allows
-    // an arbitrary expression here for the "inline lambda" and "object-
-    // bound" forms (grammar.y's general "L_FUNCTION_OPEN comma_expr ':'
-    // ')'"), neither of which is used anywhere on this driver's current
-    // boot/login/account-creation path.
+    //
+    // Real LPC's grammar.y has two separate productions here, not one:
+    // this bare-identifier form (efun/local/simul_efun/global-var
+    // reference plus optional bound args, resolved by name at call
+    // time), and a general fallback, "L_FUNCTION_OPEN comma_expr ':'
+    // ')'" -- any comma-separated expression list at all, compiled to
+    // its own anonymous function (see Ast.hpp's InlineLambdaExpr for the
+    // full citation and the two real call sites in this mudlib that need
+    // it). They are told apart the same way real LPC's LALR parser
+    // resolves the ambiguity: only a bare identifier immediately
+    // followed by "," or ":" can be this first production (a plain name
+    // and nothing else); anything else -- a call expression, a string
+    // literal, a parenthesized expression, etc -- falls through to the
+    // general comma_expr form below.
     if (checkText("(") && peekAt(1).text == ":") {
+        bool isBareName = peekAt(2).type == TokenType::Ident &&
+            peekAt(3).type == TokenType::Symbol &&
+            (peekAt(3).text == "," || peekAt(3).text == ":");
+
+        if (isBareName) {
+            advance(); // (
+            advance(); // :
+            Token nameTok = expect(TokenType::Ident, "closure literal function name");
+            auto closure = std::make_unique<ClosureLiteralExpr>();
+            closure->functionName = nameTok.text;
+            if (checkText(",")) {
+                advance();
+                for (;;) {
+                    closure->boundArgs.push_back(parseExpr());
+                    if (checkText(",")) {
+                        advance();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expectText(":", "closure literal");
+            expectText(")", "closure literal");
+            return closure;
+        }
+
         advance(); // (
         advance(); // :
-        Token nameTok = expect(TokenType::Ident, "closure literal function name");
-        auto closure = std::make_unique<ClosureLiteralExpr>();
-        closure->functionName = nameTok.text;
-        if (checkText(",")) {
-            advance();
-            for (;;) {
-                closure->boundArgs.push_back(parseExpr());
-                if (checkText(",")) {
-                    advance();
-                    continue;
-                }
-                break;
+        auto lambda = std::make_unique<InlineLambdaExpr>();
+        for (;;) {
+            lambda->bodyExprs.push_back(parseExpr());
+            if (checkText(",")) {
+                advance();
+                continue;
             }
+            break;
         }
         expectText(":", "closure literal");
         expectText(")", "closure literal");
-        return closure;
+        return lambda;
+    }
+
+    // "(*fp)(args...)" -- call-through-a-function-pointer-value syntax
+    // (grammar.y: "'(' '*' comma_expr ')' '(' expr_list ')'", confirmed
+    // by direct reading, not guessed). Real LPC desugars this straight
+    // to a call to the core "evaluate" efun (predefs[evaluate_efun]),
+    // unconditionally -- not the usual tiered local/inherited/simul_efun
+    // lookup a plain "name(...)" call goes through -- with the pointer
+    // expression as the first argument ahead of the real call args. This
+    // driver's own "evaluate"/"funcall" efuns already do exactly that
+    // (EfunTable.cpp's evaluateImpl(), which calls VM::callClosure()),
+    // so this is a pure syntax-level desugaring into a forced-efun
+    // CallExpr, matching how "efun::name(...)" already reaches the core
+    // efun table directly -- no new opcode or VM change needed. Only the
+    // single-expression form of the pointer clause is handled (real
+    // grammar allows a full comma_expr there too), since every real call
+    // site in this mudlib (std/user/editor.c's own "(*__Callback)(...)"/
+    // "(*__Abort)()") uses a single bare local variable.
+    if (checkText("(") && peekAt(1).text == "*") {
+        advance(); // (
+        advance(); // *
+        AstPtr fpExpr = parseExpr();
+        expectText(")", "function pointer call");
+        expectText("(", "function pointer call");
+        auto call = std::make_unique<CallExpr>();
+        call->callee = "evaluate";
+        call->forceEfun = true;
+        call->args.push_back(std::move(fpExpr));
+        for (auto& arg : parseArgList()) {
+            call->args.push_back(std::move(arg));
+        }
+        expectText(")", "function pointer call");
+        return call;
     }
 
     if (checkText("(") && peekAt(1).text == "{") {
@@ -453,19 +516,34 @@ AstPtr Parser::parsePostfix() {
 
     if (checkText("++") || checkText("--")) {
         auto* ref = dynamic_cast<VarRefExpr*>(expr.get());
-        if (!ref) {
-            throw LpcRuntimeError(
-                "parse error: postfix " + peek().text +
-                " target must be a simple variable name at line " + std::to_string(peek().line));
-        }
-        std::string name = ref->name;
         bool isInc = checkText("++");
-        advance();
-        auto incDec = std::make_unique<IncDecExpr>();
-        incDec->op = isInc ? IncDecOp::Inc : IncDecOp::Dec;
-        incDec->prefix = false;
-        incDec->name = name;
-        return incDec;
+        if (ref) {
+            std::string name = ref->name;
+            advance();
+            auto incDec = std::make_unique<IncDecExpr>();
+            incDec->op = isInc ? IncDecOp::Inc : IncDecOp::Dec;
+            incDec->prefix = false;
+            incDec->name = name;
+            return incDec;
+        }
+
+        // Indexed target, e.g. std/living.c's own "healing[\"intox\"]--"
+        // -- see Ast.hpp's IncDecExpr comment.
+        auto* idx = dynamic_cast<IndexExpr*>(expr.get());
+        if (idx && !idx->rangeEnd) {
+            advance();
+            auto incDec = std::make_unique<IncDecExpr>();
+            incDec->op = isInc ? IncDecOp::Inc : IncDecOp::Dec;
+            incDec->prefix = false;
+            incDec->indexTarget = std::move(idx->target);
+            incDec->indexKey = std::move(idx->index);
+            return incDec;
+        }
+
+        throw LpcRuntimeError(
+            "parse error: postfix " + peek().text +
+            " target must be a simple variable name or indexed target at line " +
+            std::to_string(peek().line));
     }
 
     return expr;
@@ -575,16 +653,29 @@ AstPtr Parser::parseUnary() {
         advance();
         auto operand = parseUnary();
         auto* ref = dynamic_cast<VarRefExpr*>(operand.get());
-        if (!ref) {
-            throw LpcRuntimeError(
-                std::string("parse error: prefix ") + (isInc ? "++" : "--") +
-                " target must be a simple variable name at line " + std::to_string(peek().line));
+        if (ref) {
+            auto incDec = std::make_unique<IncDecExpr>();
+            incDec->op = isInc ? IncDecOp::Inc : IncDecOp::Dec;
+            incDec->prefix = true;
+            incDec->name = ref->name;
+            return incDec;
         }
-        auto incDec = std::make_unique<IncDecExpr>();
-        incDec->op = isInc ? IncDecOp::Inc : IncDecOp::Dec;
-        incDec->prefix = true;
-        incDec->name = ref->name;
-        return incDec;
+
+        // Indexed target -- see Ast.hpp's IncDecExpr comment.
+        auto* idx = dynamic_cast<IndexExpr*>(operand.get());
+        if (idx && !idx->rangeEnd) {
+            auto incDec = std::make_unique<IncDecExpr>();
+            incDec->op = isInc ? IncDecOp::Inc : IncDecOp::Dec;
+            incDec->prefix = true;
+            incDec->indexTarget = std::move(idx->target);
+            incDec->indexKey = std::move(idx->index);
+            return incDec;
+        }
+
+        throw LpcRuntimeError(
+            std::string("parse error: prefix ") + (isInc ? "++" : "--") +
+            " target must be a simple variable name or indexed target at line " +
+            std::to_string(peek().line));
     }
 
     AstPtr operand = parsePostfix();
@@ -641,27 +732,48 @@ AstPtr Parser::parseUnary() {
 
     if (sawAssignOp) {
         auto* ref = dynamic_cast<VarRefExpr*>(operand.get());
-        if (!ref) {
-            // Only a bare variable name is a supported target this slice
-            // (index-expression targets, e.g. "arr[i] = x", stay on the
-            // dedicated statement-level IndexAssignStmt path).
-            throw LpcRuntimeError(
-                "parse error: assignment target must be a simple variable name at line " +
-                std::to_string(peek().line));
-        }
-        std::string name = ref->name;
-        advance();
-        // Right-associative ("a = b = c" means "a = (b = c)"): the
-        // right-hand side is a full expression, which may itself embed
-        // another assignment resolved the same way.
-        AstPtr value = parseExpr();
+        if (ref) {
+            std::string name = ref->name;
+            advance();
+            // Right-associative ("a = b = c" means "a = (b = c)"): the
+            // right-hand side is a full expression, which may itself
+            // embed another assignment resolved the same way.
+            AstPtr value = parseExpr();
 
-        auto assign = std::make_unique<AssignExpr>();
-        assign->name = std::move(name);
-        assign->value = std::move(value);
-        assign->isCompound = isCompound;
-        assign->compoundOp = compoundOp;
-        return assign;
+            auto assign = std::make_unique<AssignExpr>();
+            assign->name = std::move(name);
+            assign->value = std::move(value);
+            assign->isCompound = isCompound;
+            assign->compoundOp = compoundOp;
+            return assign;
+        }
+
+        // An indexed target used as a sub-expression rather than a bare
+        // statement, e.g. std/user/more.c's own
+        // "if(!(__More[\"class\"] = cl)) ...": see Ast.hpp's
+        // IndexAssignExpr comment for the confirmed real call site and
+        // why this needs its own AST node/codegen rather than reusing
+        // the statement-level IndexAssignStmt path.
+        auto* idx = dynamic_cast<IndexExpr*>(operand.get());
+        if (idx && !idx->rangeEnd) {
+            advance();
+            AstPtr value = parseExpr();
+
+            auto assign = std::make_unique<IndexAssignExpr>();
+            assign->target = std::move(idx->target);
+            assign->index = std::move(idx->index);
+            assign->value = std::move(value);
+            assign->isCompound = isCompound;
+            assign->compoundOp = compoundOp;
+            return assign;
+        }
+
+        // Anything else (a range-index target, a call result, etc) is
+        // not a real lvalue in LPC either -- matches real grammar.y's
+        // own restricted "lvalue" nonterminal.
+        throw LpcRuntimeError(
+            "parse error: assignment target must be a simple variable name or "
+            "indexed target at line " + std::to_string(peek().line));
     }
 
     return operand;
@@ -1250,9 +1362,14 @@ Parser::DeclPrefix Parser::parseDeclPrefix(const std::string& context) {
     // Consume any leading modifier keywords (static, private, public,
     // protected, nomask, varargs), in any order, any number of times.
     // This driver has no visibility or staticness semantics to enforce
-    // yet, so nothing downstream needs them recorded; they are simply
-    // discarded before reading the real type.
+    // for most of them, so they are otherwise discarded before reading
+    // the real type -- "private" is the one exception, recorded via
+    // DeclPrefix::isPrivate (see its own comment) because it actually
+    // changes object-variable slot-naming semantics, not just access
+    // control this driver doesn't enforce anyway.
+    bool isPrivate = false;
     while (check(TokenType::Keyword) && isModifierKeyword(peek())) {
+        if (peek().text == "private") isPrivate = true;
         advance();
     }
 
@@ -1288,7 +1405,7 @@ Parser::DeclPrefix Parser::parseDeclPrefix(const std::string& context) {
 
     Token nameTok = expect(TokenType::Ident, context + " name");
 
-    return DeclPrefix{type, isArray, nameTok.text};
+    return DeclPrefix{type, isArray, nameTok.text, isPrivate};
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunctionRest(DeclPrefix prefix) {
@@ -1316,11 +1433,17 @@ std::unique_ptr<FunctionDecl> Parser::parseFunctionRest(DeclPrefix prefix) {
 std::vector<std::unique_ptr<ObjectVarDecl>> Parser::parseObjectVarDeclRest(DeclPrefix prefix) {
     std::vector<std::unique_ptr<ObjectVarDecl>> decls;
 
-    auto makeDecl = [](const std::string& type, bool isArray, const std::string& name) {
+    // "private" (like every other modifier here) applies to the whole
+    // comma-separated declaration list, not per-name -- e.g.
+    // std/living.c's own "static private int __Locked, __LastAged;"
+    // makes both names private, not just the first.
+    bool isPrivate = prefix.isPrivate;
+    auto makeDecl = [isPrivate](const std::string& type, bool isArray, const std::string& name) {
         auto decl = std::make_unique<ObjectVarDecl>();
         decl->type = type;
         decl->isArray = isArray;
         decl->name = name;
+        decl->isPrivate = isPrivate;
         return decl;
     };
 
