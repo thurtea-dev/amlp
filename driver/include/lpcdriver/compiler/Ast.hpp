@@ -307,6 +307,19 @@ struct IndexAssignExpr : AstNode {
 
 struct Block : AstNode {
     std::vector<AstPtr> statements;
+    // True for every real "{ ... }" (a standalone scoping statement, an
+    // if/while/for body, or a function's own top-level body): CodeGen
+    // gives these their own nested local-variable scope. False only for
+    // the synthetic Block Parser::parseVarDeclStatement() builds to wrap
+    // a comma-separated declaration ("string a, b;") as a single
+    // AstPtr slot -- that Block is not a real scope at all, just an AST
+    // convenience, and its declarations must join the *enclosing* scope
+    // normally (see CodeGen::emitStatement()'s own comment on this
+    // distinction, added after a real regression: treating it as a real
+    // scope popped "a"/"b"/"c" back out of locals_ immediately after the
+    // one decl statement, breaking every later reference to them in the
+    // same function).
+    bool isRealScope = true;
 };
 
 struct IfStmt : AstNode {

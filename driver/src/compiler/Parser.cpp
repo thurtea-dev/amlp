@@ -936,6 +936,7 @@ AstPtr Parser::parseCommaExprChain() {
     };
 
     auto block = std::make_unique<Block>();
+    block->isRealScope = false;
     block->statements.push_back(wrap(std::move(first)));
     while (checkText(",")) {
         advance();
@@ -999,6 +1000,7 @@ AstPtr Parser::parseVarDeclStatement() {
     }
 
     auto block = std::make_unique<Block>();
+    block->isRealScope = false;
     block->statements.push_back(std::move(first));
     while (checkText(",")) {
         advance();
@@ -1023,6 +1025,7 @@ std::unique_ptr<Block> Parser::parseBranch() {
         return parseBlock();
     }
     auto block = std::make_unique<Block>();
+    block->isRealScope = false;
     block->statements.push_back(parseStatement());
     return block;
 }

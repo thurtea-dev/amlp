@@ -305,7 +305,15 @@ PreprocessResult runPreprocessor(const std::string& sourcePath, const std::strin
 
 ObjectManager::ObjectManager(Config& config) : config_(config) {}
 
-std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& filename) {
+std::string ObjectManager::normalizeFilename(const std::string& filename) {
+    if (filename.size() >= 2 && filename.compare(filename.size() - 2, 2, ".c") == 0) {
+        return filename.substr(0, filename.size() - 2);
+    }
+    return filename;
+}
+
+std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFilename) {
+    std::string filename = normalizeFilename(rawFilename);
     auto cached = programCache_.find(filename);
     if (cached != programCache_.end()) return cached->second;
 
@@ -363,14 +371,29 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& filen
         // already resolved recursively when that parent itself went
         // through this same function, so multi-level chains still work
         // (see Bytecode.hpp's CompiledProgram::inheritedPrograms comment).
+        // Alongside the flattened name list, also build ancestorBaseOffsets
+        // (see Bytecode.hpp's own comment on that member): for each direct
+        // parent, its own object variables start at "base" within this
+        // file's flattened layout (the count of inherited names collected
+        // so far); every ancestor *that parent* itself already knows about
+        // (its own ancestorBaseOffsets, from when it was compiled) is
+        // re-recorded here shifted by that same base, composing offsets
+        // correctly across arbitrarily deep chains, not just one level of
+        // direct siblings.
         std::vector<std::shared_ptr<CompiledProgram>> parents;
         std::vector<std::string> inheritedObjectVarNames;
+        std::unordered_map<const CompiledProgram*, int> ancestorBaseOffsets;
         for (const auto& inheritPath : ast->inherits) {
             auto parentProgram = compile(inheritPath);
             if (!parentProgram) {
                 std::cerr << "[object] " << path << ": failed to compile inherited file \""
                           << inheritPath << "\"\n";
                 return nullptr;
+            }
+            int base = static_cast<int>(inheritedObjectVarNames.size());
+            ancestorBaseOffsets[parentProgram.get()] = base;
+            for (const auto& entry : parentProgram->ancestorBaseOffsets) {
+                ancestorBaseOffsets[entry.first] = base + entry.second;
             }
             parents.push_back(parentProgram);
             inheritedObjectVarNames.insert(inheritedObjectVarNames.end(),
@@ -382,6 +405,7 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& filen
         auto program = std::make_shared<CompiledProgram>(
             codegen.generate(*ast, inheritedObjectVarNames));
         program->inheritedPrograms = std::move(parents);
+        program->ancestorBaseOffsets = std::move(ancestorBaseOffsets);
 
         programCache_[filename] = program;
         return program;
@@ -405,7 +429,8 @@ bool ObjectManager::loadSimulEfunObject() {
     return simulEfunObject_ != nullptr;
 }
 
-bool ObjectManager::sourceFileExists(const std::string& filename) const {
+bool ObjectManager::sourceFileExists(const std::string& rawFilename) const {
+    std::string filename = normalizeFilename(rawFilename);
     std::string path = config_.mudlibRoot() + filename + ".c";
     struct stat st;
     // Matches real int_load_object()'s own check (simulate.c): "stat(
@@ -474,7 +499,8 @@ std::shared_ptr<LpcObject> ObjectManager::loadVirtualObject(const std::string& f
     return ob;
 }
 
-std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& filename) {
+std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& rawFilename) {
+    std::string filename = normalizeFilename(rawFilename);
     auto existing = loaded_.find(filename);
     if (existing != loaded_.end()) return existing->second;
 
@@ -492,6 +518,7 @@ std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& filename
 
     auto obj = std::make_shared<LpcObject>(filename, program);
     loaded_[filename] = obj;
+    initPrivsForObject(obj, filename);
 
     // A runtime error thrown out of create() (a missing efun, a bad
     // sscanf(), etc.) must fail this one object's load, not crash the
@@ -523,11 +550,13 @@ void ObjectManager::runObjectVarInitializers(const std::shared_ptr<LpcObject>& o
     vm_->callFunctionInProgram(obj, program, "$objvarinit", {});
 }
 
-std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& filename) {
+std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFilename) {
+    std::string filename = normalizeFilename(rawFilename);
     auto program = compile(filename);
     if (!program) return nullptr;
 
     auto obj = std::make_shared<LpcObject>(filename, program);
+    initPrivsForObject(obj, filename);
 
     if (vm_) {
         try {
@@ -542,8 +571,23 @@ std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& filenam
     return obj;
 }
 
-std::shared_ptr<LpcObject> ObjectManager::lookupLoadedObject(const std::string& filename) const {
-    auto it = loaded_.find(filename);
+void ObjectManager::initPrivsForObject(const std::shared_ptr<LpcObject>& obj, const std::string& filename) {
+    if (!vm_ || !master_ || !obj) return;
+    Value result;
+    try {
+        result = vm_->applyMaster("privs_file", {Value(filename)});
+    } catch (const std::exception&) {
+        // Real driver: any non-string result (including a thrown/failed
+        // apply) just leaves privs unset, not a hard failure.
+        return;
+    }
+    if (auto* s = std::get_if<std::string>(&result.data)) {
+        obj->setPrivs(*s);
+    }
+}
+
+std::shared_ptr<LpcObject> ObjectManager::lookupLoadedObject(const std::string& rawFilename) const {
+    auto it = loaded_.find(normalizeFilename(rawFilename));
     return it != loaded_.end() ? it->second : nullptr;
 }
 

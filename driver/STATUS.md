@@ -36,12 +36,37 @@ be correctly preserved across deep, multi-branch inheritance chains
 buried in `secure/include/living.h` rather than the `.c` file itself).
 Live testing now reaches several steps further into chargen than
 before, and stops at a new, distinct issue in `std/user/nmsh.c`'s own
-`do_alias()`. Updated again after root-causing that issue: it is not a
-`nmsh.c` bug at all, but a general compiler/VM architecture bug in how
+`do_alias()`. Updated again after root-causing that issue: it was not a
+`nmsh.c` bug at all, but a general compiler architecture bug in how
 object-variable slots are resolved for sibling multi-inherits (see
 "`do_alias()` root-caused" below) -- confirmed via live instrumentation,
-not yet fixed, proposed for direction before implementing since it
-touches shared object-variable resolution broadly.
+proposed for direction, user-approved, and now implemented and fixed
+(two distinct bugs, both covered by new regression tests, full suite
+passing, `do_alias()` crash confirmed gone live). Updated again after
+that fix uncovered a second, distinct, and likely broader bug reaching
+for a room: this driver's function-call resolution order for a bare
+call is backwards from real LPC's actual flattened-function-table
+semantics (confirmed by reading `fluffos-2.9-ds2.08/compiler.c`'s
+`define_new_function()` directly, not guessed) -- an ancestor file's
+own deliberate placeholder/stub function (`std/user/nmsh.c`'s
+`query_name()`, one of several such stubs) is not correctly overridden
+by the real inheriting file's version for calls written inside the
+ancestor's own source. See "Second, distinct bug found reaching for a
+room" below. Proposed for direction, user-approved, and now
+implemented and fixed, with the one existing test that encoded the old
+(disproven) behavior corrected rather than just deleted. Three further,
+much narrower gaps then surfaced live in immediate succession pushing
+toward an actual room -- a real compiler bug (block scoping was never
+implemented at all), a missing `sprintf` specifier (`%c`), and a
+missing efun (`living()`) -- each root-caused, fixed, and covered by a
+regression test; see "Three more gaps found live pushing from the
+fixed `reset_prompt()` toward an actual room" below. Full suite: 282
+tests passing. Live-confirmed: chargen now genuinely runs end to end
+through zone selection and into attribute rolling for the first time
+this project has reached it -- see "Live confirmed: chargen now
+genuinely runs" below for the transcript. Not yet a full room: the
+rest of chargen (roll/accept, race, OCC, alignment, skills) has not
+been exercised live yet and may surface further gaps.
 
 ## Working now
 
@@ -1337,49 +1362,290 @@ that per-inherit base at the point of dispatch -- not via a single
 globally-cached, offset-free absolute slot baked in at each file's own
 standalone compile time.
 
-**Not yet fixed.** This is a compiler/VM-level fix that touches how
-every inherited file's object-variable slots are resolved at runtime,
-not a one-file patch -- squarely the kind of change the project's
-standing rule says to stop and propose before implementing. See the
-proposal below.
+**Fixed, confirmed live and by regression test, user-approved before
+implementation.** Two distinct bugs, both in the compiler, both now
+fixed:
+
+1. **Missing runtime base offset** (the one described above). Fixed by
+   adding `CompiledProgram::ancestorBaseOffsets`
+   (`std::unordered_map<const CompiledProgram*, int>`), populated in
+   `ObjectManager::compile()` right after each parent is resolved: for
+   every direct parent, record the base offset its own local slot 0
+   maps to within this file's own flattened layout, then merge that
+   parent's own `ancestorBaseOffsets` in, shifted by the same base --
+   composing correctly across arbitrarily deep chains, not just one
+   level of direct siblings. `VM::run()` now computes an
+   `objectVarBase` once per call (0 when the executing program *is*
+   `obj->program()` itself -- the common case, no map lookup needed --
+   otherwise looked up from `obj->program().ancestorBaseOffsets`), and
+   both `PushObjectVar`/`StoreObjectVar` add it to `instr.operand`
+   before indexing `obj->variables()`.
+2. **A second, distinct bug found while regression-testing the first**:
+   `CodeGen::generate()` computed a newly-declared object variable's own
+   slot number as `objectVars_.size()` -- the size of a *name-keyed
+   map* built from `inheritedObjectVarNames`. A private variable's
+   synthesized name (`"$private#N"`) is only unique relative to the
+   file that declared it (local numbering always starts at 0); two
+   files reached via separate inherit branches can each independently
+   produce `"$private#0"`, and when both are flattened together those
+   names collide in the map, silently undercounting the real number of
+   inherited slots. Fixed by tracking the next slot with a separate
+   `size_t nextObjectVarSlot`, seeded from `inheritedObjectVarNames.size()`
+   (a plain vector length, immune to name collisions) and incremented
+   per new variable, instead of reading it back off the map.
+
+Both fixes are covered by dedicated regression tests in
+`test_lexer.cpp`: `testSiblingLeafObjectVariablesDoNotAliasEachOther`
+(mirrors `std/user.c`'s own AUTOSAVE/EDITOR/NMSH shape -- two leaf
+siblings, each with several private variables in one declaration
+statement) and `testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain`
+(mirrors `std/living.c`'s own shape -- a 3-level chain plus an
+unrelated sibling leaf at the top, matching `std/living/combat.c`'s
+real `inherit BODY; inherit SKILLS;`). Both tests were confirmed to
+fail against the pre-fix code before the fix was applied (not just
+written to pass vacuously): the sibling test failed with
+`leaf_two`'s init overwriting `leaf_one`'s own first variable at raw
+slot 0, and the multi-level test failed via bug 2 above (`create()`'s
+own new variable landed on the same slot a sibling branch's variable
+already used). Full suite (277 tests) passes after both fixes.
+Live-confirmed: the original `do_alias()` crash ("Index: target is not
+an array, mapping, or string") no longer occurs; `__Xverbs` now stays
+a correct mapping all the way from `create()` through the alias-check
+codepath.
+
+## Second, distinct bug found reaching for a room: function-call resolution order is backwards from real LPC for ancestor-overridable stubs
+
+While re-testing live after the slot fix above, chargen got further
+(no more `do_alias()` crash) but `setup()` started throwing inside
+`std/user/nmsh.c`'s own `reset_prompt()`:
+`replace_string: expected (string, string, string) arguments
+(occurrence-range form not implemented)`. Root-caused with the same
+temporary-instrumentation methodology (checkpoints bisecting exactly
+where a value stopped being a string, removed once understood): NOT
+object-variable corruption this time -- `char_name` was never
+clobbered. The actual bug is that `query_name()`, called bare from
+*within* `std/user/nmsh.c`'s own code, resolves to `nmsh.c`'s own
+`string query_name() { return 0; }` (one of a block of stub functions
+at the bottom of that file -- `query_hp()`, `query_max_hp()`,
+`query_sp()`, `query_max_sp()`, `query_invis()`, `query_name()` --
+each returning a hardcoded placeholder), not to `std/user.c`'s real
+override (`string query_name() { return char_name; }`), even though
+`std/user.c` inherits `nmsh.c` and legitimately overrides it.
+
+**Confirmed against real FluffOS source, not guessed.**
+`compiler.c`'s `define_new_function()` (lines 1046-1074,
+`fluffos-2.9-ds2.08/compiler.c`): when a function name that was
+previously seen with `FUNC_INHERITED` gets redefined further along the
+same compile, the comment states plainly: "It was either an undefined
+but used function, or an inherited function. In both cases, we now
+consider this to be THE new definition." Real LPC compiles an object's
+*entire* inherit tree into one flattened function table; when a child
+(here, `std/user.c`) defines a function with the same name as
+something it inherited (`nmsh.c`'s stub), the child's definition
+replaces the entry in that *one shared table* for the whole object --
+not just for calls written in the child's own source. Every unqualified
+call to that name, including ones textually inside the ancestor's own
+file, resolves through the same table and gets the override, unless
+explicitly bypassed with `::` (`nomask` is the reverse: it forbids a
+child from ever replacing that entry at all). This is the standard
+Nightmare-mudlib idiom `nmsh.c` is using here on purpose: it defines
+placeholder defaults so it compiles and runs standalone, expecting a
+real inheriting file like `std/user.c` to override them -- the same
+pattern used for at least five other stubs in the same block.
+
+This driver's `OpCode::Call` does the opposite: `findFunctionInChain(program,
+funcName)` searches the *currently executing* program's own lexical
+scope (its own functions, then its own `inheritedPrograms`, depth-first)
+first, and only falls back to `obj->program()` (the top-level, most-derived
+object) when that search finds *nothing at all*. Since `nmsh.c` does
+define its own `query_name()`, the lexical search succeeds locally and
+the fallback -- which exists specifically to reach a child's override,
+per that code's own comment ("confirmed live needed" for a different
+case, `query_client()`) -- never triggers. The fallback's own reasoning
+("a file's own internal calls must still resolve to its own (or its
+own ancestors') definitions first, real LPC does not virtually
+dispatch a parent's internal self-calls to a child's override") is the
+part contradicted by `define_new_function()`'s own comment above: real
+LPC's resolution is not lexical-scope-first with a not-found fallback,
+it is single-flattened-table-first, always, with `::` as the only way
+to reach a specific ancestor's shadowed version instead.
+
+**Scope: likely broader than this one file.** The same
+default-stub-for-standalone-use, override-in-the-real-object pattern
+is a common, deliberate Nightmare/LPC idiom, not unique to
+`nmsh.c`/`query_name()`. Anywhere an ancestor file provides a
+placeholder that a more-derived file overrides, and the ancestor's own
+code calls that name internally (not through `::`), this driver
+currently gets the wrong (ancestor's own, stale) version instead of
+the real override. This was only confirmed for this one call site
+live; the true extent across the rest of the mudlib has not been
+surveyed.
+
+**Not yet fixed.** This is a change to the fundamental function-call
+resolution order for `OpCode::Call` (and by extension `CallParent`'s
+own bare-form search, and the plain `Call` opcode's existing
+`query_client()`-style fallback, which would become largely
+redundant), not a one-file patch -- squarely a shared-behavior change
+the project's standing rule says to propose before implementing.
 
 ### Proposed fix
 
-Give the VM a way to add the correct base offset when executing a
-specific inherited program's bytecode against a specific object,
-mirroring FluffOS's own `variable_index_offset` model instead of
-relying on a single flat, offset-free absolute slot number baked into
-each file's cached bytecode:
+Invert the search order for a bare (unqualified) `OpCode::Call`: try
+`obj->program()` (the top-level, most-derived program) first via
+`findFunctionInChain()`, exactly like `callFunction()`/`call_other`
+already do; only if that finds nothing at all should the driver treat
+it as genuinely undefined and fall through to the simul_efun object,
+then the efun table. This matches `define_new_function()`'s flattened-
+table model: the most-derived definition always wins for a bare call,
+regardless of which file's source the call is textually written in.
 
-1. Keep every file's own bytecode using slot numbers relative only to
-   its own direct inherit chain (current behavior for leaves is
-   already correct in isolation -- this does not need to change).
-2. When `ObjectManager::compile()` flattens a parent's inherited
-   object variables, also record, per inherited file, the base offset
-   its own local slot 0 maps to within *this specific parent's*
-   flattened layout (a `std::vector<std::pair<CompiledProgram*, int
-   baseOffset>>` or similar, alongside `inheritedPrograms`).
-3. At the point a function belonging to an inherited program actually
-   runs against an object (`VM`'s call dispatch, including
-   `callFunctionInProgram()`), resolve which program that function
-   belongs to and add that program's base offset for *this object's
-   own top-level program* before using `instr.operand` to index
-   `obj->variables()` in `PushObjectVar`/`StoreObjectVar`.
-4. Because the same file can be inherited by different parents with
-   different offsets (and the program cache intentionally keeps one
-   shared `CompiledProgram` per file), the offset must live on the
-   calling side (the object's own top-level program's inherit-offset
-   table) and never be baked back into the shared cached bytecode
-   itself.
+This does not change `OpCode::CallParent` (`::name()`/
+`qualifier::name()`), which is explicitly the escape hatch for
+bypassing the override and must keep searching only the *inherited*
+programs, skipping the current one, exactly as it does now.
 
-This needs a regression test with a genuinely multi-sibling-leaf
-inherit shape (mirroring `std/user.c`'s own AUTOSAVE/EDITOR/NMSH
-structure) before it can be trusted, not just the existing
-one-or-two-level chains already covered.
+Removes the need for the existing "lexical search first, obj->program()
+fallback only if nothing found" logic and its special-cased comment
+about `query_client()` -- that case, and this one, are both explained
+by the same single rule (most-derived wins for bare calls) once the
+order is corrected, rather than being two different special
+mechanisms.
 
-Not implemented yet -- reported for direction before touching shared
-object-variable resolution, per the standing rule that this class of
-change gets proposed first.
+Needs a regression test that exercises exactly this shape: an ancestor
+file defining a stub the way `nmsh.c` does, a child overriding it, and
+a call written *inside the ancestor's own source* confirming it now
+reaches the child's override -- plus confirmation that existing tests
+relying on the current fallback behavior for `query_client()`-style
+cases still pass under the new, simpler single-rule order.
+
+**Fixed, user-approved before implementation.** `OpCode::Call` now
+searches `obj->program()` (the object's own top-level, most-derived
+program) directly via `findFunctionInChain()`, instead of searching
+`program` (whichever file is currently executing) first with a
+not-found-only fallback. The old two-step logic and its
+`query_client()`-specific comment are gone -- a single top-level-first
+search is a strict superset, since `obj->program()`'s own depth-first
+walk necessarily covers every program in its inherit tree, `program`
+always among them. `OpCode::CallParent` (`::name()`/
+`qualifier::name()`) is untouched, exactly as proposed.
+
+The existing test `testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride`
+encoded the old (disproven) behavior as its own expected result and
+was renamed/corrected to
+`testBareCallFromParentReachesChildsOverrideNotItsOwnLexicalDefinition`,
+now asserting the child's override wins for a bare call written inside
+the parent's own source -- exactly the `nmsh.c`/`query_name()` shape.
+`testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime` (the
+original `query_client()`-style case) was re-confirmed passing
+unchanged under the new single-rule order. Full suite (279 tests at
+that point) passing.
+
+## Three more gaps found live pushing from the fixed `reset_prompt()` toward an actual room
+
+With both fixes above in place, live testing advanced past
+`reset_prompt()` (no more crash) and surfaced three further, unrelated,
+much narrower gaps in sequence -- each root-caused with the same
+temporary-instrumentation-then-remove methodology, each fixed directly
+(none broad enough to need a propose-first cycle) with a regression
+test, confirmed live:
+
+1. **A real compiler bug, not a mudlib bug: block scoping was never
+   implemented.** `domains/Praxis/setter.c` failed to compile:
+   `codegen: variable "me" already declared in this scope`. The file
+   has two sibling `{ ... }` blocks (its "Store PPE"/"Store ISP"
+   blocks), neither nested in the other, each declaring its own local
+   `me` -- entirely legal C89/LPC, since each block is its own scope.
+   `CodeGen`'s `locals_` was a single flat per-*function* map with no
+   concept of nested block scope at all -- `Parser.cpp`'s own comment
+   on the standalone-`{ }`-statement case said so explicitly ("this
+   driver has no lexical block-scoping to enforce"). Fixed: added
+   `localScopeStack_` (`std::vector<std::vector<std::string>>`);
+   `declareLocal()` records each new name against the innermost open
+   scope, and `emitBlock()` now pushes an empty scope before compiling
+   a block's statements and erases those recorded names from `locals_`
+   when the block closes. One real complication found immediately by
+   the existing test suite: a comma-separated var decl (`"string a, b,
+   c;"`) and a for-loop's comma-chained init/update clause and a
+   braceless single-statement if/while/for branch all reuse the same
+   `Block` AST node purely as a wrapper, not as a real scope --
+   scoping those unconditionally broke
+   `testLocalVarDeclCommaListVmExecution` (`"string a, b, c; ...
+   return a + b + c;"` threw `undeclared variable "a"`, the decl's own
+   names erased right after that one statement). Fixed by adding
+   `Block::isRealScope` (default `true`), set to `false` at the three
+   synthetic-wrapper call sites (`Parser::parseVarDeclStatement()`,
+   `parseCommaExprChain()`, `parseBranch()`), and `emitStatement()`'s
+   nested-`Block` case now only opens a new scope when `isRealScope`
+   is true, otherwise flattening directly into the enclosing scope as
+   before. Two new tests:
+   `testSiblingBlocksMayReuseALocalNameNeitherNestedInTheOther` (the
+   real `setter.c` shape) and
+   `testNameDeclaredInABlockIsUndeclaredOnceThatBlockEnds` (confirms
+   the block-exit boundary is real, not just non-colliding).
+2. **`sprintf`'s `"%c"` was unimplemented.** `/daemon/terminal`'s own
+   `create()` failed: `sprintf: unsupported format specifier '%c'`.
+   `daemon/terminal.c`'s `ANSI(p)`/`ESC(p)` macros build a raw ESC
+   (ASCII 27) byte via `sprintf("%c[" + (p) + "m", 27)`. Confirmed
+   against `fluffos-2.9-ds2.08/sprintf.c`: `INFO_T_CHAR` requires a
+   `T_NUMBER` (int) argument, mapped straight through to C's own
+   `sprintf(..., "%c", ...)`. Implemented to match (throws if the
+   argument is not an int, same convention as the existing `%s`/`%d`
+   cases). Two new tests:
+   `testSprintfPercentCEmitsSingleCharacterFromIntArgument`,
+   `testSprintfPercentCThrowsOnNonIntArgument`.
+3. **`living()` was a missing efun.** `move()` (bare-called from
+   `std/user.c`'s `setup()`, resolving via the just-fixed `Call`
+   opcode to `std/living.c`'s own `move()`, which itself calls
+   `::move()` up to `std/Object.c`'s base implementation) threw
+   `undefined function or efun: living`. `std/Object.c`'s own `move()`
+   gates `move_object()` behind `living(this_object()) && living(ob)`
+   (blocking one living thing moving directly into another, aside from
+   the `"mountable"` exception). Confirmed against
+   `func_spec.c`: `"int living(object default: F__THIS_OBJECT);"`, and
+   `add_action.c`'s `f_living()`: returns whether
+   `O_ENABLE_COMMANDS` is set on the object, nothing more. Implemented
+   directly on top of the existing `commandsEnabled()` flag this
+   driver's `enable_commands()`/`disable_commands()` pair already
+   maintains (from the earlier `add_action` subsystem work), defaulting
+   the argument to `current_object()` per the real signature. New test:
+   `testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject`
+   (enable/disable round trip, default-argument form, and confirms the
+   flag is per-object, not global).
+
+Full suite: 282 tests passing after all three.
+
+## Live confirmed: chargen now genuinely runs, reaches attribute rolling
+
+With every fix above in place, a fresh live account-creation test
+(`roomtestfive`) now shows the real chargen banner for the first time
+this project has ever reached it:
+
+```
+=== STEP 1: CHOOSE YOUR STARTING ZONE ===
+Where does your story begin on Rifts Earth?
+ americas   The Americas (Chi-Town)
+ europe     Europe (New Camelot)
+ atlantis   Atlantis (Splynn market shores)
+Type your choice: americas, europe, or atlantis.
+
+> americas
+The Americas. You will begin at the edge of Chi-Town.
+=== STEP 2: ROLL ATTRIBUTES ===
+Roll Palladium attributes (3d6 each for IQ, ME, MA, PS, PP, PE, PB, Spd).
+Type: roll
+After rolling you must type accept to keep the roll, or reroll
+(up to 4 rerolls, 5 total rolls). Race selection stays locked
+until you type accept.
+```
+
+This matches the documented real chargen flow exactly (see the
+mudlib's own `CLAUDE.md`, "Chargen input model is plain-string only").
+Not yet a full room: reaching one requires completing the rest of
+chargen (`roll`/`accept`, race, OCC, alignment, skills), each of which
+may surface further gaps not yet exercised live. All debug
+instrumentation used to root-cause every issue in this and the
+previous section has been removed, confirmed via grep across every
+touched mudlib file.
 
 ## Known stubs / scope limitations (intentional, not bugs)
 

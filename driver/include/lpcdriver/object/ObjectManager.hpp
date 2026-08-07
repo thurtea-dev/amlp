@@ -45,6 +45,18 @@ public:
     void destructObject(const std::shared_ptr<LpcObject>& obj);
 
 private:
+    // Strips one trailing ".c" if present, so "id_card" and "id_card.c"
+    // resolve to the exact same cache entry and object identity. Real
+    // LPC object paths never carry the ".c" extension internally (this
+    // driver appends it itself to find the source file on disk -- see
+    // compile()'s own "filename + \".c\"" below), but plenty of real
+    // mudlib call sites still pass one anyway out of habit (e.g. daemon/
+    // rifts_start_d.c's own give_item(player, "id_card.c")). Without this,
+    // such a call resolved to a literal "id_card.c.c" file that never
+    // exists. Same normalization shape as save_object()'s own path
+    // handling (EfunTable.cpp), applied on the load/compile side instead.
+    static std::string normalizeFilename(const std::string& filename);
+
     std::shared_ptr<CompiledProgram> compile(const std::string& filename);
 
     // Runs "$objvarinit" (see CodeGen::generate()'s own comment) on obj
@@ -73,6 +85,25 @@ private:
     // rebinding this replicates.
     std::shared_ptr<LpcObject> loadVirtualObject(const std::string& filename);
     bool sourceFileExists(const std::string& filename) const;
+
+    // Real simulate.c's own init_privs_for_object(), called from
+    // init_object() for every freshly compiled or cloned object before
+    // its own create() runs: "push_malloced_string(add_slash(ob->obname));
+    // value = apply_master_ob(APPLY_PRIVS_FILE, 1); ob->privs = (value &&
+    // value->type == T_STRING) ? value->u.string : NULL;" -- this
+    // driver had no equivalent at all (LpcObject's own privs_ optional
+    // simply stayed unset for every object unless a mudlib file called
+    // set_privs() on itself directly), confirmed live needing this:
+    // secure/SimulEfun/log_file.c's own "explode(query_privs(
+    // previous_object()), \":\")" throws when query_privs() returns 0
+    // (this driver's correct "unset" value, matching real semantics --
+    // see query_privs()'s own EfunTable.cpp comment) for any object
+    // whose compile-time privs were never actually assigned. Skipped
+    // (leaving privs unset, the real driver's own "!current_object"
+    // bootstrap branch outcome) when master_ itself is not loaded yet --
+    // this only matters for master.c's own bootstrap load, nothing this
+    // driver has run yet depends on the master object's own privs.
+    void initPrivsForObject(const std::shared_ptr<LpcObject>& obj, const std::string& filename);
 
     Config& config_;
     VM* vm_ = nullptr;

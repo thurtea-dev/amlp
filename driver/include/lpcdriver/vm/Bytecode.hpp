@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace lpcdriver {
@@ -142,6 +143,42 @@ struct CompiledProgram {
     // something), function-call and object-variable resolution both walk
     // the full chain -- see VM.cpp's findFunctionInChain.
     std::vector<std::shared_ptr<CompiledProgram>> inheritedPrograms;
+
+    // Every program transitively anywhere in this program's own inherit
+    // tree (immediate parents and their own ancestors, recursively),
+    // mapped to the absolute base offset at which that program's own
+    // object variables start within *this* program's flattened
+    // objectVarNames/variables() layout. A program's own bytecode always
+    // addresses its object variables with slot numbers relative only to
+    // its own direct inherit chain (correct when that program runs
+    // completely on its own); when one of its functions instead runs as
+    // part of a *different*, larger object -- because it was reached via
+    // inheritance, and CompiledProgram is cached and reused verbatim
+    // everywhere a file is inherited (see ObjectManager::compile()'s own
+    // comment) -- the VM must add this offset before indexing
+    // LpcObject::variables(), or two unrelated sibling files that are
+    // each inherited directly (no parents of their own) will silently
+    // alias each other's low slot numbers. Populated by
+    // ObjectManager::compile() right after CodeGen::generate() returns,
+    // by combining each direct parent's own running prefix offset with
+    // that parent's own ancestorBaseOffsets (recursive composition, not
+    // just one level). Does not include an entry for this program
+    // itself: code belonging to *this* program running directly against
+    // an object whose own program() is this same program needs no
+    // adjustment (offset 0), which VM::run() treats as the fast-path
+    // default rather than a map lookup.
+    //
+    // Scope note: this assumes single-copy (non-diamond) inheritance --
+    // the same ancestor file reached via two different inherit paths
+    // within one object gets only one entry here (the second path's
+    // offset silently wins), matching how real LPC would actually give
+    // that ancestor two separate flattened copies at two different
+    // offsets instead. No diamond shape has been found in this mudlib's
+    // actual inherit graph as of this fix; if one turns up, this map
+    // needs to become multi-valued (or inheritance resolution needs to
+    // duplicate the ancestor's slots per path) rather than silently
+    // picking one.
+    std::unordered_map<const CompiledProgram*, int> ancestorBaseOffsets;
 };
 
 } // namespace lpcdriver

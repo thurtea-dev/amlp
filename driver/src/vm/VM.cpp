@@ -6,6 +6,7 @@
 #include "lpcdriver/efun/EfunTable.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <utility>
@@ -107,6 +108,27 @@ bool asArithmeticOperand(const lpcdriver::Value& v, double& out) {
         return true;
     }
     return false;
+}
+
+// Formats an int64_t/double/monostate Value for string+number
+// concatenation (OpCode::Add's own "string" +/- int/float branches),
+// matching real interpret.c's F_ADD exactly: "%ld" for an int, "%f" for
+// a float (C's default six decimal places, not a shortest round-trip
+// representation). monostate (this driver's own missing-mapping-key/
+// no-value encoding, see asArithmeticOperand's own comment) formats as
+// plain "0", the same real-0 treatment asArithmeticOperand already
+// gives it for numeric +/-/*. Caller guarantees v actually holds one of
+// these three kinds.
+std::string formatNumberForConcat(const lpcdriver::Value& v) {
+    if (auto* i = std::get_if<int64_t>(&v.data)) {
+        return std::to_string(*i);
+    }
+    if (std::holds_alternative<std::monostate>(v.data)) {
+        return "0";
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%f", std::get<double>(v.data));
+    return std::string(buf);
 }
 
 // Resolves a bare function-call name against a program's own functions
@@ -610,6 +632,28 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
     // ObjectFrameGuard's own comment for the real-semantics citation.
     ObjectFrameGuard objectFrameGuard(callStack_, objectChangeStack_, obj);
 
+    // Base offset to add to this program's own PushObjectVar/
+    // StoreObjectVar slot numbers before indexing obj->variables() (see
+    // Bytecode.hpp's CompiledProgram::ancestorBaseOffsets comment for the
+    // full citation). `program` is whichever specific file's bytecode is
+    // executing -- possibly several inherit levels below obj->program(),
+    // e.g. a leaf mixin like std/user/nmsh.c running as part of a
+    // std/user.c object -- while obj->variables() is always sized to
+    // obj->program()'s own fully-flattened total. `program`'s own slot
+    // numbers are relative only to its own direct inherit chain (correct
+    // when it runs standalone); the fast path (0 offset) covers a
+    // function belonging to obj->program() itself, which already uses
+    // absolute slots with no adjustment needed.
+    int objectVarBase = 0;
+    if (&program != &obj->program()) {
+        auto offsetIt = obj->program().ancestorBaseOffsets.find(&program);
+        if (offsetIt == obj->program().ancestorBaseOffsets.end()) {
+            throw LpcRuntimeError(
+                "internal error: no object-variable base offset recorded for an inherited program");
+        }
+        objectVarBase = offsetIt->second;
+    }
+
     // Real int64_t 0 per slot, not monostate -- see LpcObject.cpp's own
     // comment on variables_'s identical initialization for the citation;
     // a declared-but-not-yet-assigned local reads as 0 in real LPC too,
@@ -703,23 +747,25 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
 
             case OpCode::PushObjectVar: {
                 auto& vars = obj->variables();
-                if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= vars.size()) {
+                int64_t slot = static_cast<int64_t>(objectVarBase) + instr.operand;
+                if (slot < 0 || static_cast<size_t>(slot) >= vars.size()) {
                     throw LpcRuntimeError("PushObjectVar: bad object variable slot index");
                 }
-                localStack.push_back(vars[instr.operand]);
+                localStack.push_back(vars[static_cast<size_t>(slot)]);
                 ++ip;
                 break;
             }
 
             case OpCode::StoreObjectVar: {
                 auto& vars = obj->variables();
-                if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= vars.size()) {
+                int64_t slot = static_cast<int64_t>(objectVarBase) + instr.operand;
+                if (slot < 0 || static_cast<size_t>(slot) >= vars.size()) {
                     throw LpcRuntimeError("StoreObjectVar: bad object variable slot index");
                 }
                 if (localStack.empty()) {
                     throw LpcRuntimeError("StoreObjectVar: stack underflow");
                 }
-                vars[instr.operand] = localStack.back();
+                vars[static_cast<size_t>(slot)] = localStack.back();
                 localStack.pop_back();
                 ++ip;
                 break;
@@ -749,14 +795,26 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 Value rhs = localStack.back(); localStack.pop_back();
                 Value lhs = localStack.back(); localStack.pop_back();
 
+                // asArithmeticOperand (not a bare int64_t/double check) so
+                // monostate -- this driver's own missing-mapping-key/no-
+                // value encoding -- compares as a real 0, consistent with
+                // the same treatment it already gets in +/-/* (see that
+                // function's own comment). Found live: secure/daemon/
+                // player.c's own sort_list(), "alpha[\"experience\"] >
+                // beta[\"experience\"]" -- a brand new character's own
+                // freshly-built mapping entry can have "experience" as a
+                // real int (query_exp() itself returns 0, not void), but
+                // the general case of comparing a possibly-missing
+                // mapping key must not throw where real LPC (which has
+                // no such distinction at the value level -- a missing
+                // key is simply int 0) would happily compare.
                 double lv, rv;
-                if (std::holds_alternative<int64_t>(lhs.data)) lv = static_cast<double>(std::get<int64_t>(lhs.data));
-                else if (std::holds_alternative<double>(lhs.data)) lv = std::get<double>(lhs.data);
-                else throw LpcRuntimeError("comparison: left operand is not numeric");
-
-                if (std::holds_alternative<int64_t>(rhs.data)) rv = static_cast<double>(std::get<int64_t>(rhs.data));
-                else if (std::holds_alternative<double>(rhs.data)) rv = std::get<double>(rhs.data);
-                else throw LpcRuntimeError("comparison: right operand is not numeric");
+                if (!asArithmeticOperand(lhs, lv)) {
+                    throw LpcRuntimeError("comparison: left operand is not numeric");
+                }
+                if (!asArithmeticOperand(rhs, rv)) {
+                    throw LpcRuntimeError("comparison: right operand is not numeric");
+                }
 
                 bool result = false;
                 switch (instr.op) {
@@ -1011,6 +1069,60 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     std::holds_alternative<std::string>(rhs.data)) {
                     localStack.emplace_back(
                         Value(std::get<std::string>(lhs.data) + std::get<std::string>(rhs.data)));
+                } else if (std::holds_alternative<std::string>(lhs.data) &&
+                           (std::holds_alternative<int64_t>(rhs.data) ||
+                            std::holds_alternative<double>(rhs.data) ||
+                            std::holds_alternative<std::monostate>(rhs.data))) {
+                    // "string" + int/float -- confirmed against real
+                    // interpret.c's F_ADD (case T_STRING's own nested
+                    // T_NUMBER/T_REAL branches): the number is formatted
+                    // as text ("%ld"/"%f") and appended, not a type
+                    // error. Found live: daemon/terminal.c's own ESC(p)
+                    // macro (`sprintf("%c"+(p), 27)`) is called with a
+                    // bare int argument in several of its own table
+                    // entries (ESC(7), ESC(8)), building a format string
+                    // by string+int concatenation exactly like this.
+                    // monostate accepted here too, formatting as "0" --
+                    // the same missing-mapping-key value asArithmeticOperand
+                    // already treats as a real 0 for numeric +/-/*, so a
+                    // string+monostate concatenation must agree rather
+                    // than throw. Found live: std/money.c's own
+                    // query_money(), "return money[str];", called before
+                    // any currency has ever been added to a fresh
+                    // character's money mapping -- std/user.c's own
+                    // setup() logs "... + query_money(\"platinum\") + \" pl,
+                    // \" + ...".
+                    localStack.emplace_back(Value(
+                        std::get<std::string>(lhs.data) + formatNumberForConcat(rhs)));
+                } else if ((std::holds_alternative<int64_t>(lhs.data) ||
+                            std::holds_alternative<double>(lhs.data) ||
+                            std::holds_alternative<std::monostate>(lhs.data)) &&
+                           std::holds_alternative<std::string>(rhs.data)) {
+                    // int/float + "string" -- the symmetric case (same
+                    // interpret.c F_ADD, case T_NUMBER/T_REAL's own
+                    // nested T_STRING branch): the number is formatted
+                    // and prepended.
+                    localStack.emplace_back(Value(
+                        formatNumberForConcat(lhs) + std::get<std::string>(rhs.data)));
+                } else if (std::holds_alternative<std::shared_ptr<LpcObject>>(lhs.data) &&
+                           std::holds_alternative<std::string>(rhs.data)) {
+                    // object + "string" -- interpret.c's F_ADD, case
+                    // T_STRING's own T_OBJECT branch: the object's own
+                    // filename (real obname, "/"-prefixed) is prepended.
+                    // This driver's LpcObject::filename() already stores
+                    // the leading slash (see file_name() efun's own
+                    // comment), so no extra "/" is added here.
+                    auto ob = std::get<std::shared_ptr<LpcObject>>(lhs.data);
+                    localStack.emplace_back(Value(
+                        (ob ? ob->filename() : std::string()) + std::get<std::string>(rhs.data)));
+                } else if (std::holds_alternative<std::string>(lhs.data) &&
+                           std::holds_alternative<std::shared_ptr<LpcObject>>(rhs.data)) {
+                    // "string" + object -- interpret.c's F_ADD, case
+                    // T_OBJECT's own T_STRING branch: the object's own
+                    // filename is appended.
+                    auto ob = std::get<std::shared_ptr<LpcObject>>(rhs.data);
+                    localStack.emplace_back(Value(
+                        std::get<std::string>(lhs.data) + (ob ? ob->filename() : std::string())));
                 } else if (std::holds_alternative<std::shared_ptr<Array>>(lhs.data) &&
                            std::holds_alternative<std::shared_ptr<Array>>(rhs.data)) {
                     auto leftArr = std::get<std::shared_ptr<Array>>(lhs.data);
@@ -1292,31 +1404,48 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 std::vector<Value> callArgs(localStack.end() - argc, localStack.end());
                 localStack.erase(localStack.end() - argc, localStack.end());
 
-                FunctionLookupResult found = findFunctionInChain(program, funcName);
-                if (!found.program && &program != &obj->program()) {
-                    // program is whichever file's own bytecode is
-                    // currently executing, not necessarily obj's own
-                    // most-derived program -- e.g. std/user/nmsh.c's own
-                    // process_input() calling the bare name
-                    // "query_client", a function nmsh.c neither defines
-                    // nor inherits itself, only std/user.c (which
-                    // inherits nmsh.c) does. Real LPC compiles each file
-                    // independently and has no way to know at nmsh.c's
-                    // own compile time that some future child will
-                    // provide it, so a call like this can only ever be
-                    // resolved at runtime, against whatever the actual
-                    // running object turns out to be -- confirmed live
-                    // needed (this exact call site). This fallback tries
-                    // exactly that, but only *after* the normal lexical-
-                    // scope search above has already failed: a file's
-                    // own internal calls must still resolve to its own
-                    // (or its own ancestors') definitions first, real
-                    // LPC does not virtually dispatch a parent's
-                    // internal self-calls to a child's override, so this
-                    // must never run before the search above, only as a
-                    // last resort when that search found nothing at all.
-                    found = findFunctionInChain(obj->program(), funcName);
-                }
+                // A bare (unqualified) call always resolves against
+                // obj->program() -- the object's own top-level, most-
+                // derived program -- never against `program` (whichever
+                // file's own bytecode happens to be currently executing).
+                // This matches real LPC's actual compile-time model, not
+                // C++-style non-virtual lexical scoping: FluffOS's own
+                // compiler.c define_new_function() flattens an object's
+                // entire inherit tree into ONE shared function table, and
+                // when a more-derived file redefines a name an ancestor
+                // already provided, that redefinition "is... considered
+                // to be THE new definition" for the whole object -- every
+                // unqualified call to that name resolves through the same
+                // table and reaches the override, including calls written
+                // inside the ancestor's own source. This is the standard
+                // Nightmare/LPC idiom of an ancestor defining a
+                // placeholder stub (e.g. std/user/nmsh.c's own
+                // "query_name() { return 0; }", one of several such
+                // stubs) that a real inheriting file (std/user.c) is
+                // meant to override -- confirmed live broken the other
+                // way: nmsh.c's own reset_prompt() calling query_name()
+                // was reaching nmsh.c's own stub instead of std/user.c's
+                // real override. A previous version of this opcode
+                // searched `program`'s own lexical scope first and only
+                // fell back to obj->program() when nothing was found at
+                // all (see std/user/nmsh.c's process_input() calling
+                // "query_client", a name nmsh.c neither defines nor
+                // inherits, only std/user.c does); searching
+                // obj->program() first still finds that case too, since
+                // obj->program()'s own depth-first walk necessarily
+                // covers every program in its inherit tree, `program`
+                // (whatever is currently executing) always among them --
+                // so a single top-level-first search is a strict
+                // superset of the old two-step logic, not just a
+                // different tradeoff.
+                //
+                // OpCode::CallParent ("::name()"/"qualifier::name()") is
+                // deliberately untouched: it is the explicit escape hatch
+                // for reaching a specific ancestor's own shadowed
+                // definition instead of the override, and must keep
+                // searching only the *inherited* programs, skipping
+                // `program` itself, exactly as it already does.
+                FunctionLookupResult found = findFunctionInChain(obj->program(), funcName);
                 if (found.program) {
                     Value result = run(*found.program, *found.fn, std::move(callArgs), obj);
                     localStack.push_back(std::move(result));
@@ -1531,6 +1660,28 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
         if (catchFrames.empty()) {
             throw LpcRuntimeError(obj->filename() + "::" + fn.name + "(): " + e.what());
         }
+
+        // Log every trapped error to stderr before resuming, unconditionally.
+        // Confirmed against real FluffOS's own default build: simulate.c's
+        // error_handler() logs a caught error too (debug_message_with_location()
+        // + dump_trace()) whenever LOG_CATCHES is defined -- on by default in
+        // every shipped local_options.*, including this exact mudlib's own
+        // local_options.nm3, whose comment states the reason plainly: "newer
+        // libs use catch() a lot, and it's confusing if the errors don't show
+        // up in the logs." Without this, a catch() that is working exactly as
+        // intended silently hides its own root cause, which is what forced
+        // manual instrumentation to root-cause the do_alias() bug earlier this
+        // project. No line number: this driver discards line numbers after
+        // compilation (only the parser's own compile-time errors carry them),
+        // so object filename + function name + message is what's genuinely
+        // available, matching what [object]/[net] diagnostics already report
+        // elsewhere. Deliberately not also calling master()->error_handler()
+        // (real FluffOS's MUDLIB_ERROR_HANDLER path, mapping to the mapping/
+        // caught-flag apply this mudlib's own master.c already implements at
+        // secure/daemon/master.c:423) -- that is a materially larger feature,
+        // flagged as a follow-up rather than implemented speculatively here.
+        std::cerr << "[catch] " << obj->filename() << "::" << fn.name
+                   << "(): " << e.what() << "\n";
 
         // Unwind to the innermost still-active catch() (LIFO, matching
         // real FluffOS's own nested do_catch() call stack -- see

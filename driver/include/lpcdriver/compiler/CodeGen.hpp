@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include "lpcdriver/compiler/Ast.hpp"
 #include "lpcdriver/vm/Bytecode.hpp"
 
@@ -97,6 +98,23 @@ private:
     CompiledProgram* out_ = nullptr;
     std::unordered_map<std::string, int> locals_;
     int nextLocalSlot_ = 0;
+    // Real LPC/C89 block scoping: a "{ ... }" introduces its own nested
+    // scope for local declarations, so two sibling blocks (e.g. two
+    // separate "{ int me; ... }" groups back to back in the same
+    // function, neither nested in the other) may each declare a
+    // same-named local without colliding -- confirmed live needed
+    // compiling domains/Praxis/setter.c's own "Store PPE"/"Store ISP"
+    // blocks, each with their own "int ... me;". emitBlock() pushes a
+    // new (empty) entry before compiling a block's statements and, on
+    // exit, erases from locals_ every name declared during that block
+    // (recorded here by declareLocal()) before popping it -- restoring
+    // exactly the set of names visible before the block was entered.
+    // Slots themselves are never reused (nextLocalSlot_ only ever
+    // grows), which is simpler and harmless: mirrors this driver's own
+    // existing preference for simple/monotonic allocation elsewhere
+    // (e.g. object variable slots), just uses a few more of a function's
+    // numLocals than a slot-reusing implementation would.
+    std::vector<std::vector<std::string>> localScopeStack_;
     // Per-object variable slots, populated once per generate() call from
     // Program::objectVars before any function body is compiled, and left
     // untouched afterward (unlike locals_, which is per-function).

@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sstream>
 
 static void testBasicTokenize() {
     std::string src =
@@ -2384,6 +2385,55 @@ static void testLocalVarDeclCommaListVmExecution() {
     std::cout << "testLocalVarDeclCommaListVmExecution OK\n";
 }
 
+// Real block scoping: two sibling "{ ... }" blocks (neither nested in the
+// other) in the same function may each declare a same-named local without
+// colliding. Confirmed live needed compiling domains/Praxis/setter.c's own
+// "Store PPE"/"Store ISP" blocks, each with their own "int ppe, ppe_lvl,
+// me;"/"int isp, isp_lvl, me;" -- CodeGen previously used one flat
+// per-function locals_ map with no block-scope tracking at all, so the
+// second block's "me" threw "codegen: variable \"me\" already declared in
+// this scope" against the first block's own "me", which should already be
+// out of scope by then. Also confirms the *other* direction still throws
+// correctly: a name declared in one sibling block is genuinely gone once
+// that block ends, not visible to code after it (real LPC/C block scoping,
+// not the old flat/leaky behavior).
+static void testSiblingBlocksMayReuseALocalNameNeitherNestedInTheOther() {
+    lpcdriver::Value result = runProbe(
+        "int total;\n"
+        "{\n"
+        "    int me;\n"
+        "    me = 10;\n"
+        "    total = me;\n"
+        "}\n"
+        "{\n"
+        "    int me;\n"
+        "    me = 32;\n"
+        "    total = total + me;\n"
+        "}\n"
+        "return total;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+
+    std::cout << "testSiblingBlocksMayReuseALocalNameNeitherNestedInTheOther OK\n";
+}
+
+static void testNameDeclaredInABlockIsUndeclaredOnceThatBlockEnds() {
+    bool threw = false;
+    try {
+        runProbe(
+            "{\n"
+            "    int onlyHere;\n"
+            "    onlyHere = 1;\n"
+            "}\n"
+            "return onlyHere;\n");
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testNameDeclaredInABlockIsUndeclaredOnceThatBlockEnds OK\n";
+}
+
 // --- for loops ------------------------------------------------------------
 
 static void testForLoopParsesToForStmt() {
@@ -3241,6 +3291,34 @@ static void testNestedCatchInnerFailureDoesNotTriggerOuterCatch() {
     assert(!std::get<std::string>(innerResult.data).empty());
 
     std::cout << "testNestedCatchInnerFailureDoesNotTriggerOuterCatch OK\n";
+}
+
+// A caught error must still be visible without adding temporary
+// instrumentation -- confirmed against real FluffOS's own default build
+// (simulate.c's error_handler(), gated on LOG_CATCHES, which is defined
+// by default in every shipped local_options.*, including this exact
+// mudlib's own local_options.nm3). VM::run()'s catch-frame branch logs
+// one "[catch] <object>::<function>(): <message>" line to stderr,
+// unconditionally, before resuming -- this test redirects std::cerr's
+// buffer to capture it rather than just checking the catch() return
+// value (already covered by testCatchEvaluatesToErrorMessageStringWhenGuardedExprThrows).
+static void testCatchLogsTrappedErrorToStderrByDefault() {
+    std::ostringstream captured;
+    std::streambuf* originalCerr = std::cerr.rdbuf(captured.rdbuf());
+    lpcdriver::Value result = runProbe(
+        "mixed err;\n"
+        "err = catch(totally_undefined_thing_xyz());\n"
+        "return err;\n");
+    std::cerr.rdbuf(originalCerr);
+
+    assert(std::holds_alternative<std::string>(result.data));
+    std::string logged = captured.str();
+    assert(logged.find("[catch] probe_object::probe(): ") != std::string::npos);
+    // The logged line must carry the same error message catch() itself
+    // returned, not a generic placeholder.
+    assert(logged.find(std::get<std::string>(result.data)) != std::string::npos);
+
+    std::cout << "testCatchLogsTrappedErrorToStderrByDefault OK\n";
 }
 
 // A runtime error thrown *inside a called function*, with no catch() of
@@ -5608,6 +5686,133 @@ static void testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariabl
 }
 
 // ---------------------------------------------------------------------
+// Object-variable slot offsets across sibling and multi-level inherit
+// chains. Regression coverage for the real std/user.c bug root-caused
+// live: a file inherited alongside sibling files (each with no inherits
+// of its own, e.g. std/user/autosave.c, editor.c, nmsh.c) had its own
+// bytecode's PushObjectVar/StoreObjectVar slot numbers computed relative
+// only to its own standalone compile (always starting at local slot 0),
+// with no per-program base offset applied when that cached bytecode
+// later ran as part of a larger flattened object -- so two unrelated
+// sibling files' variables silently aliased the same actual storage
+// slot whenever their local slot numbers happened to match. See
+// STATUS.md's "do_alias() root-caused" section and
+// Bytecode.hpp's CompiledProgram::ancestorBaseOffsets comment for the
+// full citation and fix design.
+// ---------------------------------------------------------------------
+
+static void testSiblingLeafObjectVariablesDoNotAliasEachOther() {
+    ObjectVarHarness harness;
+
+    // Two independent leaf mixins (no inherits of their own), each with
+    // several private variables in its own declaration -- mirrors
+    // std/user/nmsh.c's "private mapping __Nicknames, __Aliases,
+    // __Xverbs;" sitting alongside std/user/autosave.c's own "private
+    // mixed *__AutoLoad; private int __ItemsValue; static private int
+    // __LastSave;" once both are inherited by the same child. Before the
+    // fix, leaf_one's third variable (a3, local slot 2) and leaf_two's
+    // third variable (b3, also local slot 2) would silently alias the
+    // same absolute storage slot once flattened together.
+    harness.writeFile("/leaf_one.c",
+        "private int a1, a2, a3;\n"
+        "void init_leaf_one() { a1 = 10; a2 = 11; a3 = 12; }\n"
+        "int query_a1() { return a1; }\n"
+        "int query_a2() { return a2; }\n"
+        "int query_a3() { return a3; }\n");
+    harness.writeFile("/leaf_two.c",
+        "private int b1, b2, b3, b4;\n"
+        "void init_leaf_two() { b1 = 20; b2 = 21; b3 = 22; b4 = 23; }\n"
+        "int query_b1() { return b1; }\n"
+        "int query_b2() { return b2; }\n"
+        "int query_b3() { return b3; }\n"
+        "int query_b4() { return b4; }\n");
+    harness.writeFile("/multi_sibling_child.c",
+        "inherit \"/leaf_one\";\n"
+        "inherit \"/leaf_two\";\n"
+        "void create() {\n"
+        "    init_leaf_one();\n"
+        "    init_leaf_two();\n"
+        "}\n");
+
+    auto obj = harness.objects.cloneObject("/multi_sibling_child");
+    assert(obj != nullptr);
+
+    lpcdriver::Value a1 = harness.vm.callFunction(obj, "query_a1", {});
+    lpcdriver::Value a2 = harness.vm.callFunction(obj, "query_a2", {});
+    lpcdriver::Value a3 = harness.vm.callFunction(obj, "query_a3", {});
+    lpcdriver::Value b1 = harness.vm.callFunction(obj, "query_b1", {});
+    lpcdriver::Value b2 = harness.vm.callFunction(obj, "query_b2", {});
+    lpcdriver::Value b3 = harness.vm.callFunction(obj, "query_b3", {});
+    lpcdriver::Value b4 = harness.vm.callFunction(obj, "query_b4", {});
+
+    assert(std::get<int64_t>(a1.data) == 10);
+    assert(std::get<int64_t>(a2.data) == 11);
+    // The exact collision this bug produced: without the base-offset
+    // fix, leaf_two's init (b3 = 22, same raw slot as a3) would leave
+    // this reading 22, not 12.
+    assert(std::get<int64_t>(a3.data) == 12);
+    assert(std::get<int64_t>(b1.data) == 20);
+    assert(std::get<int64_t>(b2.data) == 21);
+    assert(std::get<int64_t>(b3.data) == 22);
+    assert(std::get<int64_t>(b4.data) == 23);
+
+    std::cout << "testSiblingLeafObjectVariablesDoNotAliasEachOther OK\n";
+}
+
+static void testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain() {
+    ObjectVarHarness harness;
+
+    // Mirrors std/living.c's own real shape: a grandparent with its own
+    // variable (like CONTAINER), inherited by a middle file that adds
+    // its own variable (like BODY, which inherits CONTAINER), which is
+    // in turn inherited by a top file alongside an unrelated sibling
+    // leaf (like std/living/combat.c's "inherit BODY; inherit SKILLS;").
+    // Confirms the base offset composes correctly across three levels of
+    // nesting, not just one level of direct siblings.
+    harness.writeFile("/deep_root.c",
+        "private int root_val;\n"
+        "void init_deep_root() { root_val = 100; }\n"
+        "int query_root_val() { return root_val; }\n");
+    harness.writeFile("/deep_mid.c",
+        "inherit \"/deep_root\";\n"
+        "private int mid_val;\n"
+        "void init_deep_mid() { init_deep_root(); mid_val = 200; }\n"
+        "int query_mid_val() { return mid_val; }\n");
+    harness.writeFile("/deep_sibling.c",
+        "private int sib1, sib2;\n"
+        "void init_deep_sibling() { sib1 = 40; sib2 = 41; }\n"
+        "int query_sib1() { return sib1; }\n"
+        "int query_sib2() { return sib2; }\n");
+    harness.writeFile("/deep_leaf.c",
+        "inherit \"/deep_mid\";\n"
+        "inherit \"/deep_sibling\";\n"
+        "private int leaf_val;\n"
+        "void create() {\n"
+        "    init_deep_mid();\n"
+        "    init_deep_sibling();\n"
+        "    leaf_val = 300;\n"
+        "}\n"
+        "int query_leaf_val() { return leaf_val; }\n");
+
+    auto obj = harness.objects.cloneObject("/deep_leaf");
+    assert(obj != nullptr);
+
+    lpcdriver::Value rootVal = harness.vm.callFunction(obj, "query_root_val", {});
+    lpcdriver::Value midVal = harness.vm.callFunction(obj, "query_mid_val", {});
+    lpcdriver::Value sib1 = harness.vm.callFunction(obj, "query_sib1", {});
+    lpcdriver::Value sib2 = harness.vm.callFunction(obj, "query_sib2", {});
+    lpcdriver::Value leafVal = harness.vm.callFunction(obj, "query_leaf_val", {});
+
+    assert(std::get<int64_t>(rootVal.data) == 100);
+    assert(std::get<int64_t>(midVal.data) == 200);
+    assert(std::get<int64_t>(sib1.data) == 40);
+    assert(std::get<int64_t>(sib2.data) == 41);
+    assert(std::get<int64_t>(leafVal.data) == 300);
+
+    std::cout << "testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain OK\n";
+}
+
+// ---------------------------------------------------------------------
 // add_action()/enable_commands() command dispatch subsystem. Grounded in
 // fluffos-2.9-ds2.08/add_action.c directly (not guessed) and this
 // mudlib's own std/living.c, std/room/exits.c, std/room/senses.c,
@@ -5674,6 +5879,313 @@ static void testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions(
     assert(harness.vm.dispatchCommand(enabled, "look") == true);
 
     std::cout << "testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions OK\n";
+}
+
+// all_inventory()/deep_inventory() -- func_spec.c: "object *all_inventory
+// (object default: F__THIS_OBJECT);" / "object *deep_inventory(object
+// default: F__THIS_OBJECT);". Confirmed against fluffos-2.9-ds2.08's own
+// array.c: all_inventory() is direct children only, no recursion;
+// deep_inventory() is depth-first, target itself never included. Found
+// live needing all_inventory(): std/clean_up.c's own remove(), reached
+// from secure/std/login.c's new_user() decline path.
+static void testAllInventoryReturnsDirectChildrenOnlyNotGrandchildren() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ai_room.c",
+        "void init() {}\n"
+        "object *probe() { return all_inventory(this_object()); }\n");
+    harness.writeFile("/ai_item.c",
+        "object *probe() { return all_inventory(this_object()); }\n"
+        "void go(object dest) { move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/ai_room");
+    auto outer = harness.objects.cloneObject("/ai_item");
+    auto inner = harness.objects.cloneObject("/ai_item");
+    assert(room != nullptr && outer != nullptr && inner != nullptr);
+
+    harness.vm.callFunction(outer, "go", {lpcdriver::Value(room)});
+    harness.vm.callFunction(inner, "go", {lpcdriver::Value(outer)});
+
+    lpcdriver::Value result = harness.vm.callFunction(room, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 1);
+    auto* childOb = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&(*arr)->items[0].data);
+    assert(childOb != nullptr && *childOb == outer);
+
+    // Default-argument form (this_object() when no argument given).
+    harness.writeFile("/ai_default_probe.c",
+        "object *probe() { return all_inventory(); }\n");
+    auto defaultProbe = harness.objects.cloneObject("/ai_default_probe");
+    harness.vm.callFunction(outer, "go", {lpcdriver::Value(defaultProbe)});
+    lpcdriver::Value defResult = harness.vm.callFunction(defaultProbe, "probe", {});
+    auto* defArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&defResult.data);
+    assert(defArr != nullptr && (*defArr)->items.size() == 1);
+
+    std::cout << "testAllInventoryReturnsDirectChildrenOnlyNotGrandchildren OK\n";
+}
+
+static void testDeepInventoryRecursesThroughNestedChildren() {
+    ObjectVarHarness harness;
+    harness.writeFile("/di_room.c",
+        "void init() {}\n"
+        "object *probe() { return deep_inventory(this_object()); }\n");
+    harness.writeFile("/di_item.c",
+        "object *probe() { return deep_inventory(this_object()); }\n"
+        "void go(object dest) { move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/di_room");
+    auto outer = harness.objects.cloneObject("/di_item");
+    auto inner = harness.objects.cloneObject("/di_item");
+    assert(room != nullptr && outer != nullptr && inner != nullptr);
+
+    harness.vm.callFunction(outer, "go", {lpcdriver::Value(room)});
+    harness.vm.callFunction(inner, "go", {lpcdriver::Value(outer)});
+
+    lpcdriver::Value result = harness.vm.callFunction(room, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 2);
+    auto* first = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&(*arr)->items[0].data);
+    auto* second = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&(*arr)->items[1].data);
+    assert(first != nullptr && *first == outer);
+    assert(second != nullptr && *second == inner);
+
+    std::cout << "testDeepInventoryRecursesThroughNestedChildren OK\n";
+}
+
+// strcmp(string, string) -- func_spec.c: "int strcmp(string, string);",
+// backed by real efuns_main.c's own f_strcmp(): a plain C strcmp() call.
+// Found live needing this: /secure/daemon/player.c's own sort_list(),
+// silently swallowed by login.c's catch(__Player->setup()) with no
+// console trace until instrumented -- a fresh player's setup() was
+// quietly failing to register itself with player.c's online list.
+static void testStrcmpMatchesRealCComparisonSemantics() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sc_probe.c",
+        "int probe(string a, string b) { return strcmp(a, b); }\n");
+    auto ob = harness.objects.cloneObject("/sc_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value eq = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("abc")), lpcdriver::Value(std::string("abc"))});
+    assert(std::get<int64_t>(eq.data) == 0);
+
+    lpcdriver::Value lt = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("abc")), lpcdriver::Value(std::string("abd"))});
+    assert(std::get<int64_t>(lt.data) < 0);
+
+    lpcdriver::Value gt = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("abd")), lpcdriver::Value(std::string("abc"))});
+    assert(std::get<int64_t>(gt.data) > 0);
+
+    std::cout << "testStrcmpMatchesRealCComparisonSemantics OK\n";
+}
+
+// map_delete(mapping, mixed key) -- func_spec.c's primary declared form
+// ("void map_delete(mapping, mixed);"), mutates the mapping in place per
+// real efuns_main.c's f_map_delete()/mapping_delete(). Found live
+// needing this: std/living/env.c's own remove_env() ("if(env_var &&
+// env_var[env]) { map_delete(env_var, env); ... }"), reached
+// unguarded (no catch()) from domains/Praxis/setter.c's own
+// alignment_cmd() -- this one was fatal to the connection, not silently
+// swallowed, and is what actually blocked STEP 4 (alignment) from ever
+// reaching STEP 5 (OCC) live.
+static void testMapDeleteRemovesKeyInPlaceAndLeavesOthersIntact() {
+    ObjectVarHarness harness;
+    harness.writeFile("/md_probe.c",
+        "mapping m;\n"
+        "int setup() { m = ([ \"a\": 1, \"b\": 2, \"c\": 3 ]); return sizeof(m); }\n"
+        "int after_delete() { map_delete(m, \"b\"); return sizeof(m); }\n"
+        "int still_has(string k) { return m[k]; }\n"
+        "int has_key(string k) { return member_array(k, keys(m)) != -1; }\n");
+    auto ob = harness.objects.cloneObject("/md_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value before = harness.vm.callFunction(ob, "setup", {});
+    assert(std::get<int64_t>(before.data) == 3);
+
+    lpcdriver::Value after = harness.vm.callFunction(ob, "after_delete", {});
+    assert(std::get<int64_t>(after.data) == 2);
+
+    lpcdriver::Value hasB = harness.vm.callFunction(ob, "has_key",
+        {lpcdriver::Value(std::string("b"))});
+    assert(std::get<int64_t>(hasB.data) == 0);
+
+    lpcdriver::Value stillA = harness.vm.callFunction(ob, "still_has",
+        {lpcdriver::Value(std::string("a"))});
+    assert(std::get<int64_t>(stillA.data) == 1);
+    lpcdriver::Value stillC = harness.vm.callFunction(ob, "still_has",
+        {lpcdriver::Value(std::string("c"))});
+    assert(std::get<int64_t>(stillC.data) == 3);
+
+    std::cout << "testMapDeleteRemovesKeyInPlaceAndLeavesOthersIntact OK\n";
+}
+
+// clone_object()/find_object()/load_object() must accept a path that
+// already carries a trailing ".c" (real LPC object paths never include
+// the extension internally -- this driver appends it itself to find the
+// file on disk -- but plenty of real mudlib call sites pass one anyway,
+// e.g. daemon/rifts_start_d.c's own give_item(player, "id_card.c")).
+// Found live: ObjectManager::compile() appended ".c" unconditionally, so
+// a caller-supplied ".c" produced a literal "id_card.c.c" lookup that
+// never existed on disk, aborting finish_creation() partway through
+// granting starting equipment -- this was the actual blocker stopping a
+// fresh character from ever reaching a real room. Confirmed against
+// ObjectManager::normalizeFilename()'s own comment for the fix.
+static void testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dotc_item.c",
+        "string probe() { return file_name(this_object()); }\n");
+
+    auto withExt = harness.objects.cloneObject("/dotc_item.c");
+    assert(withExt != nullptr);
+    lpcdriver::Value name = harness.vm.callFunction(withExt, "probe", {});
+    auto* namePtr = std::get_if<std::string>(&name.data);
+    assert(namePtr != nullptr);
+    assert(namePtr->find(".c.c") == std::string::npos);
+
+    auto withoutExt = harness.objects.cloneObject("/dotc_item");
+    assert(withoutExt != nullptr);
+
+    std::cout << "testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension OK\n";
+}
+
+// intp(mixed) -- func_spec.c: "int intp(mixed);". Found live needing
+// this the same pass as the id_card.c.c fix above: /domains/Praxis/
+// equipment/id_card.c's own set_value() calls it directly.
+static void testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable() {
+    ObjectVarHarness harness;
+    harness.writeFile("/intp_probe.c",
+        "int n;\n"
+        "int probe_int() { return intp(5); }\n"
+        "int probe_string() { return intp(\"5\"); }\n"
+        "int probe_unset_var() { return intp(n); }\n");
+    auto ob = harness.objects.cloneObject("/intp_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value isInt = harness.vm.callFunction(ob, "probe_int", {});
+    assert(std::get<int64_t>(isInt.data) == 1);
+
+    lpcdriver::Value isStr = harness.vm.callFunction(ob, "probe_string", {});
+    assert(std::get<int64_t>(isStr.data) == 0);
+
+    // An object variable with no explicit initializer defaults to a
+    // real int64_t 0 (see STATUS.md's "Root-causing the __HistorySize
+    // report"), which IS a real int -- intp() on it must be true.
+    lpcdriver::Value unsetVar = harness.vm.callFunction(ob, "probe_unset_var", {});
+    assert(std::get<int64_t>(unsetVar.data) == 1);
+
+    std::cout << "testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable OK\n";
+}
+
+// string repeat_string(string, int) -- real fluffos-2.9-ds2.08's own
+// f_repeat_string() (packages/contrib.c): concatenate the string with
+// itself "repeat" times, "" for repeat <= 0. Found live needing this:
+// cmds/mortal/_score.c's own panel_border(), called while
+// finish_creation() auto-displays a fresh character's score sheet.
+static void testRepeatStringConcatenatesNTimesAndEmptyForZeroOrNegative() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rs_probe.c",
+        "string probe(string s, int n) { return repeat_string(s, n); }\n");
+    auto ob = harness.objects.cloneObject("/rs_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value three = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("ab")), lpcdriver::Value(int64_t{3})});
+    assert(std::get<std::string>(three.data) == "ababab");
+
+    lpcdriver::Value zero = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("ab")), lpcdriver::Value(int64_t{0})});
+    assert(std::get<std::string>(zero.data) == "");
+
+    lpcdriver::Value negative = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("ab")), lpcdriver::Value(int64_t{-2})});
+    assert(std::get<std::string>(negative.data) == "");
+
+    std::cout << "testRepeatStringConcatenatesNTimesAndEmptyForZeroOrNegative OK\n";
+}
+
+// present(object | string, void | object) -- func_spec.c's real
+// signature. Found live needing this: domains/ChiTown/areas/
+// chitown_start.c's own reset() (the first starting room a fresh
+// character reaches), via the present("id", this_object()) idiom
+// CLAUDE.md's rule 11 documents as the standard anti-duplication check.
+static void testPresentFindsInventoryItemByIdApplyNotByOtherFunctions() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pr_room.c",
+        "int check(string id) { return present(id, this_object()) ? 1 : 0; }\n"
+        "int check_default(string id) { return present(id) ? 1 : 0; }\n");
+    harness.writeFile("/pr_sword.c",
+        "int id(string str) { return str == \"sword\"; }\n"
+        "void go(object dest) { move_object(dest); }\n");
+    harness.writeFile("/pr_no_id.c",
+        "void go(object dest) { move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/pr_room");
+    auto sword = harness.objects.cloneObject("/pr_sword");
+    auto plain = harness.objects.cloneObject("/pr_no_id");
+    assert(room != nullptr && sword != nullptr && plain != nullptr);
+
+    harness.vm.callFunction(sword, "go", {lpcdriver::Value(room)});
+    harness.vm.callFunction(plain, "go", {lpcdriver::Value(room)});
+
+    lpcdriver::Value foundExplicit = harness.vm.callFunction(room, "check",
+        {lpcdriver::Value(std::string("sword"))});
+    assert(std::get<int64_t>(foundExplicit.data) == 1);
+
+    lpcdriver::Value foundDefault = harness.vm.callFunction(room, "check_default",
+        {lpcdriver::Value(std::string("sword"))});
+    assert(std::get<int64_t>(foundDefault.data) == 1);
+
+    // An object with no id() at all never matches (VM::callFunction()'s
+    // missing-function return is a falsy monostate, not a match).
+    lpcdriver::Value notFound = harness.vm.callFunction(room, "check",
+        {lpcdriver::Value(std::string("shield"))});
+    assert(std::get<int64_t>(notFound.data) == 0);
+
+    std::cout << "testPresentFindsInventoryItemByIdApplyNotByOtherFunctions OK\n";
+}
+
+// living() -- func_spec.c: "int living(object default: F__THIS_OBJECT);",
+// backed by the same O_ENABLE_COMMANDS flag enable_commands()/
+// disable_commands() maintain (add_action.c's f_living()). Surfaced live:
+// std/Object.c's own move() gates move_object() behind
+// "living(this_object()) && living(ob)".
+static void testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lv_probe.c",
+        "int before_enable() { return living(this_object()); }\n"
+        "int after_enable() { enable_commands(); return living(this_object()); }\n"
+        "int after_disable() { disable_commands(); return living(this_object()); }\n"
+        "int default_arg_after() { return living(); }\n"
+        "int living_of(object ob) { return living(ob); }\n");
+    harness.writeFile("/lv_bystander.c", "int probe() { return 1; }\n");
+
+    auto probe = harness.objects.cloneObject("/lv_probe");
+    auto bystander = harness.objects.cloneObject("/lv_bystander");
+    assert(probe != nullptr && bystander != nullptr);
+
+    lpcdriver::Value before = harness.vm.callFunction(probe, "before_enable", {});
+    assert(std::get<int64_t>(before.data) == 0);
+
+    lpcdriver::Value after = harness.vm.callFunction(probe, "after_enable", {});
+    assert(std::get<int64_t>(after.data) == 1);
+
+    // The default (no-argument) form means this_object(), matching
+    // func_spec.c's "object default: F__THIS_OBJECT" -- probe's own flag
+    // is on from after_enable() above, so this must read 1 too.
+    lpcdriver::Value defaultArg = harness.vm.callFunction(probe, "default_arg_after", {});
+    assert(std::get<int64_t>(defaultArg.data) == 1);
+
+    // A second, unrelated object never had enable_commands() called on
+    // it, so living() on it must read 0 even while probe's own flag is
+    // still on -- the flag is per-object, not global.
+    lpcdriver::Value bystanderLiving =
+        harness.vm.callFunction(probe, "living_of", {lpcdriver::Value(bystander)});
+    assert(std::get<int64_t>(bystanderLiving.data) == 0);
+
+    lpcdriver::Value disabled = harness.vm.callFunction(probe, "after_disable", {});
+    assert(std::get<int64_t>(disabled.data) == 0);
+
+    std::cout << "testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject OK\n";
 }
 
 static void testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs() {
@@ -5983,12 +6495,27 @@ static void testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime() {
     std::cout << "testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime OK\n";
 }
 
-static void testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride() {
-    // The critical, opposite case this fallback must never break: a
-    // file's own internal call to a name it (or its own ancestors)
-    // already defines must keep resolving lexically, not virtually
-    // dispatch to a child's override -- real LPC does not do C++-style
-    // virtual dispatch for a parent's own internal self-calls.
+static void testBareCallFromParentReachesChildsOverrideNotItsOwnLexicalDefinition() {
+    // Corrected expectation (was
+    // testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride,
+    // which encoded the opposite, now-disproven claim as its own name and
+    // comment): confirmed against fluffos-2.9-ds2.08/compiler.c's
+    // define_new_function() ("It was either an undefined but used
+    // function, or an inherited function ... we now consider this to be
+    // THE new definition") -- real LPC flattens an entire inherit tree
+    // into one shared function table per object; when a child redefines
+    // a name an ancestor already provided, the child's definition
+    // replaces that one shared entry for the *whole* object, so every
+    // unqualified call to that name -- including one written inside the
+    // ancestor's own source -- resolves to the override. This is the
+    // standard Nightmare/LPC idiom of an ancestor providing a
+    // placeholder a real subclass overrides (std/user/nmsh.c's own
+    // query_name() stub vs. std/user.c's real one is the live case that
+    // surfaced this). Only "::helper()" (OpCode::CallParent) reaches the
+    // parent's own shadowed definition instead -- see
+    // testQualifiedParentCallMatchesInheritPathBasename and
+    // testBareParentCallInvokesInheritedFunctionNotLocalOverride for that
+    // explicit-qualifier path, which this change does not touch.
     ObjectVarHarness harness;
     harness.writeFile("/pl_parent.c",
         "string helper() { return \"parent helper\"; }\n"
@@ -5999,15 +6526,15 @@ static void testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride(
     auto obj = harness.objects.cloneObject("/pl_child");
     assert(obj != nullptr);
 
-    // probe() is only defined in the parent; its own internal call to
-    // helper() must still resolve to the parent's own helper(), not the
-    // child's override, even though the child's is what a direct
-    // "obj->helper()" call_other would reach.
+    // probe() is only defined in the parent, and its own internal bare
+    // call to helper() must resolve to the child's override -- the same
+    // result a direct "obj->helper()" call_other would reach -- not the
+    // parent's own lexically-local definition.
     lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
     assert(std::holds_alternative<std::string>(result.data));
-    assert(std::get<std::string>(result.data) == "parent helper");
+    assert(std::get<std::string>(result.data) == "child helper");
 
-    std::cout << "testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride OK\n";
+    std::cout << "testBareCallFromParentReachesChildsOverrideNotItsOwnLexicalDefinition OK\n";
 }
 
 // ---------------------------------------------------------------------
@@ -6063,6 +6590,88 @@ static void testMonostateParticipatesInArithmeticAsRealZero() {
     // 0 + 0 = 0; 5 - 0 = 5; 0 * 3 = 0; undefinedp(missing key) = 1.
     assert(std::get<int64_t>(result.data) == 501);
     std::cout << "testMonostateParticipatesInArithmeticAsRealZero OK\n";
+}
+
+// ---------------------------------------------------------------------
+// OpCode::Add's string+number/number+string/object+string branches --
+// confirmed against real interpret.c's F_ADD (case T_STRING's own
+// T_NUMBER/T_REAL/T_OBJECT sub-branches, and the symmetric T_NUMBER/
+// T_REAL/T_OBJECT cases' own T_STRING sub-branch). Surfaced live:
+// daemon/terminal.c's own ESC(p) macro ("%c"+(p), called with a bare
+// int argument in several of its own table entries) threw "Add:
+// unsupported operand types" and silently broke TERMINAL_D, in turn
+// silently breaking std/user.c's own setup() past that point -- the
+// exact class of bug the new catch()-logging (see testCatchLogsTrapped
+// ErrorToStderrByDefault) surfaced instead of staying invisible.
+// ---------------------------------------------------------------------
+
+static void testStringPlusIntAppendsDecimalDigits() {
+    lpcdriver::Value result = runProbe("return \"count:\" + 42;\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "count:42");
+    std::cout << "testStringPlusIntAppendsDecimalDigits OK\n";
+}
+
+static void testIntPlusStringPrependsDecimalDigits() {
+    lpcdriver::Value result = runProbe("return 42 + \":count\";\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "42:count");
+    std::cout << "testIntPlusStringPrependsDecimalDigits OK\n";
+}
+
+// A missing mapping key (monostate, see asArithmeticOperand's own
+// comment) participating in string+number concatenation as a real 0 --
+// same treatment it already gets in plain numeric arithmetic. Surfaced
+// live: std/money.c's own query_money() ("return money[str];") called
+// on a fresh character's not-yet-populated money mapping, then
+// concatenated by std/user.c's own setup() ("... + query_money(
+// \"platinum\") + \" pl, \" + ...").
+static void testStringPlusMissingMappingKeyFormatsAsZero() {
+    lpcdriver::Value result = runProbe(
+        "mapping m;\n"
+        "m = ([]);\n"
+        "return \"pl:\" + m[\"platinum\"];\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "pl:0");
+    std::cout << "testStringPlusMissingMappingKeyFormatsAsZero OK\n";
+}
+
+static void testObjectPlusStringPrependsItsFilename() {
+    ObjectVarHarness harness;
+    harness.writeFile("/obj_add_test.c",
+        "string probe() { return this_object() + \"::tail\"; }\n");
+    auto ob = harness.objects.cloneObject("/obj_add_test");
+    assert(ob != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "/obj_add_test::tail");
+    std::cout << "testObjectPlusStringPrependsItsFilename OK\n";
+}
+
+// int random(int) -- confirmed against real efuns_main.c's f_random():
+// n <= 0 always yields plain 0 (not an error), and the result is always
+// in [0, n). Surfaced live: domains/Praxis/setter.c's own roll_d6()
+// (Palladium 3d6 attribute rolling).
+static void testRandomOfNonPositiveArgumentIsZero() {
+    lpcdriver::Value result = runProbe("return random(0) + random(-5);\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+    std::cout << "testRandomOfNonPositiveArgumentIsZero OK\n";
+}
+
+static void testRandomStaysWithinZeroToNExclusiveAcrossManyDraws() {
+    lpcdriver::Value result = runProbe(
+        "int i;\n"
+        "int bad;\n"
+        "for(i = 0; i < 200; i++) {\n"
+        "    int r;\n"
+        "    r = random(6);\n"
+        "    if(r < 0 || r >= 6) bad = 1;\n"
+        "}\n"
+        "return bad;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+    std::cout << "testRandomStaysWithinZeroToNExclusiveAcrossManyDraws OK\n";
 }
 
 // set_heart_beat()/query_heart_beat() -- surfaced live: std/user.c's own
@@ -6146,6 +6755,39 @@ static void testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements() {
     std::cout << "testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements OK\n";
 }
 
+// sort_array() (string-function-name-plus-object-target form). Surfaced
+// live: secure/daemon/player.c's own add_player_info(), "sort_array(
+// player_list, \"sort_list\", this_object())".
+static void testSortArrayWithStringFunctionNameOrdersByComparatorResult() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sa_target.c",
+        "int cmp(int a, int b) {\n"
+        "    if(a > b) return -1;\n"
+        "    if(a < b) return 1;\n"
+        "    return 0;\n"
+        "}\n");
+    harness.writeFile("/sa_caller.c",
+        "mixed probe(object target) {\n"
+        "    return sort_array(({ 3, 1, 4, 1, 5 }), \"cmp\", target);\n"
+        "}\n");
+    auto target = harness.objects.cloneObject("/sa_target");
+    auto caller = harness.objects.cloneObject("/sa_caller");
+    assert(target != nullptr && caller != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "probe", {lpcdriver::Value(target)});
+    auto* arrPtr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arrPtr != nullptr && *arrPtr != nullptr);
+    assert((*arrPtr)->items.size() == 5);
+    // Descending, per cmp()'s own convention (a > b returns -1, a sorts first).
+    assert(std::get<int64_t>((*arrPtr)->items[0].data) == 5);
+    assert(std::get<int64_t>((*arrPtr)->items[1].data) == 4);
+    assert(std::get<int64_t>((*arrPtr)->items[2].data) == 3);
+    assert(std::get<int64_t>((*arrPtr)->items[3].data) == 1);
+    assert(std::get<int64_t>((*arrPtr)->items[4].data) == 1);
+
+    std::cout << "testSortArrayWithStringFunctionNameOrdersByComparatorResult OK\n";
+}
+
 // implode() -- surfaced live: std/user/nmsh.c's own do_alias()/
 // do_nickname() joining word arrays back into a line with " ".
 static void testImplodeJoinsStringArrayWithSeparator() {
@@ -6163,6 +6805,110 @@ static void testImplodeOnEmptyArrayReturnsEmptyString() {
     assert(std::holds_alternative<std::string>(result.data));
     assert(std::get<std::string>(result.data) == "");
     std::cout << "testImplodeOnEmptyArrayReturnsEmptyString OK\n";
+}
+
+// sprintf's "%c" -- surfaced live: daemon/terminal.c's own ANSI(p)/ESC(p)
+// macros, "sprintf(\"%c[\"+(p)+\"m\", 27)", building a raw ESC (ASCII 27)
+// byte ahead of an ANSI escape sequence. Confirmed against
+// fluffos-2.9-ds2.08/sprintf.c: INFO_T_CHAR requires a T_NUMBER (int)
+// argument, not a string.
+static void testSprintfPercentCEmitsSingleCharacterFromIntArgument() {
+    lpcdriver::Value result = runProbe("return sprintf(\"%c[31m\", 27);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    std::string expected;
+    expected += static_cast<char>(27);
+    expected += "[31m";
+    assert(std::get<std::string>(result.data) == expected);
+    std::cout << "testSprintfPercentCEmitsSingleCharacterFromIntArgument OK\n";
+}
+
+static void testSprintfPercentCThrowsOnNonIntArgument() {
+    bool threw = false;
+    try {
+        runProbe("return sprintf(\"%c\", \"x\");\n");
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testSprintfPercentCThrowsOnNonIntArgument OK\n";
+}
+
+// sprintf field-width modifiers ("-" left-adjust, leading-zero pad) --
+// confirmed against real sprintf.c's own documented modifier set.
+// Surfaced live: domains/Praxis/setter.c's own show_rolled_attributes(),
+// "%-3d" for each rolled Palladium attribute.
+static void testSprintfLeftJustifiedFieldWidthPadsWithSpaces() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%-3d]\", 7);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[7  ]");
+    std::cout << "testSprintfLeftJustifiedFieldWidthPadsWithSpaces OK\n";
+}
+
+static void testSprintfRightJustifiedFieldWidthPadsWithSpaces() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%3d]\", 7);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[  7]");
+    std::cout << "testSprintfRightJustifiedFieldWidthPadsWithSpaces OK\n";
+}
+
+static void testSprintfZeroPaddedFieldWidthPadsWithZeros() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%03d]\", 7);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[007]");
+    std::cout << "testSprintfZeroPaddedFieldWidthPadsWithZeros OK\n";
+}
+
+static void testSprintfFieldWidthDoesNotTruncateAWiderValue() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%-3d]\", 12345);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[12345]");
+    std::cout << "testSprintfFieldWidthDoesNotTruncateAWiderValue OK\n";
+}
+
+static void testSprintfStringFieldWidthLeftJustifies() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%-5s]\", \"ab\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[ab   ]");
+    std::cout << "testSprintfStringFieldWidthLeftJustifies OK\n";
+}
+
+// "%%" and the ":" field-size-and-precision modifier -- surfaced live:
+// secure/SimulEfun/strings.c's own arrange_string(), which builds a
+// second format string via sprintf("%%:-%ds", x) (needing "%%" to
+// resolve to a literal "%") and then uses that built string ("%:-Ns")
+// as a real format itself (needing ":" to mean "field size AND
+// precision", truncating a %s argument longer than the field).
+static void testSprintfDoublePercentEmitsLiteralPercentAndConsumesNoArgument() {
+    lpcdriver::Value result = runProbe("return sprintf(\"100%%\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "100%");
+    std::cout << "testSprintfDoublePercentEmitsLiteralPercentAndConsumesNoArgument OK\n";
+}
+
+static void testSprintfColonFieldWidthPadsAShorterStringLeftJustified() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%:-5s]\", \"ab\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[ab   ]");
+    std::cout << "testSprintfColonFieldWidthPadsAShorterStringLeftJustified OK\n";
+}
+
+static void testSprintfColonFieldWidthTruncatesALongerString() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%:-5s]\", \"abcdefgh\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[abcde]");
+    std::cout << "testSprintfColonFieldWidthTruncatesALongerString OK\n";
+}
+
+// The exact live shape: build "%:-Ns" via a first sprintf("%%:-%ds", x)
+// call, then use the result as a real format string in a second call.
+static void testSprintfBuildingAndThenUsingADynamicColonFormatString() {
+    lpcdriver::Value result = runProbe(
+        "string fmt;\n"
+        "fmt = sprintf(\"%%:-%ds\", 6);\n"
+        "return sprintf(fmt, \"hi\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "hi    ");
+    std::cout << "testSprintfBuildingAndThenUsingADynamicColonFormatString OK\n";
 }
 
 int main() {
@@ -6260,6 +7006,8 @@ int main() {
     testObjectVariableReentrancySafeAcrossNestedCloneObject();
     testLocalVarDeclCommaSeparatedNamesParse();
     testLocalVarDeclCommaListVmExecution();
+    testSiblingBlocksMayReuseALocalNameNeitherNestedInTheOther();
+    testNameDeclaredInABlockIsUndeclaredOnceThatBlockEnds();
     testForLoopParsesToForStmt();
     testForLoopEmptyClausesParse();
     testForLoopWithAssignInitVmSumsExpectedTotal();
@@ -6303,6 +7051,7 @@ int main() {
     testCatchEvaluatesToZeroAndDiscardsGuardedExprValueOnSuccess();
     testExecutionContinuesNormallyAfterCatchTrapsAnError();
     testNestedCatchInnerFailureDoesNotTriggerOuterCatch();
+    testCatchLogsTrappedErrorToStderrByDefault();
     testCatchTrapsErrorThrownInsideCalledFunctionWithNoCatchOfItsOwn();
     testCatchInlineInsideIfConditionMatchesMasterConnectShape();
     testAdjacentStringLiteralsParseAsSingleConcatenatedLiteral();
@@ -6401,9 +7150,20 @@ int main() {
     testToIntParsesALeadingIntegerFromAStringIgnoringTrailingGarbage();
     testToIntReturnsZeroForAStringWithNoLeadingNumber();
     testPrivateObjectVariableDoesNotCollideWithChildsOwnSameNamedVariable();
+    testSiblingLeafObjectVariablesDoNotAliasEachOther();
+    testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain();
     testEnvironmentDefaultsToNullBeforeAnyMove();
     testMoveObjectUpdatesEnvironmentAndInventory();
     testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions();
+    testAllInventoryReturnsDirectChildrenOnlyNotGrandchildren();
+    testDeepInventoryRecursesThroughNestedChildren();
+    testStrcmpMatchesRealCComparisonSemantics();
+    testMapDeleteRemovesKeyInPlaceAndLeavesOthersIntact();
+    testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension();
+    testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable();
+    testRepeatStringConcatenatesNTimesAndEmptyForZeroOrNegative();
+    testPresentFindsInventoryItemByIdApplyNotByOtherFunctions();
+    testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject();
     testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs();
     testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord();
     testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy();
@@ -6416,15 +7176,33 @@ int main() {
     testObjectVarInitializerParentRunsBeforeChild();
     testUndefinedpTrueOnlyForVoidNotZeroOrOtherTypes();
     testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime();
-    testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride();
+    testBareCallFromParentReachesChildsOverrideNotItsOwnLexicalDefinition();
     testArraySubtractionRemovesEveryMatchingElementPreservingOrder();
     testArraySubtractionOnEmptyRightOperandLeavesLeftUnchanged();
     testMonostateParticipatesInArithmeticAsRealZero();
+    testStringPlusIntAppendsDecimalDigits();
+    testIntPlusStringPrependsDecimalDigits();
+    testStringPlusMissingMappingKeyFormatsAsZero();
+    testObjectPlusStringPrependsItsFilename();
+    testRandomOfNonPositiveArgumentIsZero();
+    testRandomStaysWithinZeroToNExclusiveAcrossManyDraws();
     testSetHeartBeatThenQueryHeartBeatRoundTrips();
     testMapArrayWithStringFunctionNameCallsMethodOnTargetForEachElement();
     testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements();
+    testSortArrayWithStringFunctionNameOrdersByComparatorResult();
     testImplodeJoinsStringArrayWithSeparator();
     testImplodeOnEmptyArrayReturnsEmptyString();
+    testSprintfPercentCEmitsSingleCharacterFromIntArgument();
+    testSprintfPercentCThrowsOnNonIntArgument();
+    testSprintfLeftJustifiedFieldWidthPadsWithSpaces();
+    testSprintfRightJustifiedFieldWidthPadsWithSpaces();
+    testSprintfZeroPaddedFieldWidthPadsWithZeros();
+    testSprintfFieldWidthDoesNotTruncateAWiderValue();
+    testSprintfStringFieldWidthLeftJustifies();
+    testSprintfDoublePercentEmitsLiteralPercentAndConsumesNoArgument();
+    testSprintfColonFieldWidthPadsAShorterStringLeftJustified();
+    testSprintfColonFieldWidthTruncatesALongerString();
+    testSprintfBuildingAndThenUsingADynamicColonFormatString();
     std::cout << "all tests passed\n";
     return 0;
 }

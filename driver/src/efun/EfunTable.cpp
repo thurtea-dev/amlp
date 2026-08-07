@@ -5,11 +5,13 @@
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Connection.hpp"
 #include "lpcdriver/net/InteractiveRegistry.hpp"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <netinet/in.h>
 #include <random>
@@ -363,6 +365,56 @@ void registerCoreEfuns() {
     t.registerEfun("filter_array", filterArrayImpl);
     t.registerEfun("filter", filterArrayImpl);
 
+    // mixed *sort_array(mixed *arr, int | string | function cmp, ...) --
+    // real func_spec.c signature. Only the "string function name plus a
+    // target object" shape is implemented, mirroring map_array/
+    // filter_array's own scoping above (a Closure comparator is also
+    // accepted, same as those two) -- confirmed the only shape this
+    // mudlib's own path uses live: secure/daemon/player.c's own
+    // add_player_info(), "sort_array(player_list, \"sort_list\",
+    // this_object())". The comparator is called as target->func(a, b)
+    // (or evaluate()'d for a closure) for each pair during a stable
+    // sort, and must return an int: negative if a sorts before b,
+    // positive if after, 0 if equal -- confirmed against array.c's own
+    // sort_array_cmp()/quickSort() (the callback return value is used
+    // directly as the comparator result, real C qsort convention). The
+    // real efun's own plain-int first-mode ("ascending"/"descending" of
+    // a homogeneous string/int/float array, no callback) is not
+    // implemented -- nothing on this driver's live path uses it.
+    t.registerEfun("sort_array", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("sort_array: expected an array first argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        auto result = std::make_shared<Array>();
+        if (!arr) return Value(result);
+        result->items = arr->items;
+
+        auto compare = [&](const Value& a, const Value& b) -> int64_t {
+            Value cmp;
+            if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
+                if (!*closurePtr) return 0;
+                cmp = vm.callClosure(*closurePtr, {a, b});
+            } else if (std::holds_alternative<std::string>(args[1].data)) {
+                if (args.size() < 3 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
+                    throw LpcRuntimeError("sort_array: string function name requires an object third argument");
+                }
+                const std::string& funcName = std::get<std::string>(args[1].data);
+                auto target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
+                cmp = vm.callFunction(target, funcName, {a, b});
+            } else {
+                throw LpcRuntimeError("sort_array: expected a string or function second argument");
+            }
+            if (!std::holds_alternative<int64_t>(cmp.data)) {
+                throw LpcRuntimeError("sort_array: comparator must return an int");
+            }
+            return std::get<int64_t>(cmp.data);
+        };
+        std::stable_sort(result->items.begin(), result->items.end(),
+                          [&](const Value& a, const Value& b) { return compare(a, b) < 0; });
+        return Value(result);
+    });
+
     t.registerEfun("explode", [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
             !std::holds_alternative<std::string>(args[1].data)) {
@@ -422,6 +474,29 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
+    // string repeat_string(string, int) -- func_spec.c/efun_defs.c
+    // declare it (F_REPEAT_STRING), and real fluffos-2.9-ds2.08's own
+    // f_repeat_string() (packages/contrib.c) confirms the semantics:
+    // the string concatenated with itself "repeat" times; repeat <= 0
+    // yields "". Found live needing this: cmds/mortal/_score.c's own
+    // panel_border(), called while finish_creation() auto-displays the
+    // score sheet for a freshly created character -- caught by setter.c's
+    // own catch() around finish_creation() rather than fatal, but still
+    // a real gap (the score panel silently never rendered).
+    t.registerEfun("repeat_string", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("repeat_string: expected (string, int) arguments");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        int64_t repeat = std::get<int64_t>(args[1].data);
+        if (repeat <= 0 || str.empty()) return Value(std::string());
+        std::string result;
+        result.reserve(str.size() * static_cast<size_t>(repeat));
+        for (int64_t i = 0; i < repeat; ++i) result += str;
+        return Value(result);
+    });
+
     t.registerEfun("keys", [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data)) {
             throw LpcRuntimeError("keys: expected a mapping argument");
@@ -450,6 +525,41 @@ void registerCoreEfuns() {
             }
         }
         return Value(result);
+    });
+
+    // void map_delete(mapping, mixed key) -- func_spec.c's primary
+    // declared form ("void map_delete(mapping, mixed);", the other two
+    // overloads there are compat-only, see line 155/156/160 in the
+    // reference source). Real efuns_main.c's own f_map_delete() calls
+    // mapping_delete() in place and returns nothing -- this efun
+    // mutates the mapping argument itself, matching that (not a copy,
+    // same as m_indices()/sizeof() already treat a mapping by shared
+    // reference elsewhere in this driver). Missing key is a silent
+    // no-op, matching mapping_delete()'s own "not found" branch. Found
+    // live needing this: domains/Praxis/setter.c's own alignment_cmd()
+    // -> remove_env(), which calls it directly (not wrapped in a
+    // catch()), so this one was fatal to the connection rather than
+    // silently swallowed -- it is what actually stopped the STEP 4
+    // alignment pick from ever reaching STEP 5.
+    t.registerEfun("map_delete", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data)) {
+            throw LpcRuntimeError("map_delete: expected a mapping argument");
+        }
+        if (args.size() < 2) {
+            throw LpcRuntimeError("map_delete: expected a key argument");
+        }
+        auto map = std::get<std::shared_ptr<Mapping>>(args[0].data);
+        if (map) {
+            const Value& key = args[1];
+            auto& entries = map->entries;
+            entries.erase(
+                std::remove_if(entries.begin(), entries.end(),
+                    [&key](const std::pair<Value, Value>& entry) {
+                        return valuesEqual(entry.first, key);
+                    }),
+                entries.end());
+        }
+        return Value{};
     });
 
     // string read_file(string file, void|int start, void|int numLines).
@@ -685,12 +795,20 @@ void registerCoreEfuns() {
 
     // string sprintf(string fmt, mixed args...) -- real FluffOS's
     // sprintf() is a large efun (field widths, padding, table columns,
-    // a dozen-plus specifiers). Confirmed by grep across secure/std/
-    // login.c, secure/daemon/account_d.c, and daemon/banish.c (every
-    // file reachable from the login/account-creation path this driver
-    // exercises): only bare "%s" (string) and "%d" (int) are ever used,
-    // positionally, with no width/precision/flags and no literal "%%".
-    // Scoped to exactly that; throws rather than silently mishandling
+    // a dozen-plus specifiers). Started from only bare "%s"/"%d",
+    // positionally, with no width/precision/flags -- confirmed by grep
+    // across secure/std/login.c, secure/daemon/account_d.c, and
+    // daemon/banish.c, the only shapes used on the original login/
+    // account-creation path this driver exercised first. Grown live
+    // since, each addition confirmed against a real call site rather
+    // than spun ahead speculatively: "%c" (daemon/terminal.c's own
+    // ANSI(p)/ESC(p) macros), "-"/leading-zero field width (domains/
+    // Praxis/setter.c's own show_rolled_attributes(), "%-3d"), and "%%"
+    // plus the ":" field-size-and-precision modifier (secure/SimulEfun/
+    // strings.c's own arrange_string()/center()/wrap(), the mechanism
+    // this mudlib uses throughout for column-aligned list output).
+    // Still scoped, not the full real modifier set ("|"/"="/"#"/"'X'"/
+    // "@" are not implemented); throws rather than silently mishandling
     // anything else, matching this codebase's existing convention for
     // other partially-implemented efuns.
     t.registerEfun("sprintf", [](VM&, std::vector<Value>& args) -> Value {
@@ -708,26 +826,106 @@ void registerCoreEfuns() {
             if (i + 1 >= fmt.size()) {
                 throw LpcRuntimeError("sprintf: trailing '%' with no specifier");
             }
+            // "%%" -- real sprintf.c: "in which case no arguments are
+            // interpreted, and a '%' is inserted, and all modifiers are
+            // ignored." Found live: secure/SimulEfun/strings.c's own
+            // arrange_string()/center()/wrap(), each building a second,
+            // dynamic format string via a first sprintf() call whose own
+            // format is "%%:-%ds" etc -- the literal "%%" there has to
+            // resolve to a literal "%" before the *result* is used as a
+            // format string in a second sprintf() call.
+            if (fmt[i + 1] == '%') {
+                result += '%';
+                ++i;
+                continue;
+            }
+            // Field-width modifiers, confirmed against real sprintf.c's
+            // own documented modifier set (this driver implements "-",
+            // a leading-zero field width, and ":" -- not the full "|"/
+            // "="/"#"/"'X'"/"@"/separate-precision set, nothing on this
+            // driver's live path uses those yet): an optional "-"
+            // (left-adjust; real sprintf.c's own default is
+            // right-justify, "unnatural in a mainly string-based
+            // language but retained for compatibility"), an optional
+            // ":" (real sprintf.c: "n specifies the fs _and_ the
+            // precision" -- field size and precision set to the same
+            // value; precision truncates a %s argument longer than the
+            // field, "all other types ignore this"), in either order,
+            // then an optional digit sequence giving the field size
+            // ("if n is prepended with a zero, then is padded with
+            // zeros, else... spaces"). Found live: domains/Praxis/
+            // setter.c's own show_rolled_attributes() ("%-3d") and
+            // secure/SimulEfun/strings.c's own arrange_string()
+            // ("%:-Ns", built at runtime as described above -- field
+            // size N, left-justified, truncated to N if longer, the
+            // real mechanism this mudlib uses throughout for
+            // column-aligned list output like the race/OCC lists).
+            bool leftJustify = false;
+            bool colonMode = false;
+            while (i + 1 < fmt.size() && (fmt[i + 1] == '-' || fmt[i + 1] == ':')) {
+                if (fmt[i + 1] == '-') leftJustify = true;
+                else colonMode = true;
+                ++i;
+            }
+            bool zeroPad = false;
+            int fieldWidth = 0;
+            bool haveWidth = false;
+            if (i + 1 < fmt.size() && fmt[i + 1] == '0') {
+                zeroPad = true;
+            }
+            while (i + 1 < fmt.size() && fmt[i + 1] >= '0' && fmt[i + 1] <= '9') {
+                haveWidth = true;
+                fieldWidth = fieldWidth * 10 + (fmt[i + 1] - '0');
+                ++i;
+            }
             char spec = fmt[++i];
             if (argIdx >= args.size()) {
                 throw LpcRuntimeError("sprintf: too few arguments for format string");
             }
             const Value& argVal = args[argIdx++];
+            std::string piece;
             if (spec == 's') {
                 if (!std::holds_alternative<std::string>(argVal.data)) {
                     throw LpcRuntimeError("sprintf: %s argument is not a string");
                 }
-                result += std::get<std::string>(argVal.data);
+                piece = std::get<std::string>(argVal.data);
             } else if (spec == 'd') {
                 if (!std::holds_alternative<int64_t>(argVal.data)) {
                     throw LpcRuntimeError("sprintf: %d argument is not an int");
                 }
-                result += std::to_string(std::get<int64_t>(argVal.data));
+                piece = std::to_string(std::get<int64_t>(argVal.data));
+            } else if (spec == 'c') {
+                // sprintf.c's own INFO_T_CHAR handling (fluffos-2.9-ds2.08/
+                // sprintf.c line 1165 assigns 'c' into a real C
+                // sprintf(..., "%c", ...) cheat-buffer format, and line
+                // 1180 requires carg->type == T_NUMBER for it, an int
+                // argument, not a string) -- confirmed live needed by
+                // daemon/terminal.c's own ANSI(p)/ESC(p) macros:
+                // sprintf("%c["+(p)+"m", 27), which builds a raw ESC
+                // (ASCII 27) byte ahead of an ANSI escape sequence.
+                if (!std::holds_alternative<int64_t>(argVal.data)) {
+                    throw LpcRuntimeError("sprintf: %c argument is not an int");
+                }
+                piece = std::string(1, static_cast<char>(std::get<int64_t>(argVal.data)));
+                haveWidth = false; // real sprintf.c: field width is not meaningful for %c
             } else {
                 throw LpcRuntimeError(
                     std::string("sprintf: unsupported format specifier '%") + spec +
-                    "' (only %s and %d are implemented)");
+                    "' (only %s, %d, and %c are implemented)");
             }
+            // ":" sets precision == field size, truncating a %s
+            // argument longer than the field ("all other types ignore
+            // this" -- real sprintf.c; %d/%c are never truncated here).
+            if (colonMode && spec == 's' && haveWidth &&
+                static_cast<int>(piece.size()) > fieldWidth) {
+                piece = piece.substr(0, static_cast<size_t>(fieldWidth));
+            }
+            if (haveWidth && static_cast<int>(piece.size()) < fieldWidth) {
+                std::string pad(static_cast<size_t>(fieldWidth) - piece.size(),
+                                 zeroPad && !leftJustify ? '0' : ' ');
+                piece = leftJustify ? (piece + pad) : (pad + piece);
+            }
+            result += piece;
         }
         return Value(result);
     });
@@ -864,6 +1062,23 @@ void registerCoreEfuns() {
     t.registerEfun("mapp", [](VM&, std::vector<Value>& args) -> Value {
         bool isMap = !args.empty() && std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data);
         return Value(static_cast<int64_t>(isMap ? 1 : 0));
+    });
+
+    // int intp(mixed) -- func_spec.c: "int intp(mixed);", the remaining
+    // type predicate missing alongside stringp/objectp/mapp/pointerp/
+    // functionp above (real FluffOS registers all of these together in
+    // the same "T_*p()" family). Found live: /domains/Praxis/equipment/
+    // id_card.c's own set_value(), reached by daemon/rifts_start_d.c's
+    // give_item() while granting starting equipment during
+    // finish_creation() -- the actual blocker stopping a fresh
+    // character from ever reaching a real room. A monostate "no value"
+    // (an unset object variable slot before this driver's own real-0
+    // default fix, or an efun's explicit "nothing found" return) does
+    // not count as an int, matching real FluffOS's own T_NUMBER-only
+    // check.
+    t.registerEfun("intp", [](VM&, std::vector<Value>& args) -> Value {
+        bool isInt = !args.empty() && std::holds_alternative<int64_t>(args[0].data);
+        return Value(static_cast<int64_t>(isInt ? 1 : 0));
     });
 
     // int undefinedp(mixed) / int nullp(mixed) -- real f__undefinedp():
@@ -1019,6 +1234,28 @@ void registerCoreEfuns() {
     t.registerEfun("strsrch", strsrchImpl);
     t.registerEfun("strstr", strsrchImpl);
 
+    // int strcmp(string, string) -- func_spec.c: "int strcmp(string,
+    // string);", backed by real efuns_main.c's own f_strcmp(): a plain
+    // C strcmp() call, returning C's own negative/zero/positive result
+    // (not clamped to -1/0/1). Found live needing this: /secure/daemon/
+    // player.c's own sort_list(), called from add_player_info(), called
+    // from std/user.c's setup() -- silently swallowed by login.c's
+    // catch(__Player->setup()) with no console trace (the same "quiet
+    // cascade" shape as the earlier __HistorySize investigation, see
+    // STATUS.md), so a fresh player's setup() never actually finished
+    // registering itself in whatever online-player list player.c
+    // maintains, with nothing on the client side ever showing an error.
+    t.registerEfun("strcmp", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("strcmp: expected (string, string) arguments");
+        }
+        const std::string& a = std::get<std::string>(args[0].data);
+        const std::string& b = std::get<std::string>(args[1].data);
+        return Value(static_cast<int64_t>(a.compare(b)));
+    });
+
     // object previous_object(int idx default: 0) and its -1 ("every
     // frame") form -- see VM::previousObject()/allPreviousObjects()'s
     // own comments for the real semantics this reproduces
@@ -1162,6 +1399,138 @@ void registerCoreEfuns() {
         return Value(env);
     });
 
+    // object *all_inventory(object default: this_object()) -- real
+    // func_spec.c signature. Confirmed against fluffos-2.9-ds2.08's own
+    // array.c f_all_inventory()/all_inventory(): walks the target's
+    // direct-children linked list (ob->contains/next_inv there) and
+    // returns them as a plain array, in insertion order, no recursion.
+    // This driver already tracks the same relationship directly as
+    // LpcObject::inventory_ (populated by VM::moveObject(), the same
+    // list environment() above already reads the reverse edge of), so
+    // no new bookkeeping was needed. Found live needing this: std/
+    // clean_up.c's own remove() (all(): "i = sizeof(inv =
+    // all_inventory(this_object())); while(i--) if(inv[i]) inv[i]->
+    // move(env);"), reached from secure/std/login.c's new_user() when a
+    // player declines the "Confirm <name> ... (y/n)" prompt -- __Player
+    // was already speculatively created via player_object() before the
+    // confirmation (see login.c's own comment on why), so declining has
+    // to clean it back up via a real remove() call, which had never
+    // been exercised live before this path.
+    t.registerEfun("all_inventory", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> target;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            target = vm.currentObject();
+        }
+        auto result = std::make_shared<Array>();
+        if (target) {
+            for (auto& item : target->inventory()) {
+                if (item) result->items.push_back(Value(item));
+            }
+        }
+        return Value(result);
+    });
+
+    // object *deep_inventory(object default: this_object()) -- same
+    // reference source (array.c's deep_inventory_count()/
+    // deep_inventory_collect()): all_inventory()'s direct children, plus
+    // every one of their own children recursively, depth-first, target
+    // itself never included. Found live needing this the same pass as
+    // all_inventory() above: std/clean_up.c's own clean_up() (unlike
+    // remove(), not yet confirmed reached live, but the same file, same
+    // gap category, and trivial to add alongside).
+    t.registerEfun("deep_inventory", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> target;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            target = vm.currentObject();
+        }
+        auto result = std::make_shared<Array>();
+        std::function<void(const std::shared_ptr<LpcObject>&)> collect =
+            [&](const std::shared_ptr<LpcObject>& ob) {
+                if (!ob) return;
+                for (auto& item : ob->inventory()) {
+                    if (!item) continue;
+                    result->items.push_back(Value(item));
+                    collect(item);
+                }
+            };
+        collect(target);
+        return Value(result);
+    });
+
+    // object present(object | string, void | object) -- func_spec.c:
+    // "object present(object | string, void | object);". Confirmed
+    // against fluffos-2.9-ds2.08's own simulate.c object_present()/
+    // object_present2():
+    //  - object form: with an explicit container, true only when the
+    //    given object's environment is exactly that container; with no
+    //    container, also true when the given object is a *sibling* of
+    //    current_object() (same environment).
+    //  - string form: searches the container's direct inventory (current
+    //    object's own inventory when none given) for an item whose
+    //    id(str) apply returns truthy, matching this mudlib's own
+    //    std/Object.c id() convention (every present()-checked object
+    //    defines it) and CLAUDE.md's own documented idiom ("reset()
+    //    with present(\"id\", this_object()) checks"). With no explicit
+    //    container, real present() also falls back to searching the
+    //    calling object's own environment's inventory (a sibling
+    //    search) when the direct search misses -- reproduced here via
+    //    the same searchIn() helper.
+    // Not implemented: the numbered-suffix form ("sword 2", real
+    // object_present2()'s count-skip logic) -- not confirmed needed by
+    // any call site reached live yet, all real usage found so far is a
+    // plain unnumbered id string. A missing id() function on a
+    // candidate is not an error (VM::callFunction() already returns a
+    // falsy monostate for that, same as a real failed apply()), so it
+    // is silently skipped rather than treated as a match.
+    // Found live blocking domains/ChiTown/areas/chitown_start.c's own
+    // reset() -- the very first starting room a fresh character reaches
+    // after finish_creation() -- via exactly the present("id", this_object())
+    // pattern CLAUDE.md's rule 11 documents.
+    t.registerEfun("present", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty()) {
+            throw LpcRuntimeError("present: expected (object|string, void|object) arguments");
+        }
+        bool explicitContainer = args.size() > 1 &&
+            std::holds_alternative<std::shared_ptr<LpcObject>>(args[1].data);
+        std::shared_ptr<LpcObject> container =
+            explicitContainer ? std::get<std::shared_ptr<LpcObject>>(args[1].data) : vm.currentObject();
+        if (!container) return Value{};
+
+        if (std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            auto target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+            if (!target) return Value{};
+            auto env = target->environment().lock();
+            if (env == container) return Value(target);
+            if (!explicitContainer) {
+                auto containerEnv = container->environment().lock();
+                if (containerEnv && env == containerEnv) return Value(target);
+            }
+            return Value{};
+        }
+
+        if (!std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("present: expected (object|string, void|object) arguments");
+        }
+        const std::string& idStr = std::get<std::string>(args[0].data);
+        auto searchIn = [&](const std::shared_ptr<LpcObject>& c) -> std::shared_ptr<LpcObject> {
+            if (!c) return nullptr;
+            for (auto& item : c->inventory()) {
+                if (!item) continue;
+                if (isTruthy(vm.callFunction(item, "id", {Value(idStr)}))) return item;
+            }
+            return nullptr;
+        };
+        if (auto found = searchIn(container)) return Value(found);
+        if (!explicitContainer) {
+            if (auto found = searchIn(container->environment().lock())) return Value(found);
+        }
+        return Value{};
+    });
+
     // void move_object(object | string dest) -- moves current_object.
     // The string-path overload resolves the same way real move_object()
     // does (find_object(), which auto-compiles on a miss -- confirmed
@@ -1192,6 +1561,27 @@ void registerCoreEfuns() {
     t.registerEfun("disable_commands", [](VM& vm, std::vector<Value>&) -> Value {
         if (auto ob = vm.currentObject()) ob->setCommandsEnabled(false);
         return Value{};
+    });
+
+    // int living(object ob default: this_object()) -- func_spec.c: "int
+    // living(object default: F__THIS_OBJECT);". Real semantics
+    // (add_action.c's f_living(): "if (sp->u.ob->flags & O_ENABLE_COMMANDS)
+    // ... *sp = const1 ... else *sp = const0") are exactly whether
+    // enable_commands() has been called on the object, nothing more --
+    // backed directly by the same commandsEnabled_ flag the
+    // enable_commands()/disable_commands() pair above already maintains.
+    // Confirmed live needed: std/Object.c's own move() gates
+    // move_object() behind "living(this_object()) && living(ob)" to
+    // block one living thing from moving directly into another (the
+    // "mountable" exception aside).
+    t.registerEfun("living", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> target;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            target = vm.currentObject();
+        }
+        return Value(int64_t{target && target->commandsEnabled() ? 1 : 0});
     });
 
     // void add_action(string fun, string | string* cmd, void | int flag)
@@ -1439,6 +1829,25 @@ void registerCoreEfuns() {
         }
         char* s = std::ctime(&clock);
         return Value(std::string(s ? s : ""));
+    });
+
+    // int random(int n) -- confirmed against real efuns_main.c's
+    // f_random(): "if (sp->u.number <= 0) { sp->u.number = 0; return; }
+    // sp->u.number = random_number(sp->u.number);" -- a uniform int in
+    // [0, n-1], or plain 0 for n <= 0 (not an error). func_spec.c: "int
+    // random(int);", one required int argument. Found live: domains/
+    // Praxis/setter.c's own roll_d6() (Palladium 3d6 attribute rolling,
+    // "total += random(6) + 1"), the first efun call chargen's roll step
+    // actually makes.
+    t.registerEfun("random", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("random: expected an int argument");
+        }
+        int64_t n = std::get<int64_t>(args[0].data);
+        if (n <= 0) return Value(int64_t{0});
+        static std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<int64_t> dist(0, n - 1);
+        return Value(dist(rng));
     });
 
     // int userp(object ob) / int query_once_interactive(object ob) --

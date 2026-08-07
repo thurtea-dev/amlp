@@ -37,6 +37,15 @@ int CodeGen::declareLocal(const std::string& name) {
     }
     int slot = nextLocalSlot_++;
     locals_[name] = slot;
+    // Record this name against the innermost open block scope (if any --
+    // function parameters and locals declared directly in a function's
+    // own top-level body, before emitBlock() has pushed anything, simply
+    // have nothing to record against and live for the whole function, as
+    // they always have), so emitBlock() can remove it again when that
+    // block closes. See CodeGen.hpp's localScopeStack_ comment.
+    if (!localScopeStack_.empty()) {
+        localScopeStack_.back().push_back(name);
+    }
     return slot;
 }
 
@@ -849,12 +858,27 @@ void CodeGen::emitContinueStmt() {
 }
 
 void CodeGen::emitStatement(const AstNode& stmt) {
-    // A comma-separated local var decl ("string a, b;") parses into a
-    // Block wrapping several single-name VarDeclStmts (see
-    // Parser::parseVarDeclStatement) rather than its own AST node; flatten
-    // it into the surrounding code the same as a real nested block would.
+    // A real nested "{ ... }" used as a standalone statement gets its own
+    // scope (emitBlock() below). Three other Parser sites build a Block
+    // purely as an AST convenience, not a real scope, and mark it
+    // isRealScope = false: a comma-separated local var decl ("string a,
+    // b;", Parser::parseVarDeclStatement), a for-loop's comma-chained
+    // init/update clause (parseCommaExprChain), and a braceless single-
+    // statement if/while/for branch (parseBranch). Those must flatten
+    // directly into the *enclosing* scope, not open a new one -- emitBlock()
+    // would otherwise erase a comma-decl's own names from locals_ right
+    // after that one statement, before anything later in the function
+    // could reference them (confirmed live: "string a, b, c; a = ...;
+    // return a + b + c;" threw "undeclared variable a" once emitBlock()
+    // started scoping unconditionally).
     if (auto* nestedBlock = dynamic_cast<const Block*>(&stmt)) {
-        emitBlock(*nestedBlock);
+        if (nestedBlock->isRealScope) {
+            emitBlock(*nestedBlock);
+        } else {
+            for (const auto& inner : nestedBlock->statements) {
+                emitStatement(*inner);
+            }
+        }
         return;
     }
     if (auto* exprStmt = dynamic_cast<const ExprStmt*>(&stmt)) {
@@ -910,9 +934,22 @@ void CodeGen::emitStatement(const AstNode& stmt) {
 }
 
 void CodeGen::emitBlock(const Block& block) {
+    // Real LPC/C89 block scoping: every "{ ... }" -- a standalone
+    // statement, or an if/while/for body, or a function's own top-level
+    // body -- opens its own nested scope for local declarations. Push an
+    // empty scope, compile the block's statements (declareLocal() records
+    // each new name into this scope as it runs), then pop the scope,
+    // erasing those names from locals_ so a sibling block declared later
+    // in the same function may reuse them -- see CodeGen.hpp's
+    // localScopeStack_ comment and declareLocal()'s own.
+    localScopeStack_.emplace_back();
     for (const auto& stmt : block.statements) {
         emitStatement(*stmt);
     }
+    for (const auto& name : localScopeStack_.back()) {
+        locals_.erase(name);
+    }
+    localScopeStack_.pop_back();
 }
 
 CompiledProgram CodeGen::generate(const Program& program,
@@ -931,6 +968,28 @@ CompiledProgram CodeGen::generate(const Program& program,
     for (size_t i = 0; i < inheritedObjectVarNames.size(); ++i) {
         objectVars_[inheritedObjectVarNames[i]] = static_cast<int>(i);
     }
+    // The next slot number for a variable this file itself newly declares
+    // must come from inheritedObjectVarNames.size() -- a plain count --
+    // not objectVars_.size(). objectVars_ is a *name*-keyed map, and a
+    // private variable's synthesized "$private#N" name is only unique
+    // relative to the file that declared it: two files reached via
+    // separate inherit branches (e.g. one leaf directly inherited, and
+    // another leaf several levels down a different branch) can each
+    // independently produce "$private#0" for their own first private
+    // variable, since each was compiled standalone starting its own
+    // local numbering at 0. When both branches are flattened into the
+    // same inheritedObjectVarNames list, those two unrelated variables'
+    // names collide in objectVars_, which silently keeps only the later
+    // one -- undercounting the true number of inherited slots and
+    // handing this file's own new variables slot numbers that overlap
+    // ones already in use. Confirmed live via a multi-level inherit
+    // chain test (see test_lexer.cpp's
+    // testObjectVariableOffsetsComposeAcrossMultiLevelInheritChain):
+    // objectVars_.size() read 2 instead of the real inherited count of
+    // 4, handing the child's own first new variable slot 2 -- the same
+    // absolute slot a sibling branch's own variable already legitimately
+    // occupied.
+    size_t nextObjectVarSlot = inheritedObjectVarNames.size();
 
     // Assign every top-level object variable a sequential slot before any
     // function body is compiled, so declaration order relative to the
@@ -949,7 +1008,8 @@ CompiledProgram CodeGen::generate(const Program& program,
             throw LpcRuntimeError(
                 "codegen: object variable \"" + varDecl->name + "\" already declared");
         }
-        int slot = static_cast<int>(objectVars_.size());
+        int slot = static_cast<int>(nextObjectVarSlot);
+        ++nextObjectVarSlot;
         // The real name is what this file's own code resolves through
         // (objectVars_, used for every PushObjectVar/StoreObjectVar in
         // this compile), regardless of privacy -- privacy only affects
@@ -992,6 +1052,7 @@ CompiledProgram CodeGen::generate(const Program& program,
     if (!pendingVarInitializers.empty()) {
         locals_.clear();
         nextLocalSlot_ = 0;
+        localScopeStack_.clear();
         loopStack_.clear();
         foreachCounter_ = 0;
         switchCounter_ = 0;
@@ -1023,6 +1084,7 @@ CompiledProgram CodeGen::generate(const Program& program,
 
         locals_.clear();
         nextLocalSlot_ = 0;
+        localScopeStack_.clear();
         loopStack_.clear();
         foreachCounter_ = 0;
         switchCounter_ = 0;
@@ -1075,6 +1137,7 @@ void CodeGen::emitPendingLambdas() {
 
         locals_.clear();
         nextLocalSlot_ = 0;
+        localScopeStack_.clear();
         loopStack_.clear();
         foreachCounter_ = 0;
         switchCounter_ = 0;
