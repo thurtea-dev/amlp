@@ -79,6 +79,36 @@ private:
     lpcdriver::VM& vm_;
 };
 
+// Real FluffOS's T_UNDEFINED is a *subtype* of T_NUMBER (a number whose
+// value already is 0, just tagged specially so undefinedp() can detect
+// it) -- not a separate value kind that arithmetic has to special-case.
+// This driver's own monostate plays the same "no value" role (a missing
+// mapping key, per Index's own comment, or a declared-but-unassigned
+// object variable/local before this driver's LpcObject.cpp/VM.cpp own
+// fix made those a real 0 directly), so it needs to participate in
+// arithmetic exactly like a real 0 too, while remaining distinguishable
+// from one via undefinedp()/nullp() specifically. Returns true and sets
+// out to 0.0 for monostate, true and the numeric value for int64_t/
+// double, false (leaving out untouched) for anything else. Surfaced
+// live: std/living.c's own query_stats() doing "stats[stat] + x" where
+// stats[stat] is a missing-key monostate for a fresh character whose
+// stats mapping has not been rolled yet.
+bool asArithmeticOperand(const lpcdriver::Value& v, double& out) {
+    if (auto* i = std::get_if<int64_t>(&v.data)) {
+        out = static_cast<double>(*i);
+        return true;
+    }
+    if (auto* d = std::get_if<double>(&v.data)) {
+        out = *d;
+        return true;
+    }
+    if (std::holds_alternative<std::monostate>(v.data)) {
+        out = 0.0;
+        return true;
+    }
+    return false;
+}
+
 // Resolves a bare function-call name against a program's own functions
 // first, then depth-first against each program it inherits (which may
 // itself inherit further -- see Bytecode.hpp's CompiledProgram comment).
@@ -761,17 +791,52 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 Value rhs = localStack.back(); localStack.pop_back();
                 Value lhs = localStack.back(); localStack.pop_back();
 
+                // real LPC's "arr1 - arr2": set difference, not numeric
+                // subtraction -- every element of arr1 that also occurs
+                // anywhere in arr2 (by value equality) is dropped, order
+                // and any non-matched duplicates preserved (confirmed
+                // against every real LPC driver's documented array "-"
+                // operator; grammar.y gives "-" the same F_SUBTRACT
+                // opcode regardless of operand type, dispatched on type
+                // at runtime the same way this driver's own Add opcode
+                // already special-cases string/array/mapping before its
+                // shared numeric path). Surfaced live: std/user.c's own
+                // register_channels() doing "channels - __RestrictedChannels".
+                if (instr.op == OpCode::Sub &&
+                    std::holds_alternative<std::shared_ptr<Array>>(lhs.data) &&
+                    std::holds_alternative<std::shared_ptr<Array>>(rhs.data)) {
+                    auto leftArr = std::get<std::shared_ptr<Array>>(lhs.data);
+                    auto rightArr = std::get<std::shared_ptr<Array>>(rhs.data);
+                    auto result = std::make_shared<Array>();
+                    if (leftArr) {
+                        for (const auto& item : leftArr->items) {
+                            bool excluded = false;
+                            if (rightArr) {
+                                for (const auto& other : rightArr->items) {
+                                    if (valuesEqual(item, other)) {
+                                        excluded = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!excluded) result->items.push_back(item);
+                        }
+                    }
+                    localStack.emplace_back(Value(result));
+                    ++ip;
+                    break;
+                }
+
                 bool eitherDouble = std::holds_alternative<double>(lhs.data) ||
                                      std::holds_alternative<double>(rhs.data);
 
                 double lv, rv;
-                if (std::holds_alternative<int64_t>(lhs.data)) lv = static_cast<double>(std::get<int64_t>(lhs.data));
-                else if (std::holds_alternative<double>(lhs.data)) lv = std::get<double>(lhs.data);
-                else throw LpcRuntimeError("arithmetic: left operand is not numeric");
-
-                if (std::holds_alternative<int64_t>(rhs.data)) rv = static_cast<double>(std::get<int64_t>(rhs.data));
-                else if (std::holds_alternative<double>(rhs.data)) rv = std::get<double>(rhs.data);
-                else throw LpcRuntimeError("arithmetic: right operand is not numeric");
+                if (!asArithmeticOperand(lhs, lv)) {
+                    throw LpcRuntimeError("arithmetic: left operand is not numeric");
+                }
+                if (!asArithmeticOperand(rhs, rv)) {
+                    throw LpcRuntimeError("arithmetic: right operand is not numeric");
+                }
 
                 if ((instr.op == OpCode::Div || instr.op == OpCode::Mod) && rv == 0.0) {
                     throw LpcRuntimeError(instr.op == OpCode::Div
@@ -958,16 +1023,9 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                         result->items.insert(result->items.end(), rightArr->items.begin(), rightArr->items.end());
                     }
                     localStack.emplace_back(Value(result));
-                } else if ((std::holds_alternative<int64_t>(lhs.data) || std::holds_alternative<double>(lhs.data)) &&
-                           (std::holds_alternative<int64_t>(rhs.data) || std::holds_alternative<double>(rhs.data))) {
+                } else if (double lv, rv; asArithmeticOperand(lhs, lv) && asArithmeticOperand(rhs, rv)) {
                     bool eitherDouble = std::holds_alternative<double>(lhs.data) ||
                                         std::holds_alternative<double>(rhs.data);
-                    double lv = std::holds_alternative<int64_t>(lhs.data)
-                                    ? static_cast<double>(std::get<int64_t>(lhs.data))
-                                    : std::get<double>(lhs.data);
-                    double rv = std::holds_alternative<int64_t>(rhs.data)
-                                    ? static_cast<double>(std::get<int64_t>(rhs.data))
-                                    : std::get<double>(rhs.data);
                     if (eitherDouble) {
                         localStack.emplace_back(Value(lv + rv));
                     } else {

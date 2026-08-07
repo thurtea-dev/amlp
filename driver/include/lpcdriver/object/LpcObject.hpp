@@ -29,6 +29,20 @@ public:
     bool hasHeartbeat() const { return heartbeatEnabled_; }
     void setHeartbeat(bool on) { heartbeatEnabled_ = on; }
 
+    // real object_t::living_name (set_living_name()). This driver's own
+    // find_player() (EfunTable.cpp) does not consult this -- it walks
+    // InteractiveRegistry and asks each object its own query_name()
+    // instead, a deliberate, already-documented simplification -- so
+    // nothing currently reads livingName_ back. It is still stored
+    // (rather than a bare no-op efun) so a real consumer can be added
+    // later without another round trip through this field's own
+    // plumbing, and so query_living_name()-style introspection is at
+    // least possible. Surfaced live: std/user.c's own setup() calling
+    // set_living_name(query_name()) unconditionally, not gated behind
+    // anything this driver's boot path could otherwise skip.
+    const std::string& livingName() const { return livingName_; }
+    void setLivingName(std::string name) { livingName_ = std::move(name); }
+
     // real object_t's "super" (environment) and "contains"/"next_inv"
     // (inventory), simplified from FluffOS's intrusive doubly-linked
     // list to a plain vector -- this driver already uses the same
@@ -111,6 +125,7 @@ private:
     bool commandsEnabled_ = false;
     std::vector<ActionEntry> actions_;
     std::optional<std::string> privs_;
+    std::string livingName_;
 };
 
 } // namespace lpcdriver

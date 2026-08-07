@@ -249,6 +249,120 @@ void registerCoreEfuns() {
     t.registerEfun("sizeof", sizeofImpl);
     t.registerEfun("strlen", sizeofImpl);
 
+    // mixed *map_array map(mixed *arr, string | function func, ...) --
+    // real func_spec.cpp signature ("map_array map(...)": map_array is
+    // the alias name, map is the real one -- same alias-before-real
+    // ordering already confirmed for nullp/undefinedp above -- both
+    // registered against this one implementation). Two real shapes,
+    // both confirmed live needed by std/user/nmsh.c's own do_nickname()
+    // ("map_array(explode(str, \" \"), \"replace_nickname\",
+    // this_object())") and process_request()'s USERS/PRESENT cases
+    // ("map_array(filter_array(...), \"user_names\", this_object())"):
+    // a string function name plus a target object calls
+    // target->func(element, extra_args...) for each element; a real
+    // Closure value calls it directly via evaluate()'s own
+    // VM::callClosure(), matching the bound-args-before-extra-args order
+    // Value.hpp's Closure comment already documents. Only array (not
+    // mapping) input is implemented -- no real call site in this
+    // mudlib's confirmed path maps over a mapping.
+    auto mapArrayImpl = [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("map_array: expected an array first argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        auto result = std::make_shared<Array>();
+        if (!arr) return Value(result);
+
+        if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
+            if (!*closurePtr) return Value(result);
+            std::vector<Value> extra(args.begin() + 2, args.end());
+            for (const auto& item : arr->items) {
+                std::vector<Value> callArgs;
+                callArgs.reserve(1 + extra.size());
+                callArgs.push_back(item);
+                callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+                result->items.push_back(vm.callClosure(*closurePtr, std::move(callArgs)));
+            }
+            return Value(result);
+        }
+
+        if (!std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("map_array: expected a string or function second argument");
+        }
+        if (args.size() < 3 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
+            throw LpcRuntimeError("map_array: string function name requires an object third argument");
+        }
+        const std::string& funcName = std::get<std::string>(args[1].data);
+        auto target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
+        std::vector<Value> extra(args.begin() + 3, args.end());
+        for (const auto& item : arr->items) {
+            std::vector<Value> callArgs;
+            callArgs.reserve(1 + extra.size());
+            callArgs.push_back(item);
+            callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+            result->items.push_back(vm.callFunction(target, funcName, std::move(callArgs)));
+        }
+        return Value(result);
+    };
+    t.registerEfun("map_array", mapArrayImpl);
+    t.registerEfun("map", mapArrayImpl);
+
+    // mixed filter_array filter(mixed *arr, string | function func, ...)
+    // -- same alias-before-real naming as map_array/map above
+    // (func_spec.cpp: "mixed *filter_array filter(mixed *, ...);"), same
+    // two call shapes as map_array, keeping only the elements for which
+    // the call returns truthy. Surfaced alongside map_array in the same
+    // std/user/nmsh.c call sites (both always used together there:
+    // "map_array(filter_array(...), ...)"). Real filter() also accepts
+    // a string or mapping first argument (func_spec.cpp's own "string |
+    // mixed * | mapping, ..."); only the array form is implemented,
+    // matching every real call site this mudlib actually uses.
+    auto filterArrayImpl = [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("filter_array: expected an array first argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        auto result = std::make_shared<Array>();
+        if (!arr) return Value(result);
+
+        if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
+            if (!*closurePtr) return Value(result);
+            std::vector<Value> extra(args.begin() + 2, args.end());
+            for (const auto& item : arr->items) {
+                std::vector<Value> callArgs;
+                callArgs.reserve(1 + extra.size());
+                callArgs.push_back(item);
+                callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+                if (isTruthy(vm.callClosure(*closurePtr, std::move(callArgs)))) {
+                    result->items.push_back(item);
+                }
+            }
+            return Value(result);
+        }
+
+        if (!std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("filter_array: expected a string or function second argument");
+        }
+        if (args.size() < 3 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
+            throw LpcRuntimeError("filter_array: string function name requires an object third argument");
+        }
+        const std::string& funcName = std::get<std::string>(args[1].data);
+        auto target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
+        std::vector<Value> extra(args.begin() + 3, args.end());
+        for (const auto& item : arr->items) {
+            std::vector<Value> callArgs;
+            callArgs.reserve(1 + extra.size());
+            callArgs.push_back(item);
+            callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+            if (isTruthy(vm.callFunction(target, funcName, std::move(callArgs)))) {
+                result->items.push_back(item);
+            }
+        }
+        return Value(result);
+    };
+    t.registerEfun("filter_array", filterArrayImpl);
+    t.registerEfun("filter", filterArrayImpl);
+
     t.registerEfun("explode", [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
             !std::holds_alternative<std::string>(args[1].data)) {
@@ -272,6 +386,38 @@ void registerCoreEfuns() {
             }
             result->items.emplace_back(str.substr(start, pos - start));
             start = pos + sep.size();
+        }
+        return Value(result);
+    });
+
+    // mixed implode(mixed *arr, string | function sep, void | mixed) --
+    // real func_spec.cpp signature. Only the plain string-separator form
+    // is implemented (join every element, converted to string, with sep
+    // between them) -- confirmed the only shape used anywhere on this
+    // driver's confirmed real path (every real call site here passes
+    // an array already containing strings and a literal separator, e.g.
+    // std/user/nmsh.c's own "implode(words, \" \")" and
+    // "implode(map_array(...), \", \")"); the function-per-element form
+    // real implode() also supports is not implemented.
+    t.registerEfun("implode", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("implode: expected (array, string) arguments "
+                                   "(function-per-element form not implemented)");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        const std::string& sep = std::get<std::string>(args[1].data);
+        std::string result;
+        if (arr) {
+            for (size_t i = 0; i < arr->items.size(); ++i) {
+                if (i > 0) result += sep;
+                if (auto* s = std::get_if<std::string>(&arr->items[i].data)) {
+                    result += *s;
+                } else {
+                    throw LpcRuntimeError("implode: array element " + std::to_string(i) +
+                                           " is not a string");
+                }
+            }
         }
         return Value(result);
     });
@@ -1230,6 +1376,53 @@ void registerCoreEfuns() {
         return Value{};
     });
 
+    // void set_living_name(string) -- real add_action.c's own
+    // f_set_living_name(), which calls the internal set_living_name(ob,
+    // str) that assigns object_t::living_name. This driver's own
+    // find_player() (see its own comment above) deliberately does not
+    // consult a living-name table -- it walks InteractiveRegistry and
+    // asks each object its own query_name() instead -- so this stores
+    // the name on the current object (see LpcObject.hpp's own comment)
+    // without wiring up a lookup table for it. Surfaced live:
+    // std/user.c's own setup() calling set_living_name(query_name())
+    // unconditionally.
+    t.registerEfun("set_living_name", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("set_living_name: expected a string argument");
+        }
+        if (auto ob = vm.currentObject()) {
+            ob->setLivingName(std::get<std::string>(args[0].data));
+        }
+        return Value{};
+    });
+
+    // void set_heart_beat(int flag) / int query_heart_beat(object
+    // default: this_object()) -- LpcObject already has
+    // hasHeartbeat()/setHeartbeat() (used by ApplyTable's own
+    // "heart_beat" recognition), but nothing had ever registered the
+    // efun that actually sets the flag from LPC, so every real call
+    // threw "undefined efun". This driver has no periodic heartbeat
+    // scheduler yet (nothing currently reads hasHeartbeat() back to
+    // decide who to call "heart_beat" on) -- the flag is stored
+    // correctly for when that lands, but setting it has no runtime
+    // effect yet beyond being queryable. Surfaced live: std/user.c's
+    // own setup() calling set_heart_beat(1) unconditionally.
+    t.registerEfun("set_heart_beat", [](VM& vm, std::vector<Value>& args) -> Value {
+        bool on = !args.empty() && std::holds_alternative<int64_t>(args[0].data) &&
+            std::get<int64_t>(args[0].data) != 0;
+        if (auto ob = vm.currentObject()) ob->setHeartbeat(on);
+        return Value{};
+    });
+    t.registerEfun("query_heart_beat", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> target;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            target = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            target = vm.currentObject();
+        }
+        return Value(static_cast<int64_t>(target && target->hasHeartbeat() ? 1 : 0));
+    });
+
     // int time() -- seconds since the Unix epoch, same as the real efun.
     t.registerEfun("time", [](VM&, std::vector<Value>&) -> Value {
         return Value(static_cast<int64_t>(std::time(nullptr)));
@@ -1402,6 +1595,32 @@ void registerCoreEfuns() {
     // *different* connection's address; only the current one's own
     // peer address is queried, via getpeername() on its fd.
     t.registerEfun("query_ip_number", [](VM&, std::vector<Value>&) -> Value {
+        Connection* conn = OutputContext::current();
+        if (!conn) return Value{};
+        sockaddr_in addr{};
+        socklen_t len = sizeof(addr);
+        if (::getpeername(conn->fd(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+            return Value{};
+        }
+        char buf[INET_ADDRSTRLEN];
+        if (!::inet_ntop(AF_INET, &addr.sin_addr, buf, sizeof(buf))) {
+            return Value{};
+        }
+        return Value(std::string(buf));
+    });
+
+    // string query_ip_name(void|object ob) -- real comm.c's own
+    // query_ip_name() does a reverse-DNS lookup of the peer address,
+    // falling back to the numeric IP when hostname resolution is
+    // unavailable/disabled (real FluffOS itself gates this behind a
+    // config option and has the same numeric fallback). This driver
+    // does no DNS resolution of its own at all (a blocking reverse
+    // lookup inline in the connection-handling loop would stall every
+    // other connection during it) -- always takes that same fallback,
+    // returning the numeric IP string, matching query_ip_number()'s own
+    // "only the current connection, via OutputContext::current()"
+    // simplification.
+    t.registerEfun("query_ip_name", [](VM&, std::vector<Value>&) -> Value {
         Connection* conn = OutputContext::current();
         if (!conn) return Value{};
         sockaddr_in addr{};

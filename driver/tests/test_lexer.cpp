@@ -6010,6 +6010,161 @@ static void testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride(
     std::cout << "testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride OK\n";
 }
 
+// ---------------------------------------------------------------------
+// Array subtraction ("arr1 - arr2", real set difference) and monostate
+// participating in arithmetic as a real 0. Both surfaced live compiling/
+// running std/user.c's own register_channels() and std/living.c's own
+// query_stats().
+// ---------------------------------------------------------------------
+
+static void testArraySubtractionRemovesEveryMatchingElementPreservingOrder() {
+    lpcdriver::Value result = runProbe(
+        "mixed *a;\n"
+        "mixed *b;\n"
+        "mixed *r;\n"
+        "a = ({ 1, 2, 3, 2, 4 });\n"
+        "b = ({ 2 });\n"
+        "r = a - b;\n"
+        "return sizeof(r) * 1000 + r[0] * 100 + r[1] * 10 + r[2];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    // Every "2" removed (both occurrences), order and the rest preserved:
+    // ({ 1, 3, 4 }).
+    assert(std::get<int64_t>(result.data) == 3134);
+    std::cout << "testArraySubtractionRemovesEveryMatchingElementPreservingOrder OK\n";
+}
+
+static void testArraySubtractionOnEmptyRightOperandLeavesLeftUnchanged() {
+    lpcdriver::Value result = runProbe(
+        "mixed *a;\n"
+        "a = ({ 1, 2, 3 }) - ({});\n"
+        "return sizeof(a) * 100 + a[0] * 10 + a[2];\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 313);
+    std::cout << "testArraySubtractionOnEmptyRightOperandLeavesLeftUnchanged OK\n";
+}
+
+static void testMonostateParticipatesInArithmeticAsRealZero() {
+    // A missing mapping key (see OpCode::Index's own comment) is
+    // monostate, not a real int64_t 0 -- but real LPC has no such
+    // distinction for ordinary arithmetic, only for undefinedp()/
+    // nullp(). Confirmed live: std/living.c's own query_stats() doing
+    // "stats[stat] + x" where stats[stat] is a missing key for any stat
+    // never rolled yet.
+    lpcdriver::Value result = runProbe(
+        "mapping stats;\n"
+        "int x;\n"
+        "stats = ([]);\n"
+        "x = 0;\n"
+        "return (stats[\"strength\"] + x) * 1000 +\n"
+        "       (5 - stats[\"strength\"]) * 100 +\n"
+        "       (stats[\"strength\"] * 3) * 10 +\n"
+        "       undefinedp(stats[\"strength\"]);\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    // 0 + 0 = 0; 5 - 0 = 5; 0 * 3 = 0; undefinedp(missing key) = 1.
+    assert(std::get<int64_t>(result.data) == 501);
+    std::cout << "testMonostateParticipatesInArithmeticAsRealZero OK\n";
+}
+
+// set_heart_beat()/query_heart_beat() -- surfaced live: std/user.c's own
+// setup() calling set_heart_beat(1) unconditionally.
+static void testSetHeartBeatThenQueryHeartBeatRoundTrips() {
+    ObjectVarHarness harness;
+    harness.writeFile("/hb_lone.c",
+        "void enable_it() { set_heart_beat(1); }\n"
+        "void disable_it() { set_heart_beat(0); }\n"
+        "int probe() { return query_heart_beat(this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/hb_lone");
+    assert(ob != nullptr);
+
+    lpcdriver::Value before = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<int64_t>(before.data));
+    assert(std::get<int64_t>(before.data) == 0);
+
+    harness.vm.callFunction(ob, "enable_it", {});
+    lpcdriver::Value after = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<int64_t>(after.data));
+    assert(std::get<int64_t>(after.data) == 1);
+
+    harness.vm.callFunction(ob, "disable_it", {});
+    lpcdriver::Value cleared = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<int64_t>(cleared.data));
+    assert(std::get<int64_t>(cleared.data) == 0);
+
+    std::cout << "testSetHeartBeatThenQueryHeartBeatRoundTrips OK\n";
+}
+
+// ---------------------------------------------------------------------
+// map_array()/map() and filter_array()/filter() (string-function-name-
+// plus-object-target form). Surfaced live: std/user/nmsh.c's own
+// do_nickname() ("map_array(explode(str, \" \"), \"replace_nickname\",
+// this_object())").
+// ---------------------------------------------------------------------
+
+static void testMapArrayWithStringFunctionNameCallsMethodOnTargetForEachElement() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ma_target.c",
+        "string shout(string s) { return s + \"!\"; }\n");
+    harness.writeFile("/ma_caller.c",
+        "mixed probe(object target) {\n"
+        "    return map_array(({ \"a\", \"b\", \"c\" }), \"shout\", target);\n"
+        "}\n");
+    auto target = harness.objects.cloneObject("/ma_target");
+    auto caller = harness.objects.cloneObject("/ma_caller");
+    assert(target != nullptr && caller != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "probe", {lpcdriver::Value(target)});
+    auto* arrPtr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arrPtr != nullptr && *arrPtr != nullptr);
+    assert((*arrPtr)->items.size() == 3);
+    assert(std::get<std::string>((*arrPtr)->items[0].data) == "a!");
+    assert(std::get<std::string>((*arrPtr)->items[1].data) == "b!");
+    assert(std::get<std::string>((*arrPtr)->items[2].data) == "c!");
+
+    std::cout << "testMapArrayWithStringFunctionNameCallsMethodOnTargetForEachElement OK\n";
+}
+
+static void testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fa_target.c",
+        "int is_even(int n) { return n % 2 == 0; }\n");
+    harness.writeFile("/fa_caller.c",
+        "mixed probe(object target) {\n"
+        "    return filter_array(({ 1, 2, 3, 4, 5, 6 }), \"is_even\", target);\n"
+        "}\n");
+    auto target = harness.objects.cloneObject("/fa_target");
+    auto caller = harness.objects.cloneObject("/fa_caller");
+    assert(target != nullptr && caller != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "probe", {lpcdriver::Value(target)});
+    auto* arrPtr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arrPtr != nullptr && *arrPtr != nullptr);
+    assert((*arrPtr)->items.size() == 3);
+    assert(std::get<int64_t>((*arrPtr)->items[0].data) == 2);
+    assert(std::get<int64_t>((*arrPtr)->items[1].data) == 4);
+    assert(std::get<int64_t>((*arrPtr)->items[2].data) == 6);
+
+    std::cout << "testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements OK\n";
+}
+
+// implode() -- surfaced live: std/user/nmsh.c's own do_alias()/
+// do_nickname() joining word arrays back into a line with " ".
+static void testImplodeJoinsStringArrayWithSeparator() {
+    lpcdriver::Value result = runProbe(
+        "string *words;\n"
+        "words = ({ \"go\", \"north\" });\n"
+        "return implode(words, \" \");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "go north");
+    std::cout << "testImplodeJoinsStringArrayWithSeparator OK\n";
+}
+
+static void testImplodeOnEmptyArrayReturnsEmptyString() {
+    lpcdriver::Value result = runProbe("return implode(({}), \" \");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "");
+    std::cout << "testImplodeOnEmptyArrayReturnsEmptyString OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -6262,6 +6417,14 @@ int main() {
     testUndefinedpTrueOnlyForVoidNotZeroOrOtherTypes();
     testParentCallToFunctionOnlyChildDefinesResolvesAtRuntime();
     testParentCallStillPrefersItsOwnLexicalDefinitionOverChildsOverride();
+    testArraySubtractionRemovesEveryMatchingElementPreservingOrder();
+    testArraySubtractionOnEmptyRightOperandLeavesLeftUnchanged();
+    testMonostateParticipatesInArithmeticAsRealZero();
+    testSetHeartBeatThenQueryHeartBeatRoundTrips();
+    testMapArrayWithStringFunctionNameCallsMethodOnTargetForEachElement();
+    testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements();
+    testImplodeJoinsStringArrayWithSeparator();
+    testImplodeOnEmptyArrayReturnsEmptyString();
     std::cout << "all tests passed\n";
     return 0;
 }

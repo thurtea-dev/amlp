@@ -17,14 +17,36 @@ genuine cross-inherit function-resolution gap, and -- the most
 consequential -- object variables and locals defaulting to this
 driver's own "no value" sentinel instead of real LPC's actual `0`
 default, which had been silently wrong since early in the project).
-The next blocker (see "The next real blocker" below) is a still-
-undiagnosed issue in `std/user/nmsh.c`'s own history-buffer setup,
-unrelated to `add_action` itself.
+Snapshot updated after root-causing the `__HistorySize` modulo-by-zero
+report from the previous slice: it was never actually a bug in the
+`this_player() != this_object()` guard (confirmed live, with temporary
+instrumentation, that the guard behaves correctly and `reset_history()`
+correctly sets `__HistorySize`). The real cause was a cascade of
+several other missing efuns/driver bugs that each independently
+prevented `setup()` from ever cleanly reaching that code, with
+`catch(__Player->setup())` in `secure/std/login.c` silently swallowing
+every earlier failure with no console trace. This slice fixed nine more
+confirmed gaps found chasing that cascade (see "Root-causing the
+__HistorySize report" below for the full trail), including a real
+mudlib bug (`std/user.c`'s own `set_name()` missing the same PRIVS-off
+bootstrap escape hatch `set_position()` already has) and a genuinely
+significant new finding, not yet fixed: object variable slots may not
+be correctly preserved across deep, multi-branch inheritance chains
+(discovered via `std/living.c`'s own hidden `inherit` statements,
+buried in `secure/include/living.h` rather than the `.c` file itself).
+Live testing now reaches several steps further into chargen than
+before, and stops at a new, distinct issue in `std/user/nmsh.c`'s own
+`do_alias()`. Updated again after root-causing that issue: it is not a
+`nmsh.c` bug at all, but a general compiler/VM architecture bug in how
+object-variable slots are resolved for sibling multi-inherits (see
+"`do_alias()` root-caused" below) -- confirmed via live instrumentation,
+not yet fixed, proposed for direction before implementing since it
+touches shared object-variable resolution broadly.
 
 ## Working now
 
 - Clean build via `cmake -B build -S . && cmake --build build`.
-- `ctest --test-dir build` passes (245 unit test cases in one binary,
+- `ctest --test-dir build` passes (253 unit test cases in one binary,
   covering lexer, parser, codegen, and VM execution for every supported
   feature).
 - Driver boots, compiles and loads `secure/daemon/master.c`, runs its
@@ -1094,39 +1116,270 @@ exercise the exact real shapes (`std/living.c`'s own catch-all,
 fallthrough) end to end at the VM level independent of how far live
 chargen gets.
 
-## The next real blocker: `std/user/nmsh.c`'s history buffer never gets sized, cause not yet found
+## Root-causing the `__HistorySize` report: guard logic was never the bug
 
-Zone selection (`americas`) is accepted, then the next typed line
-(`roll`, the stats-roll step) throws inside `add_history_cmd()`:
+The previous slice's own "next real blocker" (reproduced above) turned
+out to be a red herring, confirmed by adding temporary `write()`
+instrumentation directly to `nmsh.c`'s `setup()` and to
+`secure/std/login.c`'s own `catch(__Player->setup())`, then observing
+real runtime values against the live chargen flow (removed once
+understood, per this project's own methodology of never leaving
+debug-only code behind). The actual sequence:
+
+- `secure/std/login.c`'s own `catch(__Player->setup())` silently
+  swallows *any* error thrown inside `setup()`, with no console trace
+  at all -- confirmed by temporarily capturing and printing the
+  `catch()` result, which is otherwise discarded.
+- Once `setup()` genuinely reaches `nmsh::setup()` without an earlier
+  silent failure, live instrumentation confirmed `this_player() ==
+  this_object()` (the guard correctly evaluates false, does not return
+  early) and `reset_history()` correctly sets `__HistorySize` to `10`.
+  The guard was never broken.
+- The `__HistorySize` symptom reported at the end of the previous slice
+  only ever surfaced because `setup()` had *already* failed earlier,
+  silently, on one of several missing efuns confirmed below -- by the
+  time a *different* test happened to get further before failing
+  elsewhere, `__HistorySize` looked like the active bug purely by where
+  the crash happened to land.
+
+Nine further gaps were found and fixed chasing this cascade to the end,
+each confirmed live before being fixed, tests added alongside every
+one:
+
+- **`set_living_name(string)`** (real `add_action.c`'s
+  `f_set_living_name()`) was entirely unregistered. Stored on
+  `LpcObject` (a new `livingName_` field) without wiring up a lookup
+  table for it, matching this driver's own existing `find_player()`
+  simplification (InteractiveRegistry + `query_name()`, not a real
+  living-name table).
+- **`set_heart_beat(int)` / `query_heart_beat(object)`** were also
+  entirely unregistered, despite `LpcObject` already having
+  `hasHeartbeat()`/`setHeartbeat()` support (used by `ApplyTable`'s own
+  `heart_beat` apply recognition) -- nothing had ever wired the actual
+  efun to it. Setting the flag now works and is queryable; there is
+  still no periodic heartbeat scheduler that reads it back to actually
+  call `heart_beat()` on anything (a separate, larger feature, not
+  needed for anything reached so far).
+- **`query_ip_name(void|object)`** was missing. Implemented as an alias
+  of the already-working `query_ip_number()` (always the numeric IP,
+  never a real reverse-DNS hostname lookup -- this driver does no DNS
+  resolution of its own, matching real FluffOS's own documented
+  fallback when hostname resolution is unavailable, and avoiding a
+  blocking lookup inline in the connection-handling loop).
+- **A genuine cross-inherit function-resolution gap in `OpCode::Call`**:
+  a bare call resolved only against the *currently executing file's*
+  own program and its own inherited chain, never against the object's
+  actual most-derived program. Real LPC compiles each file
+  independently and has no way to know at a parent's own compile time
+  that some future child will define a name it references -- such a
+  call can only resolve at runtime. Surfaced live: `std/user/nmsh.c`'s
+  own `process_input()` calling the bare name `query_client`, which
+  only `std/user.c` (which inherits `nmsh.c`) defines. Fixed with a
+  fallback to `obj->program()`, but *only* after the normal lexical-
+  scope search has already failed, so a file's own internal self-calls
+  still resolve to its own definitions first (real LPC does not
+  virtually dispatch a parent's internal calls to a child's override --
+  covered by two dedicated tests, one per direction).
+- **Array subtraction (`arr1 - arr2`, real set difference) was entirely
+  unimplemented** -- only numeric `-` existed. A significant, previously
+  undiscovered gap given how common this idiom is in real LPC. Surfaced
+  live: `std/user.c`'s own `register_channels()` doing `channels -
+  __RestrictedChannels`. Implemented as: every element of the left
+  array that also occurs anywhere in the right array (by value
+  equality) is dropped, order and any non-matched duplicates preserved.
+- **`monostate` did not participate in arithmetic as a real `0`.** Real
+  FluffOS's `T_UNDEFINED` is a *subtype* of `T_NUMBER` (a number whose
+  value already is `0`, tagged only so `undefinedp()` can detect it),
+  not a separate value kind arithmetic has to special-case. This
+  driver's own `monostate` plays the same "no value" role (a missing
+  mapping key, or -- before this slice's own earlier `0`-default fix --
+  an unassigned object variable/local) and needed the same treatment.
+  Surfaced live: `std/living.c`'s own `query_stats()` doing
+  `stats[stat] + x` where `stats[stat]` is a missing key for any stat
+  never rolled yet. Fixed via a shared `asArithmeticOperand()` helper
+  used by `Add`/`Sub`/`Mul`/`Div`/`Mod` (and therefore `++`/`--` too,
+  which already desugar through `Add`/`Sub`), treating `monostate` as
+  `0.0` alongside `int64_t`/`double`.
+- **A real, confirmed mudlib bug**: `std/user.c`'s own `set_name()`
+  never had the same PRIVS-off bootstrap escape hatch `set_position()`
+  (in the very same file) already has and already documents in its own
+  comment ("PRIVS is #undef in options.h, so master()->valid_apply()
+  ... can never return true for anyone"). Confirmed live with targeted
+  instrumentation: `secure/daemon/master.c`'s own `compile_object()`
+  calls `ob->set_name(nom)` directly, with no `unguarded()` wrapping, so
+  the resulting `check_access()` stack-walk always denies on
+  `secure/std/login` turning up privs-less in the previous-object
+  chain -- for every new character, every time, not an edge case.
+  `set_position()`'s own comment and existing escape hatch (authenticate
+  by caller identity instead of going through `valid_apply()` at all)
+  is the established fix pattern in this same file; `set_name()` now
+  uses the equivalent check (`previous_object() == master()`, the only
+  trusted direct caller of this exact call shape).
+- **A second real mudlib bug in the same area**: `std/user.c`'s own
+  `query_name()` override read `__TrueName`, a variable *reachable* from
+  `user.c` only through an extremely deep, five-level inherit chain
+  (`user.c` -> `LIVING` -> `secure/include/living.h`'s own hidden
+  `inherit` statements -> `/std/living/combat` -> `BODY` ->
+  `CONTAINER` -> `/std/Object`) that this project had never previously
+  mapped (see the new finding directly below). Confirmed live:
+  `::set_name(str)` genuinely resolves and runs `/std/Object`'s own
+  `set_name()` (which does set `__TrueName`) without throwing, yet
+  `query_name()` still read back a non-string value immediately
+  afterward -- strong evidence the *object-variable slot* `__TrueName`
+  occupies is not consistently the same one on both sides of this deep
+  chain (see the finding below; not fixed this slice). The commented-
+  out line directly above the broken one (`//tmp =
+  living::query_name();`) is contemporary evidence the original
+  developer never got this working correctly either. Given `char_name`
+  is confirmed reliably set (by the very same `set_name()`, in the same
+  assignment), `query_name()` now returns `char_name` directly --
+  matching the function's own evident intent, using the variable that
+  actually works, without needing to resolve the deeper slot question
+  to unblock everything downstream of it (`wiz_setup_workroom()`'s own
+  path concatenation, `std/user/nmsh.c`'s own `reset_prompt()` passing
+  it to `replace_string()`, both confirmed live crashing on this before
+  the fix).
+- **`map_array()`/`map()` and `filter_array()`/`filter()`** were both
+  entirely unregistered. Implemented for the two real shapes this
+  mudlib uses (a `Closure`, called directly via `VM::callClosure()`; or
+  a string function name plus a target object, calling
+  `target->name(element, extra_args...)` for each element) -- not the
+  full `filter()`'s real string/mapping first-argument forms, which
+  nothing here uses. Surfaced live: `std/user/nmsh.c`'s own
+  `do_nickname()`.
+- **`implode()`** was also entirely unregistered (its counterpart,
+  `explode()`, already existed). Implemented for the plain string-
+  separator form only, matching every real call site
+  (`std/user/nmsh.c`'s own `do_alias()`/`do_nickname()`); the real
+  function-per-element form is not implemented.
+
+All nine are covered by new `ctest` cases (13 added this slice).
+
+## `do_alias()` root-caused: confirmed compiler/VM bug, object-variable slots collide across sibling multi-inherits
+
+The `secure/include/living.h` hidden-`inherit` finding from the
+previous slice (`std/living.c` actually has five real `inherit`
+statements only visible after cpp expansion, giving `std/user.c` a
+five-level-deep branch alongside six other parallel top-level
+branches: `AUTOSAVE`, `EDITOR`, `FILES`, `NMSH`, `MORE`, `REFS`,
+`LIVING`) turned out to be the same root cause as the `do_alias()`
+blocker. Confirmed live with temporary instrumentation (a per-file
+dump of `CompiledProgram::objectVarNames` in `ObjectManager::compile()`,
+plus the `__Xverbs`/`__Aliases` checks from the previous slice),
+removed once understood, per this project's own standing rule.
+
+**The bug.** `ObjectManager::compile()` caches one `CompiledProgram`
+per filename and reuses it verbatim everywhere that file is inherited
+(`programCache_[filename]`, see the comment at the top of `compile()`
+explaining this is deliberate, so a file inherited by several others
+is only compiled once). `CodeGen::generate()` assigns every object
+variable a sequential absolute slot number by walking
+`inheritedObjectVarNames`, the flattened list of the *direct* parents'
+own variable names, passed in by `ObjectManager::compile()`. For a
+"leaf" mixin with no `inherit` of its own (`AUTOSAVE`, `EDITOR`,
+`FILES`, `NMSH`, `MORE` are all leaves), `inheritedObjectVarNames` is
+empty, so that file's own object variables always get local slots
+starting at 0 -- correct only when that file is compiled and executed
+completely on its own. `VM::run()`'s `PushObjectVar`/`StoreObjectVar`
+opcodes use `instr.operand` as a *raw* index straight into
+`obj->variables()`, with no per-program base-offset adjustment
+(confirmed by reading both opcode cases in `VM.cpp`; there is no
+`objectVarBase`/`slotBase`/offset concept anywhere in `Bytecode.hpp`,
+`CodeGen.cpp`, `ObjectManager.cpp`, or `VM.cpp`).
+
+When `std/user.c` inherits seven things in one file, each leaf
+sibling's *already-compiled, cached* bytecode still carries the local
+slot numbers it was given when compiled standalone. Live evidence,
+captured via the temporary `ObjectManager::compile()` dump:
 
 ```
-__History[__HistoryTop = (++__CmdNumber-1) % __HistorySize] = str;
+compiled /std/user/autosave inheritedCount=0 totalVars=4   (local slots 0..3)
+compiled /std/user/editor   inheritedCount=0 totalVars=5   (local slots 0..4)
+compiled /std/user/nmsh     inheritedCount=0 totalVars=15  (local slots 0..14)
+...
+compiled /std/user inheritedCount=104 totalVars=155
+  [0..3]   AUTOSAVE's real absolute slots
+  [4..8]   EDITOR's real absolute slots
+  [9..23]  NMSH's real absolute slots (__Nicknames=9, __Aliases=10, __Xverbs=11)
 ```
 
-`__HistorySize` reads as `0` (`"Mod: modulo by zero"`), even though
-`nmsh.c`'s own `setup()` should have set it: `reset_history()` sets
-`__HistorySize = query_history_size()` (a plain constant, `10`), and is
-called from `nmsh::setup()`, itself called from `std/user.c`'s own
-`setup()` (`nmsh::setup();`), guarded only by
-`if(this_player() != this_object()) return;`. `this_object()` during a
-qualified `::` call is confirmed correctly threaded through
-(`OpCode::CallParent` passes the same `obj` unchanged, and the two
-existing `::`-call tests already covered this). `this_player()` should
-resolve via `command_giver`/`OutputContext` fallback to the same player
-object, since `exec()` already rebound the connection before `setup()`
-ever runs (confirmed by direct reading of `secure/std/login.c`'s own
-`exec_user()`) -- so the guard *should* evaluate false and let
-`reset_history()` run. It evidently does not, or something resets
-`__HistorySize` back to `0` afterward, and this has not been root-
-caused yet. Not touched further this slice, per this project's own
-standing rule against implementing anything speculative -- flagged
-here with the full reasoning trail instead of guessed at. This is
-unrelated to `add_action`/`enable_commands` itself: everything that
-subsystem is actually responsible for is confirmed working (see "Live
-test results" above); this is a separate bug in the mud-shell/history
-subsystem (or possibly a `this_player()`/`command_giver` timing subtlety
-this specific call site exposes) that happens to sit on the same live
-chargen path.
+`user.c`'s own compile correctly computes NMSH's real absolute range as
+9..23 (used whenever `user.c`'s own code resolves an inherited variable
+by name). But NMSH's own cached bytecode -- generated when NMSH was
+compiled on its own, with `inheritedCount=0` -- still emits raw operand
+`2` for `__Xverbs` (its third local variable, local slots 0/1/2 for
+`__Nicknames`/`__Aliases`/`__Xverbs`), not `11`. Since the VM applies
+`instr.operand` directly with no offset, every one of NMSH's own
+functions actually read and write `obj->variables()[2]` -- which is
+really `AUTOSAVE`'s own local slot 2, `static private int __LastSave`.
+`create()` writes `__Xverbs`'s mapping into slot 2 and reads it straight
+back through the same (equally wrong, but self-consistent) local slot
+number, so the debug check right after `create()` showed `is_mapping=1`
+for all three variables. Later, `AUTOSAVE`'s own code writes an
+ordinary int into its `__LastSave` (also raw slot 2) during account
+setup, silently overwriting what NMSH's own code still thinks is
+`__Xverbs` -- which is exactly why the live test showed `__Xverbs`
+correct immediately after `create()` and broken (`is_mapping=0`) by the
+time `do_alias()` ran.
+
+This is a general architecture bug, not specific to `nmsh.c`/`do_alias()`:
+any file with two or more directly-inherited sibling files that are
+each leaves (no inherits of their own) will alias each other's low
+slot numbers the same way, because each leaf's cached bytecode was
+compiled assuming it is the entire object. `std/user.c` (seven direct
+inherits, several of them leaves) is simply the first place this
+mudlib's own structure exercises it badly enough to crash. Real
+FluffOS avoids this by construction: each `inherit_t` on a `program_t`
+records its own `variable_index_offset`, resolved per compiled program
+against its actual place in that specific object's inherit tree, and
+compiled function code always addresses object variables relative to
+that per-inherit base at the point of dispatch -- not via a single
+globally-cached, offset-free absolute slot baked in at each file's own
+standalone compile time.
+
+**Not yet fixed.** This is a compiler/VM-level fix that touches how
+every inherited file's object-variable slots are resolved at runtime,
+not a one-file patch -- squarely the kind of change the project's
+standing rule says to stop and propose before implementing. See the
+proposal below.
+
+### Proposed fix
+
+Give the VM a way to add the correct base offset when executing a
+specific inherited program's bytecode against a specific object,
+mirroring FluffOS's own `variable_index_offset` model instead of
+relying on a single flat, offset-free absolute slot number baked into
+each file's cached bytecode:
+
+1. Keep every file's own bytecode using slot numbers relative only to
+   its own direct inherit chain (current behavior for leaves is
+   already correct in isolation -- this does not need to change).
+2. When `ObjectManager::compile()` flattens a parent's inherited
+   object variables, also record, per inherited file, the base offset
+   its own local slot 0 maps to within *this specific parent's*
+   flattened layout (a `std::vector<std::pair<CompiledProgram*, int
+   baseOffset>>` or similar, alongside `inheritedPrograms`).
+3. At the point a function belonging to an inherited program actually
+   runs against an object (`VM`'s call dispatch, including
+   `callFunctionInProgram()`), resolve which program that function
+   belongs to and add that program's base offset for *this object's
+   own top-level program* before using `instr.operand` to index
+   `obj->variables()` in `PushObjectVar`/`StoreObjectVar`.
+4. Because the same file can be inherited by different parents with
+   different offsets (and the program cache intentionally keeps one
+   shared `CompiledProgram` per file), the offset must live on the
+   calling side (the object's own top-level program's inherit-offset
+   table) and never be baked back into the shared cached bytecode
+   itself.
+
+This needs a regression test with a genuinely multi-sibling-leaf
+inherit shape (mirroring `std/user.c`'s own AUTOSAVE/EDITOR/NMSH
+structure) before it can be trusted, not just the existing
+one-or-two-level chains already covered.
+
+Not implemented yet -- reported for direction before touching shared
+object-variable resolution, per the standing rule that this class of
+change gets proposed first.
 
 ## Known stubs / scope limitations (intentional, not bugs)
 
@@ -1225,12 +1478,33 @@ chargen path.
   implement the `buffer` case of its real `string | float | int |
   buffer` signature -- this driver's `Value` variant has no buffer type
   at all, and nothing on any path run so far needs one.
-- Object variables declared but never explicitly assigned (e.g. no
-  `create()`, or a `create()` that does not set every declared
-  variable) stay `void`/monostate rather than real LPC's own auto-
-  zeroed default for a declared type (`int` -> `0`, `string` -> `0`
-  read as falsy, etc). Reading one before any assignment and then using
-  it in an arithmetic/string context throws instead of silently acting
-  like `0`. Not yet hit by anything on this driver's confirmed real
-  path (every object variable reached so far is set in `create()`
-  first), but worth fixing before this stops being true.
+- ~~Object variables declared but never explicitly assigned stay
+  void/monostate~~ -- fixed (see "Root-causing the `__HistorySize`
+  report" above): both `LpcObject`'s own `variables_` and
+  `VM::run()`'s own per-call `locals` now fill with a real `int64_t 0`
+  per slot, matching real LPC's own default for any declared variable
+  regardless of type. `monostate` itself is unchanged and still used
+  deliberately elsewhere (a missing mapping key, an efun explicitly
+  returning "nothing found") -- it now also participates correctly in
+  arithmetic as a real `0` (see the same section), closing the gap
+  this bullet used to describe.
+- `map_array()`/`map()`/`filter_array()`/`filter()` only implement the
+  two real shapes this mudlib actually uses (a `Closure`, or a string
+  function name plus a target object) -- real `filter()`'s own
+  string/mapping first-argument forms are not implemented, nothing
+  confirmed live needs them.
+- `implode()` only implements the plain string-separator form; real
+  LPC's function-per-element form is not implemented.
+- `query_ip_name()` always returns the same numeric IP `query_ip_number()`
+  does -- this driver does no DNS resolution of its own (a blocking
+  reverse lookup inline in the connection-handling loop would stall
+  every other connection during it), matching real FluffOS's own
+  documented fallback when hostname resolution is unavailable.
+- `set_heart_beat()`/`query_heart_beat()` correctly store and report
+  the flag, but nothing reads it back yet -- there is no periodic
+  heartbeat scheduler in this driver at all, so setting the flag has no
+  runtime effect beyond being queryable.
+- `set_living_name()` stores the name on the object but wires up no
+  lookup table for it, matching `find_player()`'s own pre-existing
+  simplification (InteractiveRegistry + `query_name()`, not a real
+  living-name table).
