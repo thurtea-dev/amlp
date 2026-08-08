@@ -78,6 +78,22 @@ public:
     bool commandsEnabled() const { return commandsEnabled_; }
     void setCommandsEnabled(bool on) { commandsEnabled_ = on; }
 
+    // real object_t's O_DESTRUCTED flag (object.h). Set once, by
+    // ObjectManager::destructObject(), and checked at every "call into
+    // this object from outside" entry point this driver has (see
+    // VM::callFunction()/callClosure()/moveObject()/dispatchCommand(),
+    // each citing this flag directly) -- matching real apply()'s own
+    // "DEBUG_CHECK(ob->flags & O_DESTRUCTED, ...)" gate (interpret.c).
+    // Previously this driver had no such flag at all: a destructed
+    // LpcObject just kept working as an ordinary C++ object, reachable
+    // and callable through any shared_ptr still pointing at it, until
+    // the last one dropped -- confirmed live-reachable via a room's own
+    // inventory (destruct() never unlinked the object from its
+    // environment either, see destructObject()'s own comment), not just
+    // a theoretical gap.
+    bool isDestructed() const { return destructed_; }
+    void setDestructed(bool d) { destructed_ = d; }
+
     // real object_t::privs (set_privs()/query_privs()) -- an arbitrary
     // per-object "privilege string" the mudlib sets and later checks for
     // permission gating (secure/daemon/master.c's own valid_write()-
@@ -136,6 +152,7 @@ private:
     std::weak_ptr<LpcObject> environment_;
     std::vector<std::shared_ptr<LpcObject>> inventory_;
     bool commandsEnabled_ = false;
+    bool destructed_ = false;
     std::vector<ActionEntry> actions_;
     std::optional<std::string> privs_;
     std::string livingName_;

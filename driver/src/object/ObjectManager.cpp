@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <algorithm>
 
 namespace lpcdriver {
 
@@ -593,6 +594,30 @@ std::shared_ptr<LpcObject> ObjectManager::lookupLoadedObject(const std::string& 
 
 void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
     if (!obj) return;
+    obj->setDestructed(true);
+
+    // real destruct_object() (simulate.c): "ob->super = 0; ob->next_inv
+    // = 0; ob->contains = 0;" -- unlinks the object from its environment
+    // and severs its own inventory pointer, done immediately, not lazily.
+    // This is the environment-unlink half of that (closes the actual
+    // confirmed bug: a destructed object stayed visible in
+    // all_inventory()/environment() results indefinitely, since nothing
+    // ever removed it from its old environment's own inventory vector).
+    // Not replicated here: real destruct_object()'s own contents-
+    // relocation loop, which calls each contained item's own real
+    // move()/APPLY_MOVE apply to relocate it out to the destructed
+    // object's environment before severing -- a materially bigger
+    // feature (an LPC-level apply cascade during what is otherwise a
+    // pure bookkeeping operation) nothing confirmed live needs yet; a
+    // destructed object's own remaining inventory is simply left
+    // attached to it rather than relocated or dropped, flagged here
+    // rather than silently assumed equivalent.
+    if (auto env = obj->environment().lock()) {
+        auto& inv = env->inventory();
+        inv.erase(std::remove(inv.begin(), inv.end(), obj), inv.end());
+    }
+    obj->setEnvironment(std::weak_ptr<LpcObject>());
+
     loaded_.erase(obj->filename());
 }
 

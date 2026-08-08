@@ -431,6 +431,18 @@ Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
                         std::vector<Value> args) {
     if (!obj) return Value{};
 
+    // real apply()'s own "DEBUG_CHECK(ob->flags & O_DESTRUCTED, ...)"
+    // gate (interpret.c): every "call into an object from outside" path
+    // goes through this one function -- call_other, applyMaster(),
+    // Scheduler's call_out()/heart_beat() firing (via a locked weak_ptr,
+    // which can still succeed on a destructed-but-still-referenced
+    // object), and moveObject()'s own init() propagation all share it --
+    // so a single check here closes the "a destructed object still
+    // responds to call_other()/keeps firing heart_beat()" class of bugs
+    // everywhere at once, matching real semantics: a destructed target
+    // silently does nothing, not an error.
+    if (obj->isDestructed()) return Value{};
+
     // External entry points (call_other, ObjectManager's create() call,
     // applyMaster()) must resolve inherited-but-not-locally-overridden
     // functions the same way a bare in-file call does, or calling an
@@ -538,7 +550,13 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
         throw LpcRuntimeError("evaluate(): not a function value");
     }
     auto owner = closure->owner.lock();
-    if (!owner) {
+    // Previously only checked whether the weak_ptr had actually expired
+    // (the owner's last shared_ptr reference dropped) -- a real gap for
+    // an owner that was explicitly destruct()ed but is still kept alive
+    // by some other reference (e.g. sitting in an array/mapping/another
+    // object's variable), which is not at all an unusual thing for
+    // destruct() to leave behind. isDestructed() catches that case too.
+    if (!owner || owner->isDestructed()) {
         throw LpcRuntimeError("evaluate(): owner of function pointer is destructed");
     }
 
@@ -603,7 +621,11 @@ std::string VM::resolveMudlibPath(const std::string& lpcPath) const {
 // senses.c, living.c's own init_living()) calls move()/move_object() at
 // all, so this has not been reachable to verify against real behavior.
 void VM::moveObject(const std::shared_ptr<LpcObject>& item, const std::shared_ptr<LpcObject>& dest) {
-    if (!item || !dest || item == dest) return;
+    // A destructed item/destination is never a valid move -- without
+    // this, an already-destructed-but-still-referenced object could be
+    // relinked back into a live room's inventory, undoing the unlink
+    // ObjectManager::destructObject() just did.
+    if (!item || !dest || item == dest || item->isDestructed() || dest->isDestructed()) return;
 
     if (auto oldEnv = item->environment().lock()) {
         auto& oldInv = oldEnv->inventory();
@@ -672,7 +694,7 @@ std::pair<std::string, std::optional<std::string>> splitVerbAndArg(const std::st
 // first matching handler that returns truthy, trying further matches if
 // one returns falsy.
 bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::string& line) {
-    if (!giver) return false;
+    if (!giver || giver->isDestructed()) return false;
     auto [verb, arg] = splitVerbAndArg(line);
     if (verb.empty()) return false;
 
@@ -698,7 +720,10 @@ bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::str
         if (!matches) continue;
 
         auto owner = entry.owner.lock();
-        if (!owner) continue; // real: an action whose owner died is skipped, not an error.
+        // real: an action whose owner died (or was explicitly
+        // destructed but is still referenced elsewhere) is skipped, not
+        // an error.
+        if (!owner || owner->isDestructed()) continue;
 
         // real user_parser() (add_action.c): the argument construction is
         // NOT relative to the matched entry's own verb length for either

@@ -1598,6 +1598,19 @@ void registerCoreEfuns() {
 
         vm.destructObject(ob);
 
+        // Previously only closed the connection when it happened to be
+        // the one currently driving this call -- a destructed object
+        // reached some other way (e.g. one player's own object
+        // destructing a different player's, an admin "boot" command)
+        // left a stale InteractiveRegistry entry behind, still findable
+        // via users()/find_player() and still a valid message() target,
+        // until that other connection eventually closed on its own for
+        // an unrelated reason. Unconditional now, matching real
+        // destruct_object()'s own "if (ob->interactive)
+        // remove_interactive(ob, 1);" -- always run, not gated on which
+        // object happens to be currently active.
+        InteractiveRegistry::remove(ob);
+
         if (Connection* conn = OutputContext::current()) {
             if (conn->boundObject() == ob) {
                 conn->close();

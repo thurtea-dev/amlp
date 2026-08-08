@@ -5191,6 +5191,142 @@ static void testEvaluateThrowsWhenClosureOwnerDestructed() {
     std::cout << "testEvaluateThrowsWhenClosureOwnerDestructed OK\n";
 }
 
+// --- destructed-object guard --------------------------------------------
+// Previously this driver had no O_DESTRUCTED-equivalent flag at all: a
+// destructed LpcObject just kept working as an ordinary C++ object,
+// reachable and callable through any shared_ptr still pointing at it
+// (still sitting in a room's own inventory, since destruct() never
+// unlinked it either), until the last shared_ptr happened to drop. The
+// existing testEvaluateThrowsWhenClosureOwnerDestructed test above (and
+// testCallOutSkipsDestructedTargetSilently further down) only ever
+// exercised the *weak_ptr-expired* case (an explicit ".reset()" after
+// destructObject()), not a destructed object that is still kept alive by
+// another live reference -- a completely ordinary thing for destruct()
+// to leave behind (an array, a mapping, another object's own variable).
+// Each test below deliberately keeps a live shared_ptr past
+// destructObject() to prove the new isDestructed() flag itself is what
+// closes the gap, not weak_ptr expiry doing the work incidentally.
+
+static void testDestructedObjectIsUnlinkedFromEnvironmentInventory() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dg_room.c", "int probe() { return 0; }\n");
+    harness.writeFile("/dg_item.c", "int probe() { return 0; }\n");
+
+    auto room = harness.objects.cloneObject("/dg_room");
+    auto item = harness.objects.cloneObject("/dg_item");
+    assert(room != nullptr && item != nullptr);
+
+    harness.vm.moveObject(item, room);
+    assert(room->inventory().size() == 1);
+    assert(item->environment().lock() == room);
+
+    harness.vm.destructObject(item); // item stays alive via this local
+
+    assert(room->inventory().empty());
+    assert(item->environment().lock() == nullptr);
+
+    std::cout << "testDestructedObjectIsUnlinkedFromEnvironmentInventory OK\n";
+}
+
+static void testCallOtherOnDestructedObjectIsSilentNoOp() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dg_target.c",
+        "int ran;\n"
+        "int mark() { ran = 1; return 42; }\n");
+    auto target = harness.objects.cloneObject("/dg_target");
+    assert(target != nullptr);
+
+    harness.vm.destructObject(target); // target stays alive via this local
+
+    lpcdriver::Value result = harness.vm.callFunction(target, "mark", {});
+    assert(result.isVoid()); // real apply(): destructed target, no call made
+
+    lpcdriver::Value ranVal = target->variables()[0];
+    assert(std::holds_alternative<int64_t>(ranVal.data));
+    assert(std::get<int64_t>(ranVal.data) == 0); // mark() body never ran
+
+    std::cout << "testCallOtherOnDestructedObjectIsSilentNoOp OK\n";
+}
+
+static void testCallClosureThrowsForDestructedOwnerEvenWhenStillReferenced() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dg_owner.c",
+        "mixed make_closure() { return (: file_size, \"/x\" :); }\n");
+    auto owner = harness.objects.cloneObject("/dg_owner");
+    assert(owner != nullptr);
+
+    lpcdriver::Value closureVal = harness.vm.callFunction(owner, "make_closure", {});
+    auto closurePtr = std::get<std::shared_ptr<lpcdriver::Closure>>(closureVal.data);
+    assert(closurePtr != nullptr);
+
+    harness.vm.destructObject(owner); // owner stays alive via this local
+
+    bool threw = false;
+    try {
+        harness.vm.callClosure(closurePtr, {});
+    } catch (const lpcdriver::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("destructed") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testCallClosureThrowsForDestructedOwnerEvenWhenStillReferenced OK\n";
+}
+
+static void testDispatchCommandSkipsActionFromDestructedOwnerEvenWhenStillReferenced() {
+    ObjectVarHarness harness;
+    harness.writeFile("/dg_actor.c",
+        "int ran;\n"
+        "int cmd_poke(string arg) { ran = 1; return 1; }\n");
+    auto actor = harness.objects.cloneObject("/dg_actor");
+    assert(actor != nullptr);
+    actor->setCommandsEnabled(true);
+    lpcdriver::LpcObject::ActionEntry entry;
+    entry.verb = "poke";
+    entry.functionName = "cmd_poke";
+    entry.owner = actor;
+    actor->addAction(entry);
+
+    harness.vm.destructObject(actor); // actor stays alive via this local
+
+    bool handled = harness.vm.dispatchCommand(actor, "poke");
+    assert(!handled);
+
+    lpcdriver::Value ranVal = actor->variables()[0];
+    assert(std::holds_alternative<int64_t>(ranVal.data));
+    assert(std::get<int64_t>(ranVal.data) == 0); // cmd_poke() body never ran
+
+    std::cout << "testDispatchCommandSkipsActionFromDestructedOwnerEvenWhenStillReferenced OK\n";
+}
+
+static void testCallOutSkipsDestructedTargetEvenWhenStillReferenced() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/dg_co_target.c",
+        "int ran;\n"
+        "void tick() { ran = 1; }\n");
+    auto obj = harness.objects.cloneObject("/dg_co_target");
+    assert(obj != nullptr);
+
+    lpcdriver::CallOutEntry entry;
+    entry.target = obj; // weak_ptr
+    entry.function = "tick";
+    entry.dueAt = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    scheduler.addCallOut(std::move(entry));
+
+    harness.vm.destructObject(obj); // obj stays alive via this local
+
+    scheduler.tickCallOuts();
+
+    lpcdriver::Value ranVal = obj->variables()[0];
+    assert(std::holds_alternative<int64_t>(ranVal.data));
+    assert(std::get<int64_t>(ranVal.data) == 0); // tick() never actually ran
+
+    std::cout << "testCallOutSkipsDestructedTargetEvenWhenStillReferenced OK\n";
+}
+
 static void testCallOutAcceptsClosureAsFirstArgument() {
     ObjectVarHarness harness;
     lpcdriver::Scheduler scheduler(harness.vm);
@@ -8697,6 +8833,11 @@ int main() {
     testEvaluateOnNonFunctionValueIsSilentNoOp();
     testEvaluateInvokesLocalFunctionBoundClosure();
     testEvaluateThrowsWhenClosureOwnerDestructed();
+    testDestructedObjectIsUnlinkedFromEnvironmentInventory();
+    testCallOtherOnDestructedObjectIsSilentNoOp();
+    testCallClosureThrowsForDestructedOwnerEvenWhenStillReferenced();
+    testDispatchCommandSkipsActionFromDestructedOwnerEvenWhenStillReferenced();
+    testCallOutSkipsDestructedTargetEvenWhenStillReferenced();
     testCallOutAcceptsClosureAsFirstArgument();
     testPreviousObjectReturnsCallerAcrossCallOther();
     testPreviousObjectDoesNotChangeAcrossSameObjectLocalCall();
