@@ -26,8 +26,21 @@ public:
 
     std::vector<Value>& variables() { return variables_; }
 
-    bool hasHeartbeat() const { return heartbeatEnabled_; }
-    void setHeartbeat(bool on) { heartbeatEnabled_ = on; }
+    // real object_t's O_HEART_BEAT flag plus its heart_beats[]-entry own
+    // "time_to_heart_beat" (backend.c's set_heart_beat()/query_heart_beat()):
+    // 0 means disabled; a nonzero interval is how many heartbeat cycles
+    // (real default HEARTBEAT_INTERVAL == 2 real seconds each, see
+    // Scheduler) elapse between this object's own heart_beat() calls, not
+    // just an on/off flag -- confirmed live-needed distinction: std/germ.c's
+    // own set_heart_beat(5) relies on a slower cadence than the default,
+    // and query_heart_beat() must report that real interval back (backend.c's
+    // own query_heart_beat(object_t*) returns heart_beats[index].time_to_heart_beat,
+    // not a bare 1). The actual per-cycle countdown state lives in
+    // Scheduler's own heartbeat list, not here -- this field is only the
+    // configured interval a fresh Scheduler entry resets its countdown to.
+    bool hasHeartbeat() const { return heartbeatInterval_ != 0; }
+    int heartbeatInterval() const { return heartbeatInterval_; }
+    void setHeartbeatInterval(int interval) { heartbeatInterval_ = interval; }
 
     // real object_t::living_name (set_living_name()). This driver's own
     // find_player() (EfunTable.cpp) does not consult this -- it walks
@@ -119,7 +132,7 @@ private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
     std::vector<Value> variables_;
-    bool heartbeatEnabled_ = false;
+    int heartbeatInterval_ = 0;
     std::weak_ptr<LpcObject> environment_;
     std::vector<std::shared_ptr<LpcObject>> inventory_;
     bool commandsEnabled_ = false;

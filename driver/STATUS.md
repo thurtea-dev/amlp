@@ -94,18 +94,27 @@ separator semantics at all, which silently broke every compile-time
 previously entirely missing mechanism, `ObjectManager::
 initPrivsForObject()`, added alongside it). Also added
 `remove_call_out()` (a stub matching `call_out()`'s own already-stubbed
-non-scheduling behavior). Full suite: 293 tests passing. **Live-
+non-scheduling behavior). Full suite: 288 tests passing. **Live-
 confirmed end to end for the first time this project has reached it:**
 a fresh account now runs the complete chargen flow -- login, account
 creation, gender/display name/email/real name, zone, attribute
 roll/accept, race, alignment, OCC pick, automatic starting-equipment
 grant -- and lands in a real starting room (`domains/ChiTown/areas/
-chitown_start.c`) with a live NPC present, full room description, real
-exits, and a working `look` command confirmed both via
-`finish_creation()`'s own automatic room display and via an explicit
-`look` sent afterward. See "Chargen closed the loop: full run confirmed
-live, reaching a real room" below for the full transcript and the
-complete gap-by-gap trail.
+chitown_start.c`) with a live NPC present and a full room description,
+`finish_creation()`'s own automatic display. See "Chargen closed the
+loop: full run confirmed live, reaching a real room" below for the full
+transcript and the complete gap-by-gap trail. **Correction, recorded
+here rather than silently edited away:** this section originally also
+claimed an explicit, separately-typed `look` command was confirmed
+working at this point. It was not -- that claim came from a buffer-
+timing artifact in this project's own probe script (trailing,
+already-in-flight output from the automatic display was misattributed
+to a `look` command sent moments later), not a genuine live result.
+The real `look` command did not actually work at all until the
+dispatch-argument bug described in "Real call_out()/heart_beat()
+scheduler" below was found and fixed, several sessions later. See that
+section for the real confirmation, and its own opening paragraph for
+how the mistake was caught.
 
 ## Working now
 
@@ -1863,7 +1872,7 @@ documented stub that never actually schedules anything yet
 always returns `-1` -- the real "nothing found" outcome, honestly
 reflecting that nothing is ever really pending, not a fake success.
 
-Full suite: 293 tests passing (11 new regression tests this session,
+Full suite: 288 tests passing (11 new regression tests this session,
 one per confirmed gap above).
 
 **Confirmed live, full transcript (fresh account `chargenthirteen`,
@@ -1892,12 +1901,20 @@ survivor watches the corridor from a folding chair. There are two exits: north, 
 A weathered survivor.
 ```
 
--- and then a separately, explicitly sent `look` command, confirmed
-producing the same real room description a second time (not just
-`finish_creation()`'s own one-shot display): full description, exit
-line, live NPC (`rift_survivor`) present and correctly rendered. This
-is the first time this project has reached a real room with a
-confirmed working `look` command end to end.
+**Correction (caught during the "Real call_out()/heart_beat() scheduler"
+slice, see below): a separately, explicitly typed `look` command was
+NOT actually confirmed here.** What this session's probe script reported
+as "look's own response" was trailing, already-in-flight output from
+`finish_creation()`'s own automatic display, misattributed to a `look`
+sent moments later by a timing coincidence in the probe's own buffering
+-- not a genuine round trip. The real `look` command did not work at
+all at this point; it silently produced nothing, for reasons entirely
+unrelated to this session's own chargen fixes (a dispatch-argument bug
+described in full below). This was only caught later, by a more
+rigorous probe that drains the connection to genuine idle before
+sending a command and checking for new bytes -- see "Real call_out()/
+heart_beat() scheduler" below for the real fix and the real
+confirmation.
 
 **One remaining known gap surfaced live, non-fatal:** `cmds/mortal/
 _score.c`'s own `panel_two_col()` (part of the automatic score display
@@ -1915,6 +1932,294 @@ session, and deleted (`secure/save/login_accounts/c/*.o`,
 player-object save under `secure/save/users/` was ever created (no
 test character reached `quit`).
 
+## Real call_out()/heart_beat() scheduler: recon, design, implementation, and a genuinely deep dispatch bug found live
+
+With chargen reaching a real room, `call_out()`/`heart_beat()` never
+actually firing became the single largest remaining gap (see the
+driver-comparison docs under `docs/driver-comparisons/`, corrected to
+say so during the same review pass that preceded this slice). Same
+rigor as the closures/`add_action`/`catch()` work: recon real usage
+first, design grounded directly in FluffOS source, implement, test,
+then verify live.
+
+### Step 1: recon (real usage across the mudlib)
+
+373 `call_out()` call sites, 30 `remove_call_out()`, 15
+`set_heart_beat()`, 10 `find_call_out()`. Confirmed:
+
+- Delays are a mix of fixed constants (2, 5, 10, 60, 120, 300, 600, 900,
+  1800, 3600 seconds), computed expressions (`5*con`, `(random(6)+1)*
+  3600`, a daemon-queried interval), and **zero-delay `call_out(fn, 0)`**
+  used pervasively (~30 sites) as a "run on the next tick" idiom
+  (deferred `equip_gear()` on NPC spawn, deferred self-destruct, `std/
+  room.c`'s own `create() { ...; call_out("reinitiate", 0); }`, etc).
+- `remove_call_out()` is called **both by function name (string, the
+  overwhelming majority) and by a stored numeric handle**
+  (`cmds/mortal/_trade.c`'s own `tid = call_out(...); ...;
+  remove_call_out(tid)`), and `while(remove_call_out("x") != -1);` loops
+  confirm multiple same-named call-outs can coexist, removed one match
+  at a time.
+- `find_call_out()` (10 sites) is used as an existence/dedup check
+  before scheduling -- not implemented in this driver at all before
+  this slice.
+- `set_heart_beat()` is called with values other than 0/1 in places
+  (`std/germ.c`'s own `set_heart_beat(5)`) -- real semantics: the
+  argument is a per-object heartbeat-cycle interval, not a bare on/off
+  flag.
+- The dominant repeating-timer idiom is **self-rescheduling call_out**
+  (a function calls `call_out(itself, N)` again at the end of its own
+  body) -- e.g. `std/user.c`'s `rifts_regen_tick()`/
+  `rifts_hp_regen_tick()`, scheduled at 60s/120s in `setup()`, each
+  rescheduling itself. `std/living.c`'s `heart_beat()` uses `time()`
+  deltas rather than trusting exact tick cadence, so it is robust to
+  imprecise firing.
+- `heart_beat()` bodies do real, observable gameplay work: `std/user.c`
+  runs healing/regen and `continue_attack()`; `std/living.c`'s does
+  aging and a 3600-second Rifts-regen/sun-exposure check; NPC files use
+  it for AI.
+
+### Step 2: design (grounded directly in fluffos-2.9-ds2.08's `call_out.c`/`backend.c`)
+
+Not guessed -- read directly, matching this project's own standing
+practice:
+
+- `call_out.c`'s `new_call_out()`: `if (delay < 0) delay = 0;` -- never
+  rejected, clamped. `CALLOUT_HANDLES` is confirmed **active** in this
+  exact vendored build's `options.h`, so the handle-returning
+  `find_call_out(int|string)` / `remove_call_out(int|void|string)`
+  signatures (`func_spec.c`) are the correct target, not the
+  handle-less alternative.
+- `remove_call_out(object_t *ob, const char *fun)`: matches only entries
+  where `(*copp)->ob == ob && strcmp((*copp)->function.s, fun) == 0` --
+  scoped to the *calling* object, and a closure-bound entry's own
+  `cop->ob` is never set for the string form, so a name-based removal
+  can never match a closure-scheduled entry. `find_call_out()` shares
+  the same match rule.
+- `call_out()`'s own main loop (`call_out.c`): "Move the first call_out
+  out of the chain" before invoking it, then advances `current_time`
+  toward real time one second at a time, calling `call_heart_beat()`
+  whenever `current_time % HEARTBEAT_INTERVAL == 0`.
+  `HEARTBEAT_INTERVAL` is **2** (real seconds) in this exact vendored
+  build's `options.h`, confirmed by reading the macro directly rather
+  than assumed.
+- `backend.c`'s `set_heart_beat(object_t *ob, int to)`: four real
+  branches, read directly rather than guessed --
+  `to == 0` disables and removes the object from `heart_beats[]`;
+  `to != 0` on an object not yet enabled adds a fresh entry with
+  `time_to_heart_beat = heart_beat_ticks = to` (negative `to` clamped to
+  1); `to != 0` on an object already enabled updates the interval on a
+  positive `to`, or is rejected as a no-op on a negative one.
+  `query_heart_beat(object_t*)` returns the real configured interval
+  (`heart_beats[index].time_to_heart_beat`), not a bare 1.
+- `call_heart_beat()` (`backend.c`): decrements every enabled object's
+  own tick countdown, fires `heart_beat()` on any that reach zero, then
+  resets that object's countdown back to its own configured interval.
+  Errors during a fired call_out/heart_beat are caught via
+  `SETJMP`/`restore_context` per call, so one throwing call cannot stop
+  the rest of that cycle.
+
+This driver's own data-structure choices, deliberately simpler than
+real FluffOS's ring-buffer-of-linked-lists (`call_list[CALLOUT_CYCLE_SIZE]`)
+while preserving identical *observable* behavior -- the same "simplify
+the internal representation, match the real contract" pattern this
+project already used for closures' lazy name resolution:
+
+- `Scheduler::CallOutEntry`: an absolute `steady_clock::time_point`
+  `dueAt` instead of real `call_out.c`'s delta-encoded ring-buffer slot,
+  a genuinely unique `int64_t handle` (a bare monotonic counter, not
+  real `new_call_out()`'s own slot-plus-`unique`-counter encoding --
+  nothing in this mudlib inspects a handle's bit structure, only
+  compares it back or checks truthiness), and either a `function` name
+  string (with a `weak_ptr<LpcObject> target` owner) or a bound
+  `Closure`, covering both real forms.
+- `Scheduler::HeartbeatEntry`: `weak_ptr<LpcObject>` plus
+  `ticksRemaining`, mirroring real `heart_beats[]`. The configured
+  interval itself lives on `LpcObject::heartbeatInterval()` (replacing
+  the previous plain bool `heartbeatEnabled_`), so `query_heart_beat()`
+  can report it faithfully.
+- `tickCallOuts()`: collects every due entry into a separate vector
+  *before* invoking any of them, then fires each one -- matching real
+  `call_out.c`'s own "move out of the chain first" ordering, needed
+  because the dominant real idiom is a call_out that reschedules itself
+  from within its own body (confirmed in recon above).
+- `tickHeartbeats()`: same two-phase shape (decide who fires this cycle
+  first, entirely before calling any LPC code; fire afterward from a
+  separate snapshot) -- see the crash section immediately below for why
+  this was not optional.
+- The real 2-second cadence gate lives in `Scheduler::run()`'s own loop
+  (comparing elapsed wall time against `lastHeartbeat_`), not inside
+  `tickHeartbeats()` itself, so `tickHeartbeats()`/`tickCallOuts()` stay
+  pure, deterministic, directly-testable functions -- the same reasoning
+  already documented for why `Server::dispatchLine()` was pulled out of
+  `handleConnection()` as its own directly-testable method.
+- `VM` gained a `Scheduler*` back-pointer (`setScheduler()`), set from
+  `main.cpp` right after `Scheduler` is constructed -- the same
+  "set the back-pointer after construction" pattern
+  `ObjectManager::setVM()` already uses, needed because `call_out()`/
+  `remove_call_out()`/`find_call_out()`/`set_heart_beat()` are
+  registered on `EfunTable`, which only receives `VM&`.
+
+### Step 3: implementation
+
+`call_out`, `remove_call_out`, `set_heart_beat`, `query_heart_beat`
+rewritten to route through the real `Scheduler`; new `find_call_out`
+added. All four confirmed against the design above, each with its own
+citation in `EfunTable.cpp`.
+
+### A genuine crash found live: iterator invalidation in `tickHeartbeats()`
+
+The very first live test after wiring everything up **segfaulted** --
+confirmed via `systemd-coredump`, not inferred:
+
+```
+Stack trace of thread ...:
+ #4  lpcdriver::HeartbeatEntry::operator=(HeartbeatEntry&&)
+ #7  std::vector<lpcdriver::HeartbeatEntry>::_M_erase(...)
+ #9  lpcdriver::Scheduler::tickHeartbeats()
+ #10 lpcdriver::Scheduler::run(lpcdriver::Server&, int)
+```
+
+Root cause: the first version of `tickHeartbeats()` held a live iterator
+into `heartbeats_` across the `vm_.callFunction(obj, "heart_beat", {})`
+call. Real `std/user.c`'s own `heart_beat()` calls `set_heart_beat(0)`
+on itself (`if(!interactive(this_object())) { set_heart_beat(0);
+return; }`), which re-enters `Scheduler::setHeartbeatInterval()`, which
+mutates `heartbeats_` via `erase()`/`find_if()` -- invalidating the
+outer loop's own iterator mid-iteration. Fixed the same way
+`tickCallOuts()` was already safe: collect a separate snapshot of who
+fires this cycle *before* calling any LPC code, so a re-entrant
+`set_heart_beat()` call from inside a firing `heart_beat()` can never
+corrupt the structure still being iterated. Covered by a dedicated
+regression test reproducing the exact real shape (an object disabling
+its own heartbeat from within `heart_beat()`, alongside an unrelated
+"bystander" object confirmed unaffected).
+
+### Step 4: live verification uncovered a much older, much deeper bug -- not in the scheduler
+
+With the crash fixed, live testing reached a room and scheduled a
+throwaway test call-out (`cmds/mortal/_testscheduler.c`, not part of the
+game, deleted afterward) -- but a plain `look` command, sent
+immediately after, produced **zero bytes**, with no error anywhere.
+Disabling `tickHeartbeats()`/`tickCallOuts()` entirely (a bisect test)
+did not fix it, proving the scheduler itself was not the cause. This
+also meant a claim earlier in this document -- that a live, explicitly
+typed `look` command had already been confirmed working, in "Chargen
+closed the loop" -- was wrong: re-checked with a probe that drains the
+connection to genuine idle before sending a command, `look` (and every
+other command) had *never* actually worked live in this driver, for any
+session. That correction is recorded in place above rather than edited
+away.
+
+The real root cause, found by direct C++-level instrumentation rather
+than guessing (three distinct, chained gaps, each confirmed against
+real FluffOS source in turn):
+
+1. **`get_dir()` never implemented glob patterns.** `daemon/command.c`'s
+   own `rehash()` (behind `find_cmd()`, which every single `add_action`-
+   dispatched command depends on) calls `get_dir(val[i]+"/_*.c")` -- a
+   genuine glob, not the bare-directory-or-bare-file shape this efun's
+   original implementation assumed was the only real usage. Against a
+   literal `"*"` in the path, `stat()` always failed and this efun
+   silently returned an empty array, so `__Cmds` was never populated and
+   `find_cmd()` returned 0 for **every single verb**. Fixed: the
+   directory portion of the path is literal, only the final path
+   component may carry a wildcard, matched via POSIX `fnmatch()` against
+   that directory's own entries.
+2. **The real, deepest bug: `dispatchCommand()` passed an empty string,
+   not real LPC's own `0`/undefined, for a bare verb with nothing after
+   it.** Confirmed directly against `add_action.c`'s own `user_parser()`:
+   `if (s->flags & V_NOSPACE) { copy_and_push_string(...); } else if
+   (buff[length] == ' ') { copy_and_push_string(...); } else {
+   push_undefined(); }` -- the undefined branch fires whenever there is
+   genuinely nothing after the matched word, for both the plain
+   exact-match and V_SHORT cases (only V_NOSPACE reslices differently).
+   This driver's `splitVerbAndArg()` always produced a `std::string`
+   (empty when there was nothing there), never a true "no argument"
+   value. `cmds/mortal/_look.c`'s own `cmd_look(str)` checks
+   `if(stringp(str))` first, and an empty string passes that check (real
+   LPC: `stringp()` checks the type, not truthiness) -- silently routing
+   a bare `look` into `examine_object("")` instead of the intended
+   `this_player()->describe_current_room(1)` fallback, which itself
+   declines on `if(!str) return 0;`. `cmd_look()`, and therefore
+   `cmd_hook()`, and therefore the whole dispatch, returned falsy with
+   no exception, no dropped connection, and nothing mudlib-visible to
+   explain it -- confirmed only by instrumenting `dispatchCommand()`
+   itself and reading its actual action-table matches and return values.
+   Fixed: `splitVerbAndArg()` now returns `std::optional<std::string>`,
+   and `dispatchCommand()` constructs a real monostate `Value{}` when
+   there is nothing after the verb, matching `push_undefined()` exactly.
+3. **`message()` ignored its own `targets` argument, always writing to
+   whichever connection happened to be "currently active."** Harmless
+   on every path this driver had run before this slice (every real call
+   site was `message(type, text, this_object())`, where `this_object()`
+   already was the active connection's own object) -- until
+   `call_out()`/`heart_beat()` genuinely started firing with **no**
+   active connection at all, and `secure/SimulEfun/communications.c`'s
+   own `tell_object(ob, str)` (`message("tell", str+"", ob)`, this
+   mudlib's single most common way to notify a player from a timer)
+   produced nothing. Fixed with a real object-to-connection lookup:
+   `InteractiveRegistry` (previously membership-only) now also maps each
+   registered object to its own `Connection*`, and `message()` routes to
+   the named target (a single object or an array of them) when one is
+   given, falling back to the current connection only when no `targets`
+   argument was passed at all.
+
+Each of the three is covered by its own dedicated regression test
+(`get_dir` glob matching in the final path component only,
+`dispatchCommand` passing undefined vs. a real string for bare vs.
+compound commands, `message()` routing to a target's own connection
+across two independent sockets, confirmed with neither connection
+"current").
+
+### Confirmed live, full transcript
+
+Fresh account (`truefinal`, scratch instance, port 1123), full chargen
+through OCC pick (`vagabond`), automatic room entry, and this time a
+**genuinely confirmed** explicit `look`:
+
+```
+A Rift tears open around you and reality reassembles.
+You step onto Rifts Earth. Welcome, Human.
+A reinforced shelter of scavenged plating and pre-Rifts ferrocrete,
+built into the corridor between the old Coalition road south to
+Praxis and the checkpoints of Chi-Town to the north. A steady
+trickle of new arrivals passes through here: refugees, mercs, and
+the newly rifted-in alike.
+
+A battered sign is nailed to a support beam near the door. A
+survivor watches the corridor from a folding chair. There are two exits: north, south
+A weathered survivor.
+```
+
+-- confirmed both as the automatic display *and*, separately, as the
+real response to an explicitly typed `look` sent after the connection
+was drained to genuine idle (no bytes at all for 3+ full seconds) --
+455 new bytes arrived, the same real room description, on demand. Then:
+
+```
+>>> testscheduler
+Scheduling a delayed message 3 seconds out via call_out.
+The survivor glances over. "Fresh out of a Rift. You look confused. Say 'help' if you need a rundown."
+CALLOUT FIRED: the real scheduler works.
+```
+
+-- confirming, in one pass: `call_out()` genuinely schedules and later
+fires (the 3-second delayed message, via the throwaway
+`cmds/mortal/_testscheduler.c` test command, deleted after this
+session); `heart_beat()` genuinely fires on a real NPC (`rift_survivor`'s
+own AI dialogue line, unprompted, driven purely by its own heartbeat,
+not anything this session's test script sent); and `message()`/
+`tell_object()` correctly routes a delayed message to the right player
+even with no connection "current" at the moment it fires.
+
+Full suite: 304 tests passing (16 new/updated this slice: the
+iterator-invalidation regression, call-out registration/firing/removal/
+closure-form/error-isolation/destructed-target coverage, heart_beat
+enable/disable/interval-cadence/error-isolation/destructed-object/
+reentrant-self-disable coverage, the `get_dir` glob fix, the
+`dispatchCommand` undefined-argument fix, and the `message()` routing
+fix).
+
 ## Known stubs / scope limitations (intentional, not bugs)
 
 - Object-bound closures (`(: obj_expr, "funcname" :)`), bare string-
@@ -1922,16 +2227,15 @@ test character reached `quit`).
   dereference-call syntax are all implemented now (see "Closure/
   function-pointer forms completed" above) -- this bullet is
   historical, kept for the git-blame trail rather than deleted.
-- `ApplyTable::isKnownApply()` recognizes several applies (`heart_beat`,
-  `disconnect`, etc.) that the driver never actually calls yet.
-- `Scheduler::tickHeartbeats()` / `tickCallOuts()` are empty function
-  bodies, present only to establish where that logic will go. `call_out()`
-  (both the string-function-name and closure forms) validates its
-  arguments and returns a handle but does not actually schedule
-  anything yet. Nothing on the login/account-creation path needs a
-  call-out to actually fire (`logon()`'s own `call_out("idle",
-  LOGON_TIMEOUT)` is a 180-second idle-disconnect timer, never reached
-  in a normal walkthrough).
+- `ApplyTable::isKnownApply()` recognizes `disconnect` (never called yet)
+  alongside `heart_beat`, which is now real -- see "Real call_out()/
+  heart_beat() scheduler" below. This bullet is historical for
+  `heart_beat`, kept for the git-blame trail rather than deleted.
+- ~~`Scheduler::tickHeartbeats()` / `tickCallOuts()` are empty function
+  bodies~~ -- fixed, see "Real call_out()/heart_beat() scheduler" below.
+  `logon()`'s own `call_out("idle", LOGON_TIMEOUT)` (a 180-second idle-
+  disconnect timer) now genuinely schedules, though still not exercised
+  live within any normal walkthrough's own timeframe.
 - Array `&` intersection preserves the left array's order/duplicate
   count rather than replicating FluffOS's exact sorted, de-duplicated
   `intersect_array()` output. `|` is int-only (no array union, unlike
@@ -1973,13 +2277,13 @@ test character reached `quit`).
   object this driver's own login/account-creation path actually checks
   (always still connected at the point it is checked); wrong for an
   object that was once connected and has since disconnected.
-- `message()` ignores its `type`/`targets`/`excludes` arguments and
-  always writes straight to the connection currently driving the call
-  (`OutputContext::current()`) -- there is no reverse "object -> its
-  connection" lookup in this driver to route a message to a *different*
-  object's connection. Confirmed the only shape this driver's login/
-  account-creation path uses (always `message(type, text,
-  this_object())`).
+- ~~`message()` ignores its `type`/`targets`/`excludes` arguments and
+  always writes straight to the connection currently driving the
+  call~~ -- `targets` is now real (see "Real call_out()/heart_beat()
+  scheduler" above: `InteractiveRegistry` maps each connected object to
+  its own `Connection*`, and `message()` routes to it). `type` and
+  `excludes` are still ignored -- nothing reached live yet needs
+  message-type filtering or an exclude list.
 - `set_eval_limit()` is accepted (so callers do not throw "undefined
   efun") but does not change anything -- this driver's own eval-cost
   ceiling resets to a fixed 1,000,000-instruction-per-call limit at the

@@ -13,6 +13,7 @@
 #include "lpcdriver/net/Connection.hpp"
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Server.hpp"
+#include "lpcdriver/scheduler/Scheduler.hpp"
 #include <cassert>
 #include <iostream>
 #include <memory>
@@ -4428,8 +4429,85 @@ static void testLogonSendsBannerAndRegistersInputToPrompt() {
     std::cout << "testLogonSendsBannerAndRegistersInputToPrompt OK\n";
 }
 
+// Real, confirmed-live bug (see EfunTable.cpp's own comment on
+// message()): this efun used to always write to whichever connection is
+// "currently active" (OutputContext::current()), completely ignoring its
+// own targets argument. Harmless on every path this driver had ever
+// actually run before this slice (every real call site was
+// "message(type, text, this_object())" where this_object() already was
+// the active connection's own object) -- until call_out()/heart_beat()
+// started genuinely firing with no active connection at all, and
+// secure/SimulEfun/communications.c's own tell_object(ob, str) (which
+// every delayed player-facing message in this mudlib goes through)
+// produced nothing. This test drives two independent connections and
+// confirms message() reaches the one actually named as its target, not
+// whichever connection happens to be "current" (or none at all).
+static void testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne() {
+    ObjectVarHarness harness;
+    harness.writeFile("/msg_probe.c",
+        "void tell(object ob, string str) { message(\"tell\", str, ob); }\n");
+    auto sender = harness.objects.cloneObject("/msg_probe");
+    assert(sender != nullptr);
+
+    harness.writeFile("/msg_target_a.c", "void create() {}\n");
+    harness.writeFile("/msg_target_b.c", "void create() {}\n");
+    auto targetA = harness.objects.cloneObject("/msg_target_a");
+    auto targetB = harness.objects.cloneObject("/msg_target_b");
+    assert(targetA != nullptr && targetB != nullptr);
+
+    int fdsA[2];
+    int fdsB[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsA) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsB) == 0);
+    lpcdriver::Connection connA(fdsA[0]);
+    lpcdriver::Connection connB(fdsB[0]);
+    connA.attach(targetA);
+    connB.attach(targetB);
+
+    // Real call_out()/heart_beat() firing: no connection is "current" at
+    // all (see Scheduler.cpp) -- confirmed the message must still reach
+    // B by target, not by whatever OutputContext::current() happens to
+    // hold (here, deliberately left null, the exact condition that broke
+    // this live).
+    lpcdriver::OutputContext::set(nullptr);
+    harness.vm.callFunction(sender, "tell",
+        {lpcdriver::Value(targetB), lpcdriver::Value(std::string("hello B\n"))});
+
+    char buf[256];
+    ssize_t nB = ::recv(fdsB[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(nB > 0);
+    assert(std::string(buf, static_cast<size_t>(nB)) == "hello B\n");
+
+    ssize_t nA = ::recv(fdsA[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(nA < 0); // A's own connection received nothing at all
+
+    // Also confirmed the other direction: A being "current" must not
+    // redirect a message actually targeted at B.
+    lpcdriver::OutputContext::set(&connA);
+    harness.vm.callFunction(sender, "tell",
+        {lpcdriver::Value(targetB), lpcdriver::Value(std::string("hello B again\n"))});
+    lpcdriver::OutputContext::set(nullptr);
+
+    ssize_t nB2 = ::recv(fdsB[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(nB2 > 0);
+    assert(std::string(buf, static_cast<size_t>(nB2)) == "hello B again\n");
+    ssize_t nA2 = ::recv(fdsA[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(nA2 < 0);
+
+    ::close(fdsA[1]);
+    ::close(fdsB[1]);
+    std::cout << "testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne OK\n";
+}
+
+// Updated for the real Scheduler (previously exercised call_out()'s
+// pre-Scheduler stub, which always returned a fixed handle of 1 no
+// matter how many call_outs had already been made -- see the real
+// registration/firing/removal tests further below for the bulk of this
+// area's coverage now).
 static void testCallOutAcceptsRealArgumentShapeAndReturnsHandle() {
     ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
     harness.writeFile("/callout_probe.c",
         "int probe() { return call_out(\"idle\", 180); }\n"
         "void idle() {}\n");
@@ -4437,16 +4515,24 @@ static void testCallOutAcceptsRealArgumentShapeAndReturnsHandle() {
     assert(obj != nullptr);
     lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
     assert(std::holds_alternative<int64_t>(result.data));
+    // First handle ever issued by a fresh Scheduler is 1 (see
+    // Scheduler::newCallOutHandle()'s own comment on the monotonic
+    // counter this driver uses in place of real call_out.c's ring-buffer-
+    // slot-encoded handle).
     assert(std::get<int64_t>(result.data) == 1);
     std::cout << "testCallOutAcceptsRealArgumentShapeAndReturnsHandle OK\n";
 }
 
-// remove_call_out() -- always -1 (nothing found), matching real
-// semantics honestly given call_out() above never actually schedules
-// anything in this driver yet. Found live needing this: domains/Praxis/
-// obj/mon/rift_survivor.c's own init().
-static void testRemoveCallOutAlwaysReturnsMinusOneSinceNothingIsEverScheduled() {
+// remove_call_out() on a name with nothing actually pending under it
+// still correctly reports -1 (not found), the real "nothing to remove"
+// outcome -- distinct from the old pre-Scheduler stub this test used to
+// cover, which returned -1 unconditionally regardless of what was
+// pending. See the removal tests further below for the "something IS
+// pending" side of this efun.
+static void testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName() {
     ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
     harness.writeFile("/rco_probe.c",
         "int probe() { return remove_call_out(\"idle\"); }\n"
         "void idle() {}\n");
@@ -4455,7 +4541,7 @@ static void testRemoveCallOutAlwaysReturnsMinusOneSinceNothingIsEverScheduled() 
     lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
     assert(std::holds_alternative<int64_t>(result.data));
     assert(std::get<int64_t>(result.data) == -1);
-    std::cout << "testRemoveCallOutAlwaysReturnsMinusOneSinceNothingIsEverScheduled OK\n";
+    std::cout << "testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName OK\n";
 }
 
 static void testCallOtherWithStringTargetResolvesAlreadyLoadedObject() {
@@ -4802,6 +4888,8 @@ static void testEvaluateThrowsWhenClosureOwnerDestructed() {
 
 static void testCallOutAcceptsClosureAsFirstArgument() {
     ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
     harness.writeFile("/callout_closure_probe.c",
         "void idle() {}\n"
         "int probe() { return call_out((: idle :), 5); }\n");
@@ -6151,6 +6239,53 @@ static void testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension()
     std::cout << "testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension OK\n";
 }
 
+// get_dir(string path) -- real file.c's get_dir(): the directory
+// portion of path is literal, only the final path component may carry
+// a glob wildcard, matched against that directory's own entries.
+// Found live blocking EVERY typed command in the mudlib, not
+// discovered until this project's chargen live-testing finally reached
+// a real room: daemon/command.c's own rehash() (behind find_cmd(),
+// which cmd_hook() depends on for every verb) calls
+// "get_dir(val[i]+\"/_*.c\")" -- a genuine glob this efun's earlier
+// bare-directory-or-bare-file-only implementation could never match,
+// so __Cmds was silently never populated and every command silently
+// produced nothing (see EfunTable.cpp's own comment for the full
+// symptom chain -- no exception, no dropped connection, nothing to
+// suggest the cause without reading rehash() directly).
+static void testGetDirMatchesGlobPatternInFinalPathComponentOnly() {
+    ObjectVarHarness harness;
+    harness.writeFile("/_look.c", "int cmd_look() { return 1; }\n");
+    harness.writeFile("/_score.c", "int cmd_score() { return 1; }\n");
+    harness.writeFile("/readme.txt", "not a command file\n");
+    harness.writeFile("/probe.c",
+        "mixed *glob() { return get_dir(\"/_*.c\"); }\n"
+        "mixed *plain_dir() { return get_dir(\"/\"); }\n");
+    auto ob = harness.objects.cloneObject("/probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value globResult = harness.vm.callFunction(ob, "glob", {});
+    auto* globArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&globResult.data);
+    assert(globArr != nullptr);
+    std::vector<std::string> names;
+    for (auto& item : (*globArr)->items) names.push_back(std::get<std::string>(item.data));
+    std::sort(names.begin(), names.end());
+    assert(names.size() == 2);
+    assert(names[0] == "_look.c");
+    assert(names[1] == "_score.c");
+    // readme.txt (no glob match) and probe.c (compiled after the glob
+    // files were written, but still present on disk) must not appear.
+    assert(std::find(names.begin(), names.end(), "readme.txt") == names.end());
+
+    // Bare directory path (no wildcard) still lists everything, the
+    // pre-existing behavior this fix must not regress.
+    lpcdriver::Value dirResult = harness.vm.callFunction(ob, "plain_dir", {});
+    auto* dirArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&dirResult.data);
+    assert(dirArr != nullptr);
+    assert((*dirArr)->items.size() >= 4); // _look.c, _score.c, readme.txt, probe.c
+
+    std::cout << "testGetDirMatchesGlobPatternInFinalPathComponentOnly OK\n";
+}
+
 // intp(mixed) -- func_spec.c: "int intp(mixed);". Found live needing
 // this the same pass as the id_card.c.c fix above: /domains/Praxis/
 // equipment/id_card.c's own set_value() calls it directly.
@@ -6365,6 +6500,75 @@ static void testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFu
     assert(std::get<std::string>(arg.data) == "warmly");
 
     std::cout << "testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord OK\n";
+}
+
+// Regression test for a genuine, deep, live-caught bug: a bare
+// single-word command (nothing after the verb) must reach its handler
+// with an *undefined* argument (this driver's Value{} monostate), never
+// an empty string. Confirmed directly against fluffos-2.9-ds2.08's own
+// user_parser() (add_action.c): "if (s->flags & V_NOSPACE) {
+// copy_and_push_string(...); } else if (buff[length] == ' ') {
+// copy_and_push_string(...); } else { push_undefined(); }" -- the
+// undefined branch fires whenever there is genuinely nothing after the
+// matched word, for both the plain exact-match and V_SHORT cases (only
+// V_NOSPACE reslices differently). This was NOT hypothetical: it is
+// exactly why a real room's own "look" command produced zero output the
+// first time this project's chargen live-testing ever reached an actual
+// room. cmds/mortal/_look.c's own cmd_look(str) checks
+// "if(stringp(str))" before falling back to "this_player()->
+// describe_current_room(1)" -- an empty string passes stringp() (real
+// LPC: stringp() checks the type, not truthiness), silently routing a
+// bare "look" into examine_object("") instead, which itself declines on
+// "if(!str) return 0;", so cmd_look() (and therefore cmd_hook(),
+// therefore the whole dispatch) returned falsy with no error, no
+// exception, and no dropped connection anywhere in the chain to explain
+// it -- confirmed live only by direct C++-level instrumentation of
+// dispatchCommand() itself, not from any mudlib-visible symptom.
+static void testDispatchCommandPassesUndefinedNotEmptyStringForBareVerbWithNoArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/bv_room.c",
+        "int saw_stringp;\n"
+        "int saw_call;\n"
+        "void init() { add_action(\"cmd_look\", \"look\"); }\n"
+        // Mirrors cmds/mortal/_look.c's own cmd_look(str) shape exactly:
+        // stringp(str) must be false for a bare "look".
+        "int cmd_look(mixed str) {\n"
+        "    saw_call = 1;\n"
+        "    if(stringp(str)) { saw_stringp = 1; return 0; }\n"
+        "    return 1;\n"
+        "}\n"
+        "int query_saw_stringp() { return saw_stringp; }\n"
+        "int query_saw_call() { return saw_call; }\n");
+    harness.writeFile("/bv_mover.c", "void go(object dest) { enable_commands(); move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/bv_room");
+    auto mover = harness.objects.cloneObject("/bv_mover");
+    assert(room != nullptr && mover != nullptr);
+    harness.vm.callFunction(mover, "go", {lpcdriver::Value(room)});
+
+    // Bare verb, nothing after it: must NOT look like a string argument.
+    assert(harness.vm.dispatchCommand(mover, "look") == true);
+    lpcdriver::Value sawCall = harness.vm.callFunction(room, "query_saw_call", {});
+    assert(std::get<int64_t>(sawCall.data) == 1);
+    lpcdriver::Value sawStringp = harness.vm.callFunction(room, "query_saw_stringp", {});
+    assert(std::get<int64_t>(sawStringp.data) == 0);
+
+    // Compound form still gets a real string, unaffected by this fix.
+    harness.writeFile("/bv_room2.c",
+        "void init() { add_action(\"cmd_look\", \"look\"); }\n"
+        "mixed last;\n"
+        "int cmd_look(mixed str) { last = str; return 1; }\n"
+        "mixed query_last() { return last; }\n");
+    auto room2 = harness.objects.cloneObject("/bv_room2");
+    auto mover2 = harness.objects.cloneObject("/bv_mover");
+    assert(room2 != nullptr && mover2 != nullptr);
+    harness.vm.callFunction(mover2, "go", {lpcdriver::Value(room2)});
+    assert(harness.vm.dispatchCommand(mover2, "look at sign") == true);
+    lpcdriver::Value last = harness.vm.callFunction(room2, "query_last", {});
+    assert(std::holds_alternative<std::string>(last.data));
+    assert(std::get<std::string>(last.data) == "at sign");
+
+    std::cout << "testDispatchCommandPassesUndefinedNotEmptyStringForBareVerbWithNoArgument OK\n";
 }
 
 static void testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy() {
@@ -6806,6 +7010,420 @@ static void testSetHeartBeatThenQueryHeartBeatRoundTrips() {
 }
 
 // ---------------------------------------------------------------------
+// Real Scheduler: call_out registration/firing/removal, and heart_beat
+// enable/disable with correct per-interval cadence. Design grounded
+// directly in fluffos-2.9-ds2.08's own call_out.c/backend.c -- see
+// Scheduler.hpp/.cpp's own comments for the citations. dueAt is an
+// absolute steady_clock time_point (see CallOutEntry), so a "simulated
+// due time" test just schedules with a due time already in the past
+// (or a handful of milliseconds out) rather than actually sleeping for
+// whole real seconds.
+// ---------------------------------------------------------------------
+
+static void testCallOutFiresOnceDueTimeArrivesWithExtraArgsInOrder() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/co_fire.c",
+        "int fired;\n"
+        "int a; int b;\n"
+        "void tick(int x, int y) { fired = fired + 1; a = x; b = y; }\n"
+        "int query_fired() { return fired; }\n");
+    auto obj = harness.objects.cloneObject("/co_fire");
+    assert(obj != nullptr);
+
+    lpcdriver::CallOutEntry entry;
+    entry.target = obj;
+    entry.function = "tick";
+    entry.args = {lpcdriver::Value(int64_t{7}), lpcdriver::Value(int64_t{9})};
+    entry.dueAt = std::chrono::steady_clock::now() - std::chrono::seconds(1); // already due
+    scheduler.addCallOut(std::move(entry));
+
+    // Not due yet -> tickCallOuts() must not fire it early. Re-check with
+    // a still-pending, not-yet-due entry for the negative case.
+    lpcdriver::CallOutEntry notDue;
+    notDue.target = obj;
+    notDue.function = "tick";
+    notDue.args = {lpcdriver::Value(int64_t{0}), lpcdriver::Value(int64_t{0})};
+    notDue.dueAt = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    scheduler.addCallOut(std::move(notDue));
+
+    scheduler.tickCallOuts();
+
+    lpcdriver::Value fired = harness.vm.callFunction(obj, "query_fired", {});
+    assert(std::get<int64_t>(fired.data) == 1); // only the due one fired
+
+    lpcdriver::Value aVal = harness.vm.callFunction(obj, "query_fired", {}); // sanity: object still alive
+    (void)aVal;
+
+    std::cout << "testCallOutFiresOnceDueTimeArrivesWithExtraArgsInOrder OK\n";
+}
+
+static void testCallOutSelfReschedulingSurvivesTickIteration() {
+    // Real call_out.c's own main loop moves a due entry out of the
+    // pending list *before* invoking it -- otherwise a call_out whose
+    // body reschedules itself (the dominant repeating-timer idiom this
+    // mudlib uses, e.g. std/user.c's own rifts_regen_tick()) would
+    // corrupt whatever is being iterated. This exercises exactly that
+    // shape end to end through the real call_out() efun.
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/co_resched.c",
+        "int ticks;\n"
+        "void tick() { ticks = ticks + 1; call_out(\"tick\", 0); }\n"
+        "int query_ticks() { return ticks; }\n");
+    auto obj = harness.objects.cloneObject("/co_resched");
+    assert(obj != nullptr);
+
+    harness.vm.callFunction(obj, "tick", {}); // seed: fires once directly, schedules the next
+    scheduler.tickCallOuts(); // fires the rescheduled one, which reschedules again
+    scheduler.tickCallOuts();
+
+    lpcdriver::Value ticks = harness.vm.callFunction(obj, "query_ticks", {});
+    assert(std::get<int64_t>(ticks.data) == 3);
+
+    std::cout << "testCallOutSelfReschedulingSurvivesTickIteration OK\n";
+}
+
+static void testCallOutClosureFormFiresViaCallClosureNotCallFunction() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    // daemon/services.c's own "call_out((: eventCompactUcache :), 3600)"
+    // shape: a bare-name closure, no bound args.
+    harness.writeFile("/co_closure.c",
+        "int fired;\n"
+        "void mark() { fired = 1; }\n"
+        "void go() { call_out((: mark :), 0); }\n"
+        "int query_fired() { return fired; }\n");
+    auto obj = harness.objects.cloneObject("/co_closure");
+    assert(obj != nullptr);
+
+    harness.vm.callFunction(obj, "go", {});
+    scheduler.tickCallOuts();
+
+    lpcdriver::Value fired = harness.vm.callFunction(obj, "query_fired", {});
+    assert(std::get<int64_t>(fired.data) == 1);
+
+    std::cout << "testCallOutClosureFormFiresViaCallClosureNotCallFunction OK\n";
+}
+
+static void testRemoveCallOutByHandlePreventsFiringAndReturnsRemainingSeconds() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/co_rm_handle.c",
+        "int fired;\n"
+        "void tick() { fired = 1; }\n"
+        "int schedule() { return call_out(\"tick\", 60); }\n"
+        "int query_fired() { return fired; }\n");
+    auto obj = harness.objects.cloneObject("/co_rm_handle");
+    assert(obj != nullptr);
+
+    lpcdriver::Value handle = harness.vm.callFunction(obj, "schedule", {});
+    int64_t h = std::get<int64_t>(handle.data);
+
+    int64_t remaining = scheduler.removeCallOutByHandle(h);
+    assert(remaining >= 0); // a real ~60s-out entry, not "not found"
+    assert(scheduler.removeCallOutByHandle(h) == -1); // already gone, second removal finds nothing
+
+    scheduler.tickCallOuts(); // nothing due, and the removed one can't fire regardless
+    lpcdriver::Value fired = harness.vm.callFunction(obj, "query_fired", {});
+    assert(std::get<int64_t>(fired.data) == 0);
+
+    std::cout << "testRemoveCallOutByHandlePreventsFiringAndReturnsRemainingSeconds OK\n";
+}
+
+static void testRemoveCallOutByNameIsScopedToCallingObjectAndSkipsClosures() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    // Two distinct objects each with their own pending "tick", plus a
+    // closure-bound entry under the same function name on the first
+    // object -- real remove_call_out(object_t*, const char*) only ever
+    // matches entries with a real (owner, name) pair; a closure-bound
+    // entry's own "ob" is never set for the string form, so it can never
+    // match a name-based removal (see Scheduler::removeCallOutByName()'s
+    // own comment).
+    harness.writeFile("/co_rm_name.c",
+        "int fired;\n"
+        "void tick() { fired = fired + 1; }\n"
+        "void schedule() { call_out(\"tick\", 60); }\n"
+        "void schedule_closure() { call_out((: tick :), 60); }\n"
+        "int remove_it() { return remove_call_out(\"tick\"); }\n"
+        "int query_fired() { return fired; }\n");
+    auto a = harness.objects.cloneObject("/co_rm_name");
+    auto b = harness.objects.cloneObject("/co_rm_name");
+    assert(a != nullptr && b != nullptr && a != b);
+
+    harness.vm.callFunction(a, "schedule", {});
+    harness.vm.callFunction(a, "schedule_closure", {});
+    harness.vm.callFunction(b, "schedule", {});
+
+    // Removing "tick" from a only removes a's own string-form entry --
+    // not b's, and not a's own closure-bound entry either.
+    lpcdriver::Value removed = harness.vm.callFunction(a, "remove_it", {});
+    assert(std::get<int64_t>(removed.data) != -1);
+    // A second removal on a finds nothing left under the string form.
+    lpcdriver::Value removedAgain = harness.vm.callFunction(a, "remove_it", {});
+    assert(std::get<int64_t>(removedAgain.data) == -1);
+    // b's own entry is untouched.
+    assert(scheduler.findCallOutByName(b, "tick") != -1);
+
+    std::cout << "testRemoveCallOutByNameIsScopedToCallingObjectAndSkipsClosures OK\n";
+}
+
+static void testFindCallOutReturnsRemainingSecondsOrMinusOneWithoutRemoving() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/co_find.c",
+        "void tick() {}\n"
+        "int schedule() { return call_out(\"tick\", 45); }\n"
+        "int check() { return find_call_out(\"tick\"); }\n");
+    auto obj = harness.objects.cloneObject("/co_find");
+    assert(obj != nullptr);
+
+    lpcdriver::Value beforeSchedule = harness.vm.callFunction(obj, "check", {});
+    assert(std::get<int64_t>(beforeSchedule.data) == -1);
+
+    harness.vm.callFunction(obj, "schedule", {});
+    lpcdriver::Value afterSchedule = harness.vm.callFunction(obj, "check", {});
+    assert(std::get<int64_t>(afterSchedule.data) != -1);
+
+    // find does not remove -- checking again still finds it.
+    lpcdriver::Value stillThere = harness.vm.callFunction(obj, "check", {});
+    assert(std::get<int64_t>(stillThere.data) != -1);
+
+    std::cout << "testFindCallOutReturnsRemainingSecondsOrMinusOneWithoutRemoving OK\n";
+}
+
+static void testCallOutRuntimeErrorIsIsolatedFromOtherPendingCallOuts() {
+    // Matches real SETJMP/restore_context recovery in call_out.c's own
+    // main loop, and this driver's own already-established per-object
+    // error-isolation convention: one call_out throwing must not stop
+    // the rest of that same tick's due entries from firing.
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/co_throw.c",
+        "void boom() { destructed_only_function_that_does_not_exist(); }\n");
+    harness.writeFile("/co_ok.c",
+        "int fired;\n"
+        "void tick() { fired = 1; }\n"
+        "int query_fired() { return fired; }\n");
+    auto thrower = harness.objects.cloneObject("/co_throw");
+    auto ok = harness.objects.cloneObject("/co_ok");
+    assert(thrower != nullptr && ok != nullptr);
+
+    auto due = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    lpcdriver::CallOutEntry boom;
+    boom.target = thrower;
+    boom.function = "boom";
+    boom.dueAt = due;
+    scheduler.addCallOut(std::move(boom));
+
+    lpcdriver::CallOutEntry good;
+    good.target = ok;
+    good.function = "tick";
+    good.dueAt = due;
+    scheduler.addCallOut(std::move(good));
+
+    scheduler.tickCallOuts(); // must not throw out of this call
+
+    lpcdriver::Value fired = harness.vm.callFunction(ok, "query_fired", {});
+    assert(std::get<int64_t>(fired.data) == 1);
+
+    std::cout << "testCallOutRuntimeErrorIsIsolatedFromOtherPendingCallOuts OK\n";
+}
+
+static void testCallOutSkipsDestructedTargetSilently() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/co_destruct_target.c", "void tick() {}\n");
+    auto obj = harness.objects.cloneObject("/co_destruct_target");
+    assert(obj != nullptr);
+
+    lpcdriver::CallOutEntry entry;
+    entry.target = obj; // weak_ptr
+    entry.function = "tick";
+    entry.dueAt = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    scheduler.addCallOut(std::move(entry));
+
+    harness.vm.destructObject(obj);
+    obj.reset(); // drop the last owning reference -- weak_ptr now expired
+
+    scheduler.tickCallOuts(); // must not throw or crash on the dangling entry
+
+    std::cout << "testCallOutSkipsDestructedTargetSilently OK\n";
+}
+
+static void testSetHeartBeatIntervalFiresOnceEveryNCyclesNotEveryCycle() {
+    // Real backend.c: set_heart_beat(ob, to) with to > 1 means "fire once
+    // every to heartbeat cycles", not every cycle -- confirmed live-
+    // needed by std/germ.c's own set_heart_beat(5). tickHeartbeats() is
+    // called directly here (bypassing the real-time gate that lives in
+    // Scheduler::run(), see its own comment) so each call deterministically
+    // represents exactly one cycle.
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/hb_interval.c",
+        "int beats;\n"
+        "void enable() { set_heart_beat(3); }\n"
+        "void heart_beat() { beats = beats + 1; }\n"
+        "int query_beats() { return beats; }\n"
+        "int query_interval() { return query_heart_beat(this_object()); }\n");
+    auto obj = harness.objects.cloneObject("/hb_interval");
+    assert(obj != nullptr);
+
+    harness.vm.callFunction(obj, "enable", {});
+    lpcdriver::Value interval = harness.vm.callFunction(obj, "query_interval", {});
+    assert(std::get<int64_t>(interval.data) == 3); // the real configured value, not a bare 1
+
+    scheduler.tickHeartbeats(); // cycle 1 of 3
+    scheduler.tickHeartbeats(); // cycle 2 of 3
+    lpcdriver::Value beforeThird = harness.vm.callFunction(obj, "query_beats", {});
+    assert(std::get<int64_t>(beforeThird.data) == 0); // not yet -- only 2 of 3 cycles elapsed
+
+    scheduler.tickHeartbeats(); // cycle 3 of 3 -- fires
+    lpcdriver::Value afterThird = harness.vm.callFunction(obj, "query_beats", {});
+    assert(std::get<int64_t>(afterThird.data) == 1);
+
+    scheduler.tickHeartbeats(); // cycle 1 of the next period
+    scheduler.tickHeartbeats(); // cycle 2
+    lpcdriver::Value stillOne = harness.vm.callFunction(obj, "query_beats", {});
+    assert(std::get<int64_t>(stillOne.data) == 1); // countdown correctly reset to 3, not left at 0
+
+    std::cout << "testSetHeartBeatIntervalFiresOnceEveryNCyclesNotEveryCycle OK\n";
+}
+
+static void testSetHeartBeatZeroDisablesAndStopsFutureFiring() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/hb_disable.c",
+        "int beats;\n"
+        "void enable() { set_heart_beat(1); }\n"
+        "void disable() { set_heart_beat(0); }\n"
+        "void heart_beat() { beats = beats + 1; }\n"
+        "int query_beats() { return beats; }\n");
+    auto obj = harness.objects.cloneObject("/hb_disable");
+    assert(obj != nullptr);
+
+    harness.vm.callFunction(obj, "enable", {});
+    scheduler.tickHeartbeats();
+    lpcdriver::Value once = harness.vm.callFunction(obj, "query_beats", {});
+    assert(std::get<int64_t>(once.data) == 1);
+
+    harness.vm.callFunction(obj, "disable", {});
+    scheduler.tickHeartbeats();
+    scheduler.tickHeartbeats();
+    lpcdriver::Value stillOnce = harness.vm.callFunction(obj, "query_beats", {});
+    assert(std::get<int64_t>(stillOnce.data) == 1); // disabled -- no further firing
+
+    std::cout << "testSetHeartBeatZeroDisablesAndStopsFutureFiring OK\n";
+}
+
+static void testHeartbeatRuntimeErrorIsolatedFromOtherHeartbeatEnabledObjects() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/hb_throw.c",
+        "void enable() { set_heart_beat(1); }\n"
+        "void heart_beat() { undefined_function_boom(); }\n");
+    harness.writeFile("/hb_ok.c",
+        "int beats;\n"
+        "void enable() { set_heart_beat(1); }\n"
+        "void heart_beat() { beats = beats + 1; }\n"
+        "int query_beats() { return beats; }\n");
+    auto thrower = harness.objects.cloneObject("/hb_throw");
+    auto ok = harness.objects.cloneObject("/hb_ok");
+    assert(thrower != nullptr && ok != nullptr);
+
+    harness.vm.callFunction(thrower, "enable", {});
+    harness.vm.callFunction(ok, "enable", {});
+
+    scheduler.tickHeartbeats(); // must not throw out of this call
+
+    lpcdriver::Value beats = harness.vm.callFunction(ok, "query_beats", {});
+    assert(std::get<int64_t>(beats.data) == 1);
+
+    std::cout << "testHeartbeatRuntimeErrorIsolatedFromOtherHeartbeatEnabledObjects OK\n";
+}
+
+static void testHeartbeatPrunesDestructedObjectSilently() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/hb_destruct.c",
+        "void enable() { set_heart_beat(1); }\n"
+        "void heart_beat() {}\n");
+    auto obj = harness.objects.cloneObject("/hb_destruct");
+    assert(obj != nullptr);
+
+    harness.vm.callFunction(obj, "enable", {});
+    harness.vm.destructObject(obj);
+    obj.reset();
+
+    scheduler.tickHeartbeats(); // must not throw or crash on the dangling entry
+    scheduler.tickHeartbeats();
+
+    std::cout << "testHeartbeatPrunesDestructedObjectSilently OK\n";
+}
+
+// Regression test for a genuine, live-caught crash: heart_beat() calling
+// set_heart_beat() on itself (real std/user.c's own "if(!interactive(
+// this_object())) { set_heart_beat(0); return; }") re-enters
+// Scheduler::setHeartbeatInterval(), which mutates heartbeats_ via
+// erase()/find_if(). An earlier version of tickHeartbeats() held a live
+// iterator into heartbeats_ across the heart_beat() call itself and
+// segfaulted in vector::erase() the moment a real character reached a
+// room live (caught during this slice's own Step 4 live-verification
+// pass, not written speculatively). Covers both directions: an object
+// disabling itself, and one heart_beat() disabling a *different* still-
+// pending object earlier in the same cycle's snapshot.
+static void testHeartbeatCallingSetHeartBeatOnItselfDoesNotCorruptIteration() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/hb_reentrant.c",
+        "int beats;\n"
+        "void enable() { set_heart_beat(1); }\n"
+        "void heart_beat() { beats = beats + 1; set_heart_beat(0); }\n"
+        "int query_beats() { return beats; }\n");
+    harness.writeFile("/hb_bystander.c",
+        "int beats;\n"
+        "void enable() { set_heart_beat(1); }\n"
+        "void heart_beat() { beats = beats + 1; }\n"
+        "int query_beats() { return beats; }\n");
+    auto reentrant = harness.objects.cloneObject("/hb_reentrant");
+    auto bystander = harness.objects.cloneObject("/hb_bystander");
+    assert(reentrant != nullptr && bystander != nullptr);
+
+    harness.vm.callFunction(reentrant, "enable", {});
+    harness.vm.callFunction(bystander, "enable", {});
+
+    scheduler.tickHeartbeats(); // must not crash: reentrant's own heart_beat() disables itself mid-cycle
+
+    lpcdriver::Value reentrantBeats = harness.vm.callFunction(reentrant, "query_beats", {});
+    assert(std::get<int64_t>(reentrantBeats.data) == 1);
+    lpcdriver::Value bystanderBeats = harness.vm.callFunction(bystander, "query_beats", {});
+    assert(std::get<int64_t>(bystanderBeats.data) == 1); // unaffected by reentrant's own disable
+
+    // reentrant is now disabled; a further cycle only fires bystander.
+    scheduler.tickHeartbeats();
+    lpcdriver::Value reentrantAfter = harness.vm.callFunction(reentrant, "query_beats", {});
+    assert(std::get<int64_t>(reentrantAfter.data) == 1); // unchanged
+    lpcdriver::Value bystanderAfter = harness.vm.callFunction(bystander, "query_beats", {});
+    assert(std::get<int64_t>(bystanderAfter.data) == 2);
+
+    std::cout << "testHeartbeatCallingSetHeartBeatOnItselfDoesNotCorruptIteration OK\n";
+}
+
+// ---------------------------------------------------------------------
 // map_array()/map() and filter_array()/filter() (string-function-name-
 // plus-object-target form). Surfaced live: std/user/nmsh.c's own
 // do_nickname() ("map_array(explode(str, \" \"), \"replace_nickname\",
@@ -7200,8 +7818,9 @@ int main() {
     testDispatchLinePrefersPendingInputToHandlerOverProcessInput();
     testInputToCanReRegisterFromWithinDispatchedHandler();
     testLogonSendsBannerAndRegistersInputToPrompt();
+    testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne();
     testCallOutAcceptsRealArgumentShapeAndReturnsHandle();
-    testRemoveCallOutAlwaysReturnsMinusOneSinceNothingIsEverScheduled();
+    testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName();
     testCallOtherWithStringTargetResolvesAlreadyLoadedObject();
     testCallOtherWithStringTargetAutoCompilesAndLoadsOnFirstUse();
     testCallOtherWithStringTargetToNonexistentFileThrows();
@@ -7266,12 +7885,14 @@ int main() {
     testStrcmpMatchesRealCComparisonSemantics();
     testMapDeleteRemovesKeyInPlaceAndLeavesOthersIntact();
     testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension();
+    testGetDirMatchesGlobPatternInFinalPathComponentOnly();
     testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable();
     testRepeatStringConcatenatesNTimesAndEmptyForZeroOrNegative();
     testPresentFindsInventoryItemByIdApplyNotByOtherFunctions();
     testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject();
     testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs();
     testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord();
+    testDispatchCommandPassesUndefinedNotEmptyStringForBareVerbWithNoArgument();
     testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy();
     testThisPlayerReturnsCommandGiverDuringDispatch();
     testQueryVerbReturnsZeroOutsideOfDispatch();
@@ -7293,6 +7914,19 @@ int main() {
     testRandomOfNonPositiveArgumentIsZero();
     testRandomStaysWithinZeroToNExclusiveAcrossManyDraws();
     testSetHeartBeatThenQueryHeartBeatRoundTrips();
+    testCallOutFiresOnceDueTimeArrivesWithExtraArgsInOrder();
+    testCallOutSelfReschedulingSurvivesTickIteration();
+    testCallOutClosureFormFiresViaCallClosureNotCallFunction();
+    testRemoveCallOutByHandlePreventsFiringAndReturnsRemainingSeconds();
+    testRemoveCallOutByNameIsScopedToCallingObjectAndSkipsClosures();
+    testFindCallOutReturnsRemainingSecondsOrMinusOneWithoutRemoving();
+    testCallOutRuntimeErrorIsIsolatedFromOtherPendingCallOuts();
+    testCallOutSkipsDestructedTargetSilently();
+    testSetHeartBeatIntervalFiresOnceEveryNCyclesNotEveryCycle();
+    testSetHeartBeatZeroDisablesAndStopsFutureFiring();
+    testHeartbeatRuntimeErrorIsolatedFromOtherHeartbeatEnabledObjects();
+    testHeartbeatPrunesDestructedObjectSilently();
+    testHeartbeatCallingSetHeartBeatOnItselfDoesNotCorruptIteration();
     testMapArrayWithStringFunctionNameCallsMethodOnTargetForEachElement();
     testFilterArrayWithStringFunctionNameKeepsOnlyTruthyElements();
     testSortArrayWithStringFunctionNameOrdersByComparatorResult();

@@ -40,6 +40,7 @@ int main(int argc, char** argv) {
     objectManager.setVM(&vm);
 
     lpcdriver::Scheduler scheduler(vm);
+    vm.setScheduler(&scheduler);
     lpcdriver::Server server(config, vm, objectManager, scheduler);
 
     std::cout << "lpcdriver booting...\n";

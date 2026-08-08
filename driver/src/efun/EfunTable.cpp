@@ -5,11 +5,14 @@
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Connection.hpp"
 #include "lpcdriver/net/InteractiveRegistry.hpp"
+#include "lpcdriver/scheduler/Scheduler.hpp"
 #include <algorithm>
+#include <chrono>
 #include <arpa/inet.h>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
+#include <fnmatch.h>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -784,19 +787,17 @@ void registerCoreEfuns() {
     // efun's argument shape (call_out.c/efuns_main.c), including the
     // closure-instead-of-function-name-string form real call_out()
     // itself also accepts (confirmed live in this mudlib: daemon/
-    // intermud.c's own "call_out((: Setup :), 2)"). This driver's
-    // Scheduler already has the CallOutEntry storage this needs
-    // (scheduler/Scheduler.hpp), but Scheduler::tickCallOuts() is still
-    // an intentionally empty stub (see STATUS.md's "Known stubs"
-    // section) with no wiring yet from EfunTable through to a live
-    // Scheduler instance -- registering here would silently never fire.
-    // Scoped down to exactly what secure/std/login.c's logon() needs to
-    // not throw ("call_out(\"idle\", LOGON_TIMEOUT)"): accept and
-    // validate the real argument shape (either form), return a call-out
-    // handle, and do nothing else. Actually scheduling call-outs is
-    // follow-up work tracked by the existing Scheduler stub, not a new
-    // gap introduced here.
-    t.registerEfun("call_out", [](VM&, std::vector<Value>& args) -> Value {
+    // intermud.c's own "call_out((: Setup :), 2)"). Now wired all the
+    // way through to a live Scheduler (see scheduler/Scheduler.cpp):
+    // negative delay clamps to 0 (real new_call_out()'s own "if (delay <
+    // 0) delay = 0;"), which is exactly why "call_out(fn, 0)" is this
+    // mudlib's pervasive "run on the next tick" idiom (confirmed ~30
+    // real call sites, e.g. every NPC's own deferred equip_gear()).
+    // Returns the new entry's real, unique handle (CALLOUT_HANDLES is
+    // confirmed active in this exact vendored build's options.h),
+    // needed live by cmds/mortal/_trade.c's own "tid = call_out(...);
+    // ...; remove_call_out(tid)".
+    t.registerEfun("call_out", [](VM& vm, std::vector<Value>& args) -> Value {
         bool validTarget = !args.empty() &&
             (std::holds_alternative<std::string>(args[0].data) ||
              std::holds_alternative<std::shared_ptr<Closure>>(args[0].data));
@@ -804,28 +805,71 @@ void registerCoreEfuns() {
             throw LpcRuntimeError(
                 "call_out: expected (string|function target, int|float delay, ...) arguments");
         }
-        bool delayIsNumeric = std::holds_alternative<int64_t>(args[1].data) ||
-                               std::holds_alternative<double>(args[1].data);
-        if (!delayIsNumeric) {
+        double delaySeconds;
+        if (std::holds_alternative<int64_t>(args[1].data)) {
+            delaySeconds = static_cast<double>(std::get<int64_t>(args[1].data));
+        } else if (std::holds_alternative<double>(args[1].data)) {
+            delaySeconds = std::get<double>(args[1].data);
+        } else {
             throw LpcRuntimeError("call_out: second argument must be an int or float delay");
         }
-        return Value(int64_t{1});
+        if (delaySeconds < 0) delaySeconds = 0;
+
+        CallOutEntry entry;
+        entry.args.assign(args.begin() + 2, args.end());
+        entry.dueAt = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(delaySeconds));
+        if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[0].data)) {
+            entry.closure = *closurePtr;
+        } else {
+            entry.target = vm.currentObject();
+            entry.function = std::get<std::string>(args[0].data);
+        }
+        if (!vm.scheduler()) {
+            throw LpcRuntimeError("call_out: no scheduler attached to this VM");
+        }
+        return Value(vm.scheduler()->addCallOut(std::move(entry)));
     });
 
     // int remove_call_out(int | void | string) -- func_spec.c's real
-    // signature. Real semantics: cancels a pending call_out (by handle
-    // or function name) and returns the time remaining, or -1 if none
-    // was found. Since this driver's own call_out() (just above) is a
-    // documented stub that validates its arguments and returns a handle
-    // but never actually schedules anything (see STATUS.md's "Known
-    // stubs" -- Scheduler::tickCallOuts() is still an empty body), there
-    // is never really anything pending to remove either -- always -1,
-    // matching the real "not found" outcome exactly rather than
-    // pretending success. Found live needing this: domains/Praxis/obj/
-    // mon/rift_survivor.c's own init() (a real, extremely common
-    // defensive idiom: cancel-then-reschedule a repeating call_out
-    // rather than risk two copies running).
-    t.registerEfun("remove_call_out", [](VM&, std::vector<Value>&) -> Value {
+    // signature. Cancels a pending call_out by handle or by function
+    // name (scoped to current_object() for the name form, matching real
+    // remove_call_out(object_t*, const char*)'s own "(*copp)->ob == ob"
+    // check -- see Scheduler::removeCallOutByName()'s own comment) and
+    // returns the time remaining, or -1 if none was found. Found live
+    // needing this: domains/Praxis/obj/mon/rift_survivor.c's own init()
+    // (cancel-then-reschedule a repeating call_out), and std/user.c's
+    // own "while(remove_call_out(\"rifts_regen_tick\") != -1);"
+    // dedup-clear idiom on reconnect.
+    t.registerEfun("remove_call_out", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (!vm.scheduler()) return Value(int64_t{-1});
+        if (!args.empty() && std::holds_alternative<int64_t>(args[0].data)) {
+            return Value(vm.scheduler()->removeCallOutByHandle(std::get<int64_t>(args[0].data)));
+        }
+        if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
+            return Value(vm.scheduler()->removeCallOutByName(
+                vm.currentObject(), std::get<std::string>(args[0].data)));
+        }
+        return Value(int64_t{-1});
+    });
+
+    // int find_call_out(int|string) -- func_spec.c's real signature.
+    // Same lookup rules as remove_call_out() above, without removing
+    // anything. Found live needing this: domains/LoneStar/areas/
+    // lone_star_support_row.c's own dedup-before-scheduling idiom
+    // ("if(find_call_out(\"sweep_resolve\") != -1)
+    // remove_call_out(\"sweep_resolve\");"), and secure/daemon/mcp_d.c's
+    // own "if (find_call_out(\"write_tick\") == -1) call_out(...)".
+    t.registerEfun("find_call_out", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (!vm.scheduler()) return Value(int64_t{-1});
+        if (!args.empty() && std::holds_alternative<int64_t>(args[0].data)) {
+            return Value(vm.scheduler()->findCallOutByHandle(std::get<int64_t>(args[0].data)));
+        }
+        if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
+            return Value(vm.scheduler()->findCallOutByName(
+                vm.currentObject(), std::get<std::string>(args[0].data)));
+        }
         return Value(int64_t{-1});
     });
 
@@ -998,12 +1042,60 @@ void registerCoreEfuns() {
     // route a message to a *different* object's connection than the
     // one currently active, and nothing on this driver's current path
     // needs one.
+    // void message(mixed type, mixed msg, mixed targets, mixed excludes...)
+    // -- real func_spec.c signature. type and excludes are still ignored
+    // (nothing on any path reached live needs message-type filtering or
+    // an exclude list). targets now genuinely routes to that specific
+    // object's own connection (via InteractiveRegistry::find(), see its
+    // own header comment), a single object or an array of objects,
+    // falling back to OutputContext::current() only when no targets
+    // argument was given at all -- the original, still-correct behavior
+    // for message()'s own real default-target convention. This was a
+    // real, confirmed-live bug, not a hypothetical gap: this efun
+    // previously always wrote to "whichever connection is currently
+    // active" and completely ignored targets, which happened to be
+    // unobservable on every path reached live before this slice (every
+    // real call site so far was "message(type, text, this_object())"
+    // where this_object() already was the currently-active connection's
+    // own bound object) -- until call_out()/heart_beat() actually started
+    // firing (see Scheduler.cpp), which runs with no active connection at
+    // all. secure/SimulEfun/communications.c's own tell_object(ob, str)
+    // ("message(\"tell\", str+\"\", ob)") is exactly this shape, and is
+    // exactly how a delayed call_out message ever reaches a player (this
+    // mudlib's single most common notification pattern: "your effect
+    // wears off", combat messages, timers). Found live via this
+    // project's own throwaway scheduler-verification command
+    // (cmds/mortal/_testscheduler.c, not part of the game) producing no
+    // output at all despite the call_out itself firing correctly.
     t.registerEfun("message", [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 2 || !std::holds_alternative<std::string>(args[1].data)) {
             throw LpcRuntimeError("message: expected (mixed type, string msg, mixed targets, ...) arguments");
         }
+        const std::string& text = std::get<std::string>(args[1].data);
+
+        auto sendTo = [&text](const std::shared_ptr<LpcObject>& target) {
+            if (Connection* conn = InteractiveRegistry::find(target)) conn->send(text);
+        };
+
+        if (args.size() > 2 && std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
+            sendTo(std::get<std::shared_ptr<LpcObject>>(args[2].data));
+            return Value{};
+        }
+        if (args.size() > 2 && std::holds_alternative<std::shared_ptr<Array>>(args[2].data)) {
+            if (auto arr = std::get<std::shared_ptr<Array>>(args[2].data)) {
+                for (auto& item : arr->items) {
+                    if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&item.data)) {
+                        sendTo(*ob);
+                    }
+                }
+            }
+            return Value{};
+        }
+        // No targets argument at all: real default is command_giver, this
+        // driver's nearest equivalent being whichever connection is
+        // currently active.
         if (Connection* conn = OutputContext::current()) {
-            conn->send(std::get<std::string>(args[1].data));
+            conn->send(text);
         }
         return Value{};
     });
@@ -1837,21 +1929,31 @@ void registerCoreEfuns() {
         return Value{};
     });
 
-    // void set_heart_beat(int flag) / int query_heart_beat(object
-    // default: this_object()) -- LpcObject already has
-    // hasHeartbeat()/setHeartbeat() (used by ApplyTable's own
-    // "heart_beat" recognition), but nothing had ever registered the
-    // efun that actually sets the flag from LPC, so every real call
-    // threw "undefined efun". This driver has no periodic heartbeat
-    // scheduler yet (nothing currently reads hasHeartbeat() back to
-    // decide who to call "heart_beat" on) -- the flag is stored
-    // correctly for when that lands, but setting it has no runtime
-    // effect yet beyond being queryable. Surfaced live: std/user.c's
-    // own setup() calling set_heart_beat(1) unconditionally.
+    // void set_heart_beat(int to) / int query_heart_beat(object default:
+    // this_object()) -- real backend.c signature: "to" is not a bare
+    // on/off flag, it is a per-object heartbeat-cycle interval (real
+    // default HEARTBEAT_INTERVAL is 2 real seconds per cycle, see
+    // Scheduler::kHeartbeatCycle) -- confirmed live-needed: std/germ.c's
+    // own set_heart_beat(5) relies on a slower cadence than every
+    // object's own default 1. Now wired all the way through to a live
+    // Scheduler (Scheduler::setHeartbeatInterval()), which mirrors real
+    // set_heart_beat()'s exact four branches (disable/fresh-enable/
+    // update/reject-negative-update) -- see its own comment. Surfaced
+    // live: std/user.c's own setup() calling set_heart_beat(1)
+    // unconditionally. query_heart_beat() returns the real configured
+    // interval (backend.c's own query_heart_beat(object_t*) returns
+    // heart_beats[index].time_to_heart_beat, not a bare 1), backed
+    // directly by LpcObject::heartbeatInterval().
     t.registerEfun("set_heart_beat", [](VM& vm, std::vector<Value>& args) -> Value {
-        bool on = !args.empty() && std::holds_alternative<int64_t>(args[0].data) &&
-            std::get<int64_t>(args[0].data) != 0;
-        if (auto ob = vm.currentObject()) ob->setHeartbeat(on);
+        int64_t to = (!args.empty() && std::holds_alternative<int64_t>(args[0].data))
+            ? std::get<int64_t>(args[0].data) : 0;
+        if (auto ob = vm.currentObject()) {
+            if (vm.scheduler()) {
+                vm.scheduler()->setHeartbeatInterval(ob, to);
+            } else {
+                ob->setHeartbeatInterval(static_cast<int>(to));
+            }
+        }
         return Value{};
     });
     t.registerEfun("query_heart_beat", [](VM& vm, std::vector<Value>& args) -> Value {
@@ -1861,7 +1963,7 @@ void registerCoreEfuns() {
         } else {
             target = vm.currentObject();
         }
-        return Value(static_cast<int64_t>(target && target->hasHeartbeat() ? 1 : 0));
+        return Value(static_cast<int64_t>(target ? target->heartbeatInterval() : 0));
     });
 
     // int time() -- seconds since the Unix epoch, same as the real efun.
@@ -2152,15 +2254,27 @@ void registerCoreEfuns() {
     });
 
     // string *get_dir(string path, void|int flags) -- file.c's real
-    // get_dir() supports glob patterns and stat-flag bits; this mudlib's
-    // own boot/account-creation usage is always a bare directory path
-    // with no glob and no flags (confirmed by grep), so only that shape
-    // is implemented: a directory's entry names (excluding "." and
-    // ".."), or a single-element array naming the file itself if path
-    // is a plain file, or an empty array if nothing matches. Throws
-    // rather than silently mishandling if ever called with flags,
-    // matching this codebase's existing convention for other partially-
-    // implemented efuns.
+    // get_dir(): the directory portion of path is always literal; only
+    // the final path component may carry glob wildcards, matched
+    // against that directory's own entries. Stat-flag bits are not
+    // implemented (this mudlib's own usage is always the bare
+    // no-flags form, confirmed by grep); throws rather than silently
+    // mishandling if ever called with flags, matching this codebase's
+    // existing convention for other partially-implemented efuns.
+    // Found live blocking EVERY typed command, not just one: daemon/
+    // command.c's own rehash() (CMD_D's directory-scan cache behind
+    // find_cmd()) calls "get_dir(val[i]+\"/_*.c\")" -- a genuine glob,
+    // not the bare-directory-or-bare-file shape this efun originally
+    // assumed was the only real usage. Against a literal "*" in the
+    // path, stat() always failed and this efun silently returned an
+    // empty array, so __Cmds was never populated and find_cmd()
+    // returned 0 for every single verb -- cmd_hook()'s own fallback
+    // chain (SOUL_D/CHAT_D, then "if(query_client()) receive(\"<error>\")")
+    // then silently produced nothing at all for a raw socket connection
+    // (query_client() false, no client type negotiated), matching
+    // exactly what live testing found: every typed command, valid or
+    // garbage, got zero bytes back, with no exception and no dropped
+    // connection anywhere in the chain to explain it.
     t.registerEfun("get_dir", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("get_dir: expected a string path argument");
@@ -2172,23 +2286,43 @@ void registerCoreEfuns() {
         std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
         auto result = std::make_shared<Array>();
 
-        struct stat st;
-        if (::stat(path.c_str(), &st) != 0) return Value(result);
+        size_t slash = path.find_last_of('/');
+        std::string dirPart = slash == std::string::npos ? "." : path.substr(0, slash);
+        std::string lastComponent = slash == std::string::npos ? path : path.substr(slash + 1);
+        bool hasWildcard = lastComponent.find_first_of("*?[") != std::string::npos;
 
-        if (S_ISDIR(st.st_mode)) {
-            DIR* dir = ::opendir(path.c_str());
-            if (!dir) return Value(result);
-            struct dirent* entry;
-            while ((entry = ::readdir(dir)) != nullptr) {
-                std::string name = entry->d_name;
-                if (name == "." || name == "..") continue;
+        if (!hasWildcard) {
+            struct stat st;
+            if (::stat(path.c_str(), &st) != 0) return Value(result);
+            if (S_ISDIR(st.st_mode)) {
+                DIR* dir = ::opendir(path.c_str());
+                if (!dir) return Value(result);
+                struct dirent* entry;
+                while ((entry = ::readdir(dir)) != nullptr) {
+                    std::string name = entry->d_name;
+                    if (name == "." || name == "..") continue;
+                    result->items.emplace_back(name);
+                }
+                ::closedir(dir);
+            } else {
+                result->items.emplace_back(lastComponent);
+            }
+            return Value(result);
+        }
+
+        struct stat dirSt;
+        if (::stat(dirPart.c_str(), &dirSt) != 0 || !S_ISDIR(dirSt.st_mode)) return Value(result);
+        DIR* dir = ::opendir(dirPart.c_str());
+        if (!dir) return Value(result);
+        struct dirent* entry;
+        while ((entry = ::readdir(dir)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name == "." || name == "..") continue;
+            if (::fnmatch(lastComponent.c_str(), name.c_str(), 0) == 0) {
                 result->items.emplace_back(name);
             }
-            ::closedir(dir);
-        } else {
-            size_t slash = path.find_last_of('/');
-            result->items.emplace_back(slash == std::string::npos ? path : path.substr(slash + 1));
         }
+        ::closedir(dir);
         return Value(result);
     });
 

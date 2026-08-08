@@ -15,7 +15,7 @@ Connection::~Connection() {
 void Connection::attach(std::shared_ptr<LpcObject> obj) {
     if (boundObject_) InteractiveRegistry::remove(boundObject_);
     boundObject_ = std::move(obj);
-    if (boundObject_) InteractiveRegistry::add(boundObject_);
+    if (boundObject_) InteractiveRegistry::add(boundObject_, this);
 }
 
 void Connection::close() {

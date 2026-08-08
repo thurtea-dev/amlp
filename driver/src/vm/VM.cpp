@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <utility>
 
 namespace lpcdriver {
@@ -541,15 +542,20 @@ namespace {
 // argument string every add_action-registered function receives, real
 // LPC convention -- whitespace immediately following the verb is
 // consumed, not left as a leading space in the argument).
-std::pair<std::string, std::string> splitVerbAndArg(const std::string& line) {
+// arg is std::nullopt when there is genuinely nothing after the verb
+// (a bare single-word command) -- distinct from a present-but-empty
+// string, matching real user_parser()'s own "push_undefined()" branch
+// (add_action.c) exactly (see dispatchCommand()'s own comment on why
+// this distinction is load-bearing, not cosmetic).
+std::pair<std::string, std::optional<std::string>> splitVerbAndArg(const std::string& line) {
     size_t start = line.find_first_not_of(" \t");
-    if (start == std::string::npos) return {std::string(), std::string()};
+    if (start == std::string::npos) return {std::string(), std::nullopt};
     size_t verbEnd = line.find_first_of(" \t", start);
-    if (verbEnd == std::string::npos) return {line.substr(start), std::string()};
+    if (verbEnd == std::string::npos) return {line.substr(start), std::nullopt};
     std::string verb = line.substr(start, verbEnd - start);
     size_t argStart = line.find_first_not_of(" \t", verbEnd);
-    std::string arg = (argStart == std::string::npos) ? std::string() : line.substr(argStart);
-    return {verb, arg};
+    if (argStart == std::string::npos) return {verb, std::nullopt};
+    return {verb, line.substr(argStart)};
 }
 } // namespace
 
@@ -588,17 +594,42 @@ bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::str
         auto owner = entry.owner.lock();
         if (!owner) continue; // real: an action whose owner died is skipped, not an error.
 
-        std::string handlerArg = arg;
+        // real user_parser() (add_action.c): the argument construction is
+        // NOT relative to the matched entry's own verb length for either
+        // V_SHORT or the plain exact-match case -- only V_NOSPACE (flag
+        // 2) reslices relative to entry.verb; both other cases push
+        // whatever came after the *typed line's own first word*, or real
+        // "push_undefined()" (this driver's Value{} monostate) when there
+        // was nothing there at all ("buff[length] == ' '" is false).
+        // Confirmed by reading user_parser() directly: a bare one-word
+        // command ("look", no trailing text) must reach its handler with
+        // an *undefined* argument, never an empty string -- found live
+        // root-causing why "look" (and every other bare command) reached
+        // cmd_hook()/cmd_look() but still silently declined: cmd_look(str)
+        // checks "if(stringp(str))" first, and an empty string passes
+        // that check (stringp("") is true), routing into examine_object("")
+        // instead of the no-argument "this_player()->
+        // describe_current_room(1)" branch -- confirmed the actual reason
+        // a real room's own "look" command produced nothing at all,
+        // independent of and discovered after the Scheduler work this
+        // slice was actually about (see STATUS.md's own account of the
+        // live-testing trail that found this).
+        Value handlerArg;
         if (entry.flag == 2 && !entry.verb.empty()) {
-            // V_NOSPACE: the function argument is everything after the
-            // matched *prefix itself*, not after the first whole word.
-            // No real call site in this mudlib uses flag 2 (every real
-            // catch-all use found is flag 1), so this matches the
-            // documented behavior but has not been live-verified against
-            // real FluffOS the way the flag-1 path has.
+            // V_NOSPACE: still always a real string (possibly empty),
+            // matching real "copy_and_push_string(&buff[strlen(s->verb)])"
+            // -- no undefined case for this flag. No real call site in
+            // this mudlib uses flag 2 (every real catch-all use found is
+            // flag 1), so this remains unverified live the way the flag-1
+            // path now is.
             std::string rest = verb.substr(entry.verb.size());
-            handlerArg = arg.empty() ? rest : rest + " " + arg;
+            handlerArg = Value(arg ? (rest.empty() ? *arg : rest + " " + *arg) : rest);
+        } else if (arg) {
+            handlerArg = Value(*arg);
         }
+        // else: handlerArg stays default-constructed Value{} (monostate),
+        // matching real push_undefined() for a bare verb with nothing
+        // after it.
 
         // real query_verb() always returns the full typed verb, not the
         // matched prefix -- even for a V_SHORT/V_NOSPACE partial match.
@@ -606,7 +637,7 @@ bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::str
         CommandGiverGuard giverGuard(*this, giver);
         Value result;
         try {
-            result = callFunction(owner, entry.functionName, {Value(handlerArg)});
+            result = callFunction(owner, entry.functionName, {handlerArg});
         } catch (...) {
             verbStack_.pop_back();
             throw;

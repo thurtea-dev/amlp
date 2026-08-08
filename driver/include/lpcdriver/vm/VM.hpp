@@ -10,10 +10,21 @@ namespace lpcdriver {
 class ObjectManager;
 class LpcObject;
 class Config;
+class Scheduler;
 
 class VM {
 public:
     VM(ObjectManager& objects, Config& config);
+
+    // Set once, right after Scheduler is constructed (main.cpp), same
+    // "back-pointer set after construction" pattern ObjectManager::setVM()
+    // already uses -- Scheduler itself takes VM& in its own constructor,
+    // so the reverse edge can only be wired up afterward. Efuns that need
+    // to reach the scheduler (call_out(), remove_call_out(), find_call_out(),
+    // set_heart_beat()) go through this; null in any context that never
+    // wires one up (e.g. a unit test harness that doesn't need scheduling).
+    void setScheduler(Scheduler* scheduler) { scheduler_ = scheduler; }
+    Scheduler* scheduler() const { return scheduler_; }
 
     Value callFunction(const std::shared_ptr<LpcObject>& obj,
                         const std::string& functionName,
@@ -185,6 +196,7 @@ private:
 
     ObjectManager& objects_;
     Config& config_;
+    Scheduler* scheduler_ = nullptr;
     std::vector<Value> stack_;
     int evalCost_ = 0;
     // One entry per still-active run() call, innermost last -- see
