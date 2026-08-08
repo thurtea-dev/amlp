@@ -1,5 +1,41 @@
 # STATUS
 
+**2026-08-08: `driver/mudlib_stub/` replaced with a minimal test
+mudlib.** Direction change: further mudlib-parity/gap-analysis work on
+the `nightmare3_fluffos_v2` mudlib is paused. The priority is now a
+minimal test mudlib whose only purpose is exercising the driver end to
+end -- not feature parity with any real mudlib. `driver/mudlib_stub/`
+previously held a trivial one-file "greet" smoke test (`master.c` plus
+`obj/simple_login.c`) alongside several unrelated single-language-
+feature probe files (`array_check.c`, `guard_check.c`,
+`ternary_check.c`, `object_var_check.c`, `range_index_check.c`,
+`arithmetic_check.c`, `guard_char_check.c`, all left untouched). Six
+files now make up the minimal mudlib: `master.c` (rewritten, `connect()`
+only), `obj/login.c` (replaces the deleted `obj/simple_login.c`;
+prompts for a name, clones a player object, `exec()`s the connection
+onto it), `obj/user.c` (the player object: `look`, `north`/`south`
+movement, `say`, which broadcasts to everyone else in the room via
+`message()`), `obj/item.c` (one trivial clonable object), and
+`rooms/start_room.c`/`rooms/second_room.c` (two minimal rooms with an
+exits mapping between them; `start_room.c` clones one item into itself
+at first load). No account/password persistence, no privs, no
+simul_efun, no `compile_object()`/virtual-object path -- all
+deliberately out of scope. Live-verified against
+`driver/config/driver.cfg` (port 3000) with two simultaneous raw socket
+connections: login, look, movement in both directions between the two
+rooms (room state persists across visits, confirming rooms are cached
+singletons and not re-created on every visit), `say` broadcasting to a
+genuinely separate connection, and the item clone present and listed in
+the starting room. One real bug found and fixed during that
+verification: `user.c` had no `query_short()`, so another player
+present in the room showed up as "You see 0 here." instead of their
+name -- `call_other` on a function the target object does not define
+returns monostate, not an error (real, documented LPC semantics, not a
+driver bug), and that monostate then string-concatenated as `"0"`.
+Fixed by adding `query_short()` returning the player's name, rebooted,
+reverified. Full `ctest` suite reconfirmed passing afterward (no driver
+source was touched, sanity check only).
+
 **2026-08-08: `do-while` loop and extended `sprintf()` format
 specifiers.** Two smallest items from the general LPC-compliance gap
 analysis (not driven by a new mudlib blocker this time). `do { ... }
