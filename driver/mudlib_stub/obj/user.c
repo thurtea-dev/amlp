@@ -1,0 +1,117 @@
+// Player object for the minimal test mudlib. Cloned once per connection
+// by /obj/login.c, which sets the name and exec()s the connection onto
+// it before calling setup().
+
+string name;
+
+void create() {
+    name = "someone";
+}
+
+void set_name(string str) {
+    name = str;
+}
+
+string query_name() {
+    return name;
+}
+
+// Needed so cmd_look()'s inventory listing shows other players by name
+// instead of silently getting monostate back from an undefined function
+// (call_other on a function a target object does not define returns 0,
+// not an error -- confirmed live: without this, another player in the
+// room showed up as "You see 0 here.").
+string query_short() {
+    return name;
+}
+
+// Called by login.c immediately after exec() rebinds the connection to
+// this object -- add_action()/enable_commands() need the connection
+// already bound here to resolve command_giver correctly (see
+// EfunTable.cpp's resolveCommandGiver()).
+void setup() {
+    enable_commands();
+    add_action("cmd_look", "look");
+    add_action("cmd_north", "north");
+    add_action("cmd_south", "south");
+    add_action("cmd_say", "say");
+    move_object("/rooms/start_room");
+    write("Welcome, " + name + ".\n");
+    cmd_look("");
+}
+
+void cmd_look(string arg) {
+    object room;
+    object *inv;
+    int i;
+
+    room = environment(this_object());
+    if (!room) {
+        write("You are nowhere.\n");
+        return;
+    }
+
+    write(room->query_short() + "\n");
+    write(room->query_long() + "\n");
+
+    inv = all_inventory(room);
+    for (i = 0; i < sizeof(inv); i++) {
+        if (inv[i] != this_object()) {
+            write("You see " + inv[i]->query_short() + " here.\n");
+        }
+    }
+}
+
+void cmd_north(string arg) {
+    go("north");
+}
+
+void cmd_south(string arg) {
+    go("south");
+}
+
+void go(string dir) {
+    object room;
+    mapping exits;
+    string dest;
+
+    room = environment(this_object());
+    if (!room) {
+        write("You are nowhere.\n");
+        return;
+    }
+
+    exits = room->query_exits();
+    dest = exits[dir];
+    if (!dest) {
+        write("You can't go that way.\n");
+        return;
+    }
+
+    move_object(dest);
+    write("You go " + dir + ".\n");
+    cmd_look("");
+}
+
+void cmd_say(string arg) {
+    object room;
+    object *inv;
+    int i;
+
+    if (!arg || arg == "") {
+        write("Say what?\n");
+        return;
+    }
+
+    write("You say: " + arg + "\n");
+
+    room = environment(this_object());
+    if (!room) return;
+
+    inv = all_inventory(room);
+    for (i = 0; i < sizeof(inv); i++) {
+        if (inv[i] != this_object()) {
+            message("say", name + " says: " + arg + "\n", inv[i]);
+        }
+    }
+}
