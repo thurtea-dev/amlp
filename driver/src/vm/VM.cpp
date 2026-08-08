@@ -5,6 +5,7 @@
 #include "lpcdriver/core/Errors.hpp"
 #include "lpcdriver/efun/EfunTable.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -192,23 +193,81 @@ FunctionLookupResult findParentFunction(const CompiledProgram& program, const st
     return FunctionLookupResult{};
 }
 
-// Ports FluffOS's inter_sscanf() (interpret.c) for the subset this driver
-// supports: literal text, "%%", "%s", "%d", and the "%*" skip modifier
-// (which matches but does not consume an output slot). "%f", "%x", and
-// "%(regexp)" are deliberately not implemented -- this mudlib's early-boot
-// files never use them (confirmed by grepping every sscanf() call in
-// secure/daemon/master.c) -- and throw rather than silently mishandling
-// them if some other file ever does.
-//
-// The real algorithm's "%s directly followed by another %-specifier with
-// no literal text between them" case (its own lookahead heuristic per
-// specifier type) is also not implemented for the same reason: nothing in
-// this mudlib's sscanf calls needs it, every %s is terminated by either
-// literal text or the end of the format string.
+// Ports FluffOS's inter_sscanf() (interpret.c) for: literal text, "%%",
+// "%s", "%d", "%x", "%f", the "%*" skip modifier (matches but does not
+// consume an output slot), and "%s" directly adjacent to another
+// specifier with no literal text between them (real inter_sscanf's own
+// per-specifier lookahead, ported below in adjacentSscanfBoundary()).
+// "%(regexp)" is deliberately still not implemented -- this mudlib's
+// sscanf() calls never use it (confirmed by grep) -- and throws rather
+// than silently mishandling it if some other file ever does.
 struct SscanfOutcome {
     int64_t matchCount = 0;
     std::vector<Value> assigned; // one entry per *consumed* (non-skip) slot, in order
 };
+
+// Real interpret.c's own per-specifier lookahead for "%s" directly
+// followed by another "%<spec>" with no literal text between them: since
+// there is nothing literal to delimit where the %s match ends, the driver
+// instead scans ahead in the input for where the *next* specifier's own
+// pattern would plausibly start, and uses that as the %s boundary. Ported
+// directly from inter_sscanf()'s own case-by-case scan loops (interpret.c,
+// the "if (*fmt++ == '%')" block after the %s handling), not guessed --
+// each case below mirrors one real loop exactly. `spec` is the character
+// identifying the *next* specifier (its own optional leading "%*" skip
+// flag, if any, has already been looked past by the caller -- it plays no
+// part in finding the boundary, only in whether that next specifier's own
+// value later gets assigned, which is handled by the normal top-of-loop
+// specifier logic once control returns there).
+size_t adjacentSscanfBoundary(char spec, const std::string& in0, size_t ip) {
+    const size_t inLen = in0.size();
+    size_t pos = ip;
+    switch (spec) {
+        case 'x':
+            // Real loop: skip to the next '0', then check whether it
+            // starts a real "0x"/"0X" + hex-digit sequence; if not,
+            // skip past it and keep looking.
+            while (pos < inLen) {
+                while (pos < inLen && in0[pos] != '0') ++pos;
+                if (pos >= inLen) break;
+                char c1 = (pos + 1 < inLen) ? in0[pos + 1] : '\0';
+                char c2 = (pos + 2 < inLen) ? in0[pos + 2] : '\0';
+                if ((c1 == 'x' || c1 == 'X') &&
+                    std::isxdigit(static_cast<unsigned char>(c2))) {
+                    break;
+                }
+                pos += 2;
+            }
+            return pos < inLen ? pos : inLen;
+        case 'd':
+            while (pos < inLen && !std::isdigit(static_cast<unsigned char>(in0[pos]))) ++pos;
+            return pos;
+        case 'f':
+            while (pos < inLen) {
+                char c = in0[pos];
+                if (std::isdigit(static_cast<unsigned char>(c))) break;
+                if (c == '.' && pos + 1 < inLen &&
+                    std::isdigit(static_cast<unsigned char>(in0[pos + 1]))) {
+                    break;
+                }
+                ++pos;
+            }
+            return pos;
+        case '%':
+            while (pos < inLen && in0[pos] != '%') ++pos;
+            return pos;
+        case 's':
+            // Real error text: "Illegal to have 2 adjacent %s's in
+            // format string in sscanf()".
+            throw LpcRuntimeError("sscanf: illegal to have two adjacent %s specifiers");
+        case '(':
+            throw NotImplementedError("sscanf: \"%s\" adjacent to \"%(regexp)\"");
+        default:
+            throw NotImplementedError(
+                std::string("sscanf: \"%s\" adjacent to unsupported format specifier '%") +
+                spec + "'");
+    }
+}
 
 SscanfOutcome runSscanf(const std::string& in0, const std::string& fmt0, size_t maxAssigns) {
     SscanfOutcome out;
@@ -251,10 +310,15 @@ SscanfOutcome runSscanf(const std::string& in0, const std::string& fmt0, size_t 
         }
         char spec = fmt0[fp++];
 
-        if (spec == 'd') {
+        if (spec == 'd' || spec == 'x') {
+            // Real inter_sscanf(): "case 'x': base = 16; /* fallthrough */
+            // case 'd':" -- both go through the same strtol(), only the
+            // base differs. std::strtoll(..., 16) accepts both a bare hex
+            // digit sequence and an optional leading "0x"/"0X", matching
+            // real strtol()'s own base-16 behavior.
             const char* start = in0.c_str() + ip;
             char* endPtr = nullptr;
-            long long value = std::strtoll(start, &endPtr, 10);
+            long long value = std::strtoll(start, &endPtr, spec == 'x' ? 16 : 10);
             if (endPtr == start) return out; // no digits matched
             ip += static_cast<size_t>(endPtr - start);
             if (!skip) {
@@ -267,10 +331,26 @@ SscanfOutcome runSscanf(const std::string& in0, const std::string& fmt0, size_t 
             continue;
         }
 
+        if (spec == 'f') {
+            const char* start = in0.c_str() + ip;
+            char* endPtr = nullptr;
+            double value = std::strtod(start, &endPtr);
+            if (endPtr == start) return out; // no float matched
+            ip += static_cast<size_t>(endPtr - start);
+            if (!skip) {
+                if (out.assigned.size() >= maxAssigns) {
+                    throw LpcRuntimeError("sscanf: too few output arguments for format string");
+                }
+                out.assigned.emplace_back(Value(value));
+            }
+            ++out.matchCount;
+            continue;
+        }
+
         if (spec != 's') {
             throw NotImplementedError(
                 std::string("sscanf: format specifier '%") + spec +
-                "' (only %s, %d, %% are supported this slice)");
+                "' (only %s, %d, %x, %f, %% are supported)");
         }
 
         // %s. If the format is now exhausted, the rest of in_string is the
@@ -288,8 +368,34 @@ SscanfOutcome runSscanf(const std::string& in0, const std::string& fmt0, size_t 
         }
 
         if (fmt0[fp] == '%') {
-            throw NotImplementedError(
-                "sscanf: \"%s\" directly adjacent to another format specifier is not supported this slice");
+            // "%s" directly followed by another "%<spec>" with no literal
+            // text in between -- real inter_sscanf()'s own lookahead case.
+            // Identify the next specifier's own character (looking past
+            // its optional "%*" skip flag, which plays no part in finding
+            // the boundary -- see adjacentSscanfBoundary()'s own comment),
+            // find where its pattern would start in the remaining input,
+            // and use that as the end of this %s match. Deliberately does
+            // NOT consume the next specifier here: fp is left pointing at
+            // its own leading '%', so the top of this same loop processes
+            // it as an entirely ordinary specifier on the next iteration,
+            // starting at the boundary just computed -- observably
+            // identical to real inter_sscanf() parsing both together
+            // inline, without duplicating every specifier's own parsing
+            // logic a second time here.
+            size_t lookFp = fp + 1;
+            if (lookFp < fmtLen && fmt0[lookFp] == '*') ++lookFp;
+            char nextSpec = (lookFp < fmtLen) ? fmt0[lookFp] : '\0';
+            size_t boundary = adjacentSscanfBoundary(nextSpec, in0, ip);
+
+            if (!skip) {
+                if (out.assigned.size() >= maxAssigns) {
+                    throw LpcRuntimeError("sscanf: too few output arguments for format string");
+                }
+                out.assigned.emplace_back(Value(in0.substr(ip, boundary - ip)));
+            }
+            ip = boundary;
+            ++out.matchCount;
+            continue;
         }
 
         // %s terminated by literal text: find where that literal text

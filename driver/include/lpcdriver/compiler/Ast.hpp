@@ -333,6 +333,17 @@ struct WhileStmt : AstNode {
     std::unique_ptr<Block> body;
 };
 
+// "do body while (condition);" -- real LPC/C's post-test loop: the body
+// always runs at least once, and the condition is checked only after each
+// iteration. Deliberately its own node rather than reusing WhileStmt with a
+// flag: the codegen shape is genuinely different (condition check after
+// the body instead of before, see CodeGen::emitDoWhileStmt), and a shared
+// node would make that harder to read at both call sites for no benefit.
+struct DoWhileStmt : AstNode {
+    AstPtr condition;
+    std::unique_ptr<Block> body;
+};
+
 // "for (init; condition; update) body". init is either a VarDeclStmt (a
 // single declaration, optionally with an initializer, e.g. "int i = 0") or
 // a plain expression statement (e.g. "i = 0", reusing AssignExpr); any of

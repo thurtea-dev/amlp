@@ -65,7 +65,7 @@ const Token& Parser::expectText(const std::string& text, const std::string& cont
 bool Parser::isTypeKeyword(const Token& tok) const {
     if (tok.type != TokenType::Keyword) return false;
     static const std::vector<std::string> nonTypeKeywords = {
-        "return", "if", "else", "while", "for", "inherit", "break", "continue",
+        "return", "if", "else", "while", "for", "do", "inherit", "break", "continue",
         "foreach", "in", "switch", "case", "default",
         "static", "private", "public", "protected", "nomask", "varargs"
     };
@@ -1056,6 +1056,22 @@ AstPtr Parser::parseWhileStatement() {
     return stmt;
 }
 
+// "do statement while ( expr ) ;" (grammar.y). The body always runs once
+// before the condition is ever consulted, so unlike parseWhileStatement()
+// there is no leading condition to parse -- the trailing "while (cond);"
+// is read only after the body itself.
+AstPtr Parser::parseDoWhileStatement() {
+    expectText("do", "do-while statement");
+    auto stmt = std::make_unique<DoWhileStmt>();
+    stmt->body = parseBranch();
+    expectText("while", "do-while statement");
+    expectText("(", "do-while condition");
+    stmt->condition = parseExpr();
+    expectText(")", "do-while condition");
+    expectText(";", "do-while statement");
+    return stmt;
+}
+
 // "for (first_for_expr ; for_expr ; for_expr) statement" (grammar.y).
 // first_for_expr is either empty, a plain expression, or a single
 // declaration with an optional initializer; the other two clauses are
@@ -1231,6 +1247,9 @@ AstPtr Parser::parseStatement() {
     }
     if (checkText("while")) {
         return parseWhileStatement();
+    }
+    if (checkText("do")) {
+        return parseDoWhileStatement();
     }
     if (checkText("for")) {
         return parseForStatement();

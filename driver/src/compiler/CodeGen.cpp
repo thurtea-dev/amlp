@@ -629,6 +629,35 @@ void CodeGen::emitWhileStmt(const WhileStmt& stmt) {
     for (size_t idx : ctx.breakJumps) patchJumpToHere(idx);
 }
 
+// "do body while (condition);" -- a post-test loop, the mirror image of
+// emitWhileStmt()'s pre-test shape: the body is emitted first and always
+// runs once, then the condition is checked, and only a *true* result jumps
+// back to the body's own start (there is no OpCode::JumpIfTrue in this VM,
+// so this is built from the same JumpIfFalse-skips-the-jump-back idiom
+// emitForStmt() already relies on for its own trailing condition check).
+// continue jumps to the condition check, not back to the body's start
+// directly -- real do-while semantics still re-evaluate the condition
+// before deciding whether to loop again, exactly like emitForStmt()'s own
+// continueTarget sits before the update clause rather than back at the
+// loop's very top.
+void CodeGen::emitDoWhileStmt(const DoWhileStmt& stmt) {
+    size_t bodyStart = out_->code.size();
+
+    loopStack_.emplace_back();
+    emitBlock(*stmt.body);
+    LoopContext ctx = std::move(loopStack_.back());
+    loopStack_.pop_back();
+
+    size_t continueTarget = out_->code.size();
+    for (size_t idx : ctx.continueJumps) patchJumpTo(idx, continueTarget);
+
+    emitExpr(*stmt.condition);
+    size_t jumpIfFalseIdx = emitJumpPlaceholder(OpCode::JumpIfFalse);
+    out_->code.push_back(Instruction{OpCode::Jump, static_cast<int32_t>(bodyStart), 0});
+    patchJumpToHere(jumpIfFalseIdx);
+    for (size_t idx : ctx.breakJumps) patchJumpToHere(idx);
+}
+
 // "for (init; condition; update) body" desugars to the same
 // evaluate-condition/JumpIfFalse/body/Jump-back shape emitWhileStmt()
 // already uses, with init run once before the loop and update run once
@@ -908,6 +937,10 @@ void CodeGen::emitStatement(const AstNode& stmt) {
     }
     if (auto* whileStmt = dynamic_cast<const WhileStmt*>(&stmt)) {
         emitWhileStmt(*whileStmt);
+        return;
+    }
+    if (auto* doWhileStmt = dynamic_cast<const DoWhileStmt*>(&stmt)) {
+        emitDoWhileStmt(*doWhileStmt);
         return;
     }
     if (auto* forStmt = dynamic_cast<const ForStmt*>(&stmt)) {

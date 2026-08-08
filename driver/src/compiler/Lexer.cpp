@@ -27,7 +27,7 @@ const std::unordered_set<std::string> kKeywords = {
     // a string literal (a "status" command word), never a bare
     // identifier.
     "status",
-    "mixed", "function", "return", "if", "else", "while", "for",
+    "mixed", "function", "return", "if", "else", "while", "for", "do",
     "static", "private", "public", "protected", "nomask", "varargs",
     "inherit", "break", "continue", "foreach", "in",
     "switch", "case", "default"

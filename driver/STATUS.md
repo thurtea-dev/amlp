@@ -1,5 +1,24 @@
 # STATUS
 
+**2026-08-08: `do-while` loop and extended `sprintf()` format
+specifiers.** Two smallest items from the general LPC-compliance gap
+analysis (not driven by a new mudlib blocker this time). `do { ... }
+while(cond);` was entirely missing from the language -- not in the
+lexer's own keyword list at all. Added a `DoWhileStmt` AST node, a
+parser rule, and codegen mirroring the existing `while` implementation
+(body runs first, condition checked after; `continue` targets the
+condition recheck, matching `for`'s own update-clause handling, not the
+body's own top). `sprintf()` gained `%o` (octal), `%x` (hex), a
+standalone `.`-precision modifier distinct from the existing `:`
+combined field-size-and-precision form, and `*` as a dynamic field
+width/precision pulled from the argument list -- grounded directly in
+the vendored `fluffos-2.9-ds2.08/sprintf.c` reference source's own doc
+comment and its actual field-size/precision parsing loop, not guessed.
+`%0*d` (zero-padded dynamic width) is explicitly not implemented,
+throws its own clear error rather than being silently misparsed. 13 new
+regression tests (5 `do-while`, 8 `sprintf`). Full suite: 324 tests
+passing, up from 311, no regressions.
+
 Snapshot as of the slice that designed and implemented the
 `add_action()`/`enable_commands()` command-dispatch subsystem (real
 `command_giver`, per-object action tables, `move_object()`/`init()`
@@ -136,13 +155,28 @@ how the mistake was caught.
   and embedded assignment inside a `&&`/`||` chain -- e.g.
   `stringp(val) && val=load_object(val) && ...` -- which real LPC
   resolves at its own precedence, not by stopping at the next `&&`),
-  `if`/`else`, `while`, `for` (all three clauses optional), a bare `;`
-  null statement (a loop whose entire body is the condition's own side
-  effects), `break`/`continue` (including correctly-scoped nested
-  loops), comparisons, logical `&&`/`||` (short-circuiting), plain `&`
-  (bitwise on ints, set intersection on arrays), plain `|`/`^`
-  (bitwise-only, int operands), ternary, prefix/postfix `++`/`--` on
-  bare variables, C-style type casts (parsed and discarded as a no-op).
+  `if`/`else`, `while`, `for` (all three clauses optional), `switch`,
+  `foreach`, a bare `;` null statement (a loop whose entire body is the
+  condition's own side effects), `break`/`continue` (including
+  correctly-scoped nested loops), comparisons, logical `&&`/`||`
+  (short-circuiting), plain `&` (bitwise on ints, set intersection on
+  arrays), plain `|`/`^` (bitwise-only, int operands), ternary,
+  prefix/postfix `++`/`--` on bare variables, C-style type casts (parsed
+  and discarded as a no-op).
+- `switch (subject) { ... }`: real C/LPC fallthrough (no implicit break
+  between cases -- `CodeGen::emitSwitchStmt()`'s own comment), `case`/
+  `default` labels interleaved with ordinary statements. Single-value
+  `case` labels only; range labels (`case A..B:`) throw
+  `NotImplementedError` rather than being silently mishandled --
+  confirmed by grep, nothing in this mudlib uses that form.
+  `foreach (var in collection)` / `foreach (key, value in collection)`:
+  desugars to an index-and-length loop over the collection itself (an
+  array) or its `keys()` (a mapping), reusing the same `break`/`continue`
+  machinery `while`/`for` already use. The two-variable form reads
+  `collection[key]` for the value slot, which is only meaningful when
+  `collection` is a mapping -- a bare array with a two-variable `foreach`
+  is not supported, matching every real use of the two-variable form in
+  this mudlib.
 - Float literals (`1.5`, `.5`), stored in a dedicated `floatPool`
   alongside the existing `stringPool`.
 - `call_other()`/`->`, with the function-name argument a full
@@ -2342,10 +2376,14 @@ fix).
   reverse lookup inline in the connection-handling loop would stall
   every other connection during it), matching real FluffOS's own
   documented fallback when hostname resolution is unavailable.
-- `set_heart_beat()`/`query_heart_beat()` correctly store and report
+- ~~`set_heart_beat()`/`query_heart_beat()` correctly store and report
   the flag, but nothing reads it back yet -- there is no periodic
   heartbeat scheduler in this driver at all, so setting the flag has no
-  runtime effect beyond being queryable.
+  runtime effect beyond being queryable~~ -- fixed, see "Real
+  call_out()/heart_beat() scheduler" above: a genuine `Scheduler` now
+  reads the interval back and fires `heart_beat()` on it, confirmed live
+  (a real NPC's own heartbeat-driven dialogue, unprompted). This bullet
+  is historical, kept for the git-blame trail rather than deleted.
 - `set_living_name()` stores the name on the object but wires up no
   lookup table for it, matching `find_player()`'s own pre-existing
   simplification (InteractiveRegistry + `query_name()`, not a real

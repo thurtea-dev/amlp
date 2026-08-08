@@ -55,6 +55,7 @@ private:
     AstPtr parseStatement();
     AstPtr parseIfStatement();
     AstPtr parseWhileStatement();
+    AstPtr parseDoWhileStatement();
     AstPtr parseForStatement();
     AstPtr parseReturnStatement();
     AstPtr parseBreakStatement();

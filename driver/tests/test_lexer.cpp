@@ -296,6 +296,38 @@ static void testWhileParsesToWhileStmt() {
     std::cout << "testWhileParsesToWhileStmt OK\n";
 }
 
+// "do body while (condition);" -- real LPC/C post-test loop, previously
+// entirely missing (not in the lexer's own keyword list at all). Parse
+// shape only here, mirroring testWhileParsesToWhileStmt above; VM-
+// execution coverage (the one thing that actually distinguishes a
+// do-while from a while -- the body always runs at least once) lives
+// alongside the while-loop break/continue VM-execution tests further
+// down, since it needs the runProbe() helper defined below this point.
+static void testDoWhileParsesToDoWhileStmt() {
+    std::string src =
+        "void create() {\n"
+        "    int i;\n"
+        "    i = 0;\n"
+        "    do {\n"
+        "        i = i;\n"
+        "    } while (i < 3);\n"
+        "}\n";
+    lpcdriver::Lexer lexer(src);
+    lpcdriver::Parser parser(lexer.tokenize());
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    assert(body.size() == 3);
+    auto* doWhileStmt = dynamic_cast<lpcdriver::DoWhileStmt*>(body[2].get());
+    assert(doWhileStmt != nullptr);
+
+    auto* cond = dynamic_cast<lpcdriver::BinaryExpr*>(doWhileStmt->condition.get());
+    assert(cond != nullptr);
+    assert(cond->op == lpcdriver::BinOp::Lt);
+
+    std::cout << "testDoWhileParsesToDoWhileStmt OK\n";
+}
+
 static void testCodegenEmitsJumpOpcodesForIf() {
     std::string src =
         "void receive_message(string msg) {\n"
@@ -2844,6 +2876,101 @@ static void testSscanfVmPartialMatchLeavesLaterVarsUntouchedAndReturnsPartialCou
     std::cout << "testSscanfVmPartialMatchLeavesLaterVarsUntouchedAndReturnsPartialCount OK\n";
 }
 
+// "%x", "%f", and "%s" directly adjacent to another specifier with no
+// literal text between them -- general LPC-compliance additions, ported
+// from fluffos-2.9-ds2.08/interpret.c's own inter_sscanf(), not driven by
+// a new mudlib call site this time.
+
+static void testSscanfVmMatchesHexSpecifier() {
+    lpcdriver::Value result = runProbe(
+        "int x;\n"
+        "int n;\n"
+        "n = sscanf(\"ff\", \"%x\", x);\n"
+        "return n == 1 && x == 255;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testSscanfVmMatchesHexSpecifier OK\n";
+}
+
+static void testSscanfVmHexSpecifierAcceptsLeading0xPrefix() {
+    lpcdriver::Value result = runProbe(
+        "int x;\n"
+        "int n;\n"
+        "n = sscanf(\"0x1A\", \"%x\", x);\n"
+        "return n == 1 && x == 26;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testSscanfVmHexSpecifierAcceptsLeading0xPrefix OK\n";
+}
+
+static void testSscanfVmMatchesFloatSpecifier() {
+    lpcdriver::Value result = runProbe(
+        "float x;\n"
+        "int n;\n"
+        "n = sscanf(\"3.5\", \"%f\", x);\n"
+        "return n == 1 && x == 3.5;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testSscanfVmMatchesFloatSpecifier OK\n";
+}
+
+static void testSscanfVmAdjacentSThenDWithNoLiteralBetween() {
+    // "%s%d" with no literal separator: %s must scan ahead to find where
+    // the digits start, matching real inter_sscanf()'s own lookahead
+    // rather than throwing.
+    lpcdriver::Value result = runProbe(
+        "string a;\n"
+        "int b;\n"
+        "int n;\n"
+        "n = sscanf(\"abc123\", \"%s%d\", a, b);\n"
+        "return n == 2 && a == \"abc\" && b == 123;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testSscanfVmAdjacentSThenDWithNoLiteralBetween OK\n";
+}
+
+static void testSscanfVmAdjacentSThenXWithNoLiteralBetween() {
+    lpcdriver::Value result = runProbe(
+        "string a;\n"
+        "int b;\n"
+        "int n;\n"
+        "n = sscanf(\"name0xFF\", \"%s%x\", a, b);\n"
+        "return n == 2 && a == \"name\" && b == 255;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testSscanfVmAdjacentSThenXWithNoLiteralBetween OK\n";
+}
+
+static void testSscanfVmAdjacentSThenLiteralPercentWithNoLiteralBetween() {
+    // "%s%%": %s adjacent to a literal "%" character in the input (not
+    // another specifier) -- real inter_sscanf()'s own "case '%':" lookahead.
+    lpcdriver::Value result = runProbe(
+        "string a;\n"
+        "int n;\n"
+        "n = sscanf(\"75%\", \"%s%%\", a);\n"
+        "return n == 2 && a == \"75\";\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testSscanfVmAdjacentSThenLiteralPercentWithNoLiteralBetween OK\n";
+}
+
+static void testSscanfVmTwoAdjacentSSpecifiersThrows() {
+    // Real inter_sscanf(): "Illegal to have 2 adjacent %s's in format
+    // string in sscanf()" -- a genuine LPC-level format error, not an
+    // unimplemented-feature stub.
+    bool threw = false;
+    try {
+        runProbe(
+            "string a, b;\n"
+            "sscanf(\"abcdef\", \"%s%s\", a, b);\n"
+            "return 0;\n");
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testSscanfVmTwoAdjacentSSpecifiersThrows OK\n";
+}
+
 // --- inherit ----------------------------------------------------------
 
 static void testInheritStatementParsesPathAndConcatenation() {
@@ -3533,6 +3660,81 @@ static void testContinueInWhileLoopSkipsToConditionRecheckVmExecution() {
     assert(std::get<int64_t>(result.data) == 12); // 1+2+4+5, skipping 3
 
     std::cout << "testContinueInWhileLoopSkipsToConditionRecheckVmExecution OK\n";
+}
+
+// --- do-while loop (VM execution) ---------------------------------------
+// See testDoWhileParsesToDoWhileStmt above for the parse-level coverage.
+// The one thing that actually distinguishes a do-while from a while: the
+// body always runs at least once, checked only *after* the first
+// iteration -- plus break/continue behaving the same as they do for a
+// while loop's own body.
+
+static void testDoWhileExecutesBodyAtLeastOnceEvenWhenConditionFalseVmExecution() {
+    lpcdriver::Value result = runProbe(
+        "int i;\n"
+        "int count;\n"
+        "i = 0;\n"
+        "count = 0;\n"
+        "do {\n"
+        "    count = count + 1;\n"
+        "} while (i > 0);\n"  // false from the very first check
+        "return count;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testDoWhileExecutesBodyAtLeastOnceEvenWhenConditionFalseVmExecution OK\n";
+}
+
+static void testDoWhileLoopsWhileConditionTrueVmExecution() {
+    lpcdriver::Value result = runProbe(
+        "int i;\n"
+        "int sum;\n"
+        "i = 0;\n"
+        "sum = 0;\n"
+        "do {\n"
+        "    i = i + 1;\n"
+        "    sum = sum + i;\n"
+        "} while (i < 5);\n"
+        "return sum;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 15); // 1+2+3+4+5
+    std::cout << "testDoWhileLoopsWhileConditionTrueVmExecution OK\n";
+}
+
+static void testContinueInDoWhileLoopSkipsToConditionRecheckVmExecution() {
+    // Mirrors testContinueInWhileLoopSkipsToConditionRecheckVmExecution:
+    // continue must still reach the condition check (real do-while
+    // semantics), not restart the body from its own top unconditionally.
+    lpcdriver::Value result = runProbe(
+        "int i;\n"
+        "int sum;\n"
+        "i = 0;\n"
+        "sum = 0;\n"
+        "do {\n"
+        "    i = i + 1;\n"
+        "    if (i == 3) continue;\n"
+        "    sum = sum + i;\n"
+        "} while (i < 5);\n"
+        "return sum;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 12); // 1+2+4+5, skipping 3
+    std::cout << "testContinueInDoWhileLoopSkipsToConditionRecheckVmExecution OK\n";
+}
+
+static void testBreakStopsDoWhileLoopEarlyVmExecution() {
+    lpcdriver::Value result = runProbe(
+        "int i;\n"
+        "int sum;\n"
+        "i = 0;\n"
+        "sum = 0;\n"
+        "do {\n"
+        "    i = i + 1;\n"
+        "    if (i == 3) break;\n"
+        "    sum = sum + i;\n"
+        "} while (i < 5);\n"
+        "return sum;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 3); // 1+2, stops before adding 3
+    std::cout << "testBreakStopsDoWhileLoopEarlyVmExecution OK\n";
 }
 
 static void testBreakInInnerLoopDoesNotAffectOuterLoopVmExecution() {
@@ -7633,6 +7835,82 @@ static void testSprintfBuildingAndThenUsingADynamicColonFormatString() {
     std::cout << "testSprintfBuildingAndThenUsingADynamicColonFormatString OK\n";
 }
 
+// "%o"/"%x", "."-precision, and "*" dynamic width/precision -- general
+// LPC-compliance additions confirmed against fluffos-2.9-ds2.08/sprintf.c
+// directly (its own doc comment and field-size/precision parsing loop),
+// not driven by a new real call site on this mudlib's own boot path.
+
+static void testSprintfPercentXEmitsLowercaseHex() {
+    lpcdriver::Value result = runProbe("return sprintf(\"%x\", 255);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "ff");
+    std::cout << "testSprintfPercentXEmitsLowercaseHex OK\n";
+}
+
+static void testSprintfPercentXThrowsOnNonIntArgument() {
+    bool threw = false;
+    try {
+        runProbe("return sprintf(\"%x\", \"z\");\n");
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testSprintfPercentXThrowsOnNonIntArgument OK\n";
+}
+
+static void testSprintfPercentOEmitsOctal() {
+    lpcdriver::Value result = runProbe("return sprintf(\"%o\", 8);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "10");
+    std::cout << "testSprintfPercentOEmitsOctal OK\n";
+}
+
+static void testSprintfDotPrecisionTruncatesLongerString() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%.3s]\", \"hello\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[hel]");
+    std::cout << "testSprintfDotPrecisionTruncatesLongerString OK\n";
+}
+
+// Real sprintf.c's own doc: "if precision is greater than field size,
+// then field size = precision" -- field size 3, precision 5, a 2-char
+// value: not truncated (shorter than the precision), but padded out to
+// the *precision*, not the smaller explicit field size.
+static void testSprintfDotPrecisionWidensFieldWhenGreaterThanExplicitWidth() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%3.5s]\", \"ab\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[   ab]");
+    std::cout << "testSprintfDotPrecisionWidensFieldWhenGreaterThanExplicitWidth OK\n";
+}
+
+static void testSprintfStarFieldWidthPullsWidthFromLeadingArgument() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%*d]\", 5, 7);\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[    7]");
+    std::cout << "testSprintfStarFieldWidthPullsWidthFromLeadingArgument OK\n";
+}
+
+static void testSprintfStarPrecisionPullsPrecisionFromLeadingArgument() {
+    lpcdriver::Value result = runProbe("return sprintf(\"[%.*s]\", 3, \"hello\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[hel]");
+    std::cout << "testSprintfStarPrecisionPullsPrecisionFromLeadingArgument OK\n";
+}
+
+static void testSprintfZeroPaddedStarFieldWidthThrows() {
+    // Deliberately not implemented (see this efun's own comment) --
+    // confirms it fails loudly rather than silently misparsing the '*'
+    // as a stray, unsupported type specifier.
+    bool threw = false;
+    try {
+        runProbe("return sprintf(\"%0*d\", 5, 7);\n");
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testSprintfZeroPaddedStarFieldWidthThrows OK\n";
+}
+
 // ---------------------------------------------------------------------
 // Rifts combat math efuns (phase 1 of the game-logic-mechanics move,
 // 2026-08-08): each test below compiles the ORIGINAL LPC function body,
@@ -8115,6 +8393,7 @@ int main() {
     testCodegenBindsParamAndEchoesRuntimeValue();
     testIfElseParsesToIfStmt();
     testWhileParsesToWhileStmt();
+    testDoWhileParsesToDoWhileStmt();
     testCodegenEmitsJumpOpcodesForIf();
     testPrototypeThenDefinitionParsesAndCodegenEmitsOnlyOne();
     testTwoModifiersBeforeReturnTypeParseAsPrototype();
@@ -8215,6 +8494,13 @@ int main() {
     testSscanfVmMatchesIntegerSpecifier();
     testSscanfVmSkipModifierDoesNotConsumeOutputSlot();
     testSscanfVmPartialMatchLeavesLaterVarsUntouchedAndReturnsPartialCount();
+    testSscanfVmMatchesHexSpecifier();
+    testSscanfVmHexSpecifierAcceptsLeading0xPrefix();
+    testSscanfVmMatchesFloatSpecifier();
+    testSscanfVmAdjacentSThenDWithNoLiteralBetween();
+    testSscanfVmAdjacentSThenXWithNoLiteralBetween();
+    testSscanfVmAdjacentSThenLiteralPercentWithNoLiteralBetween();
+    testSscanfVmTwoAdjacentSSpecifiersThrows();
     testInheritStatementParsesPathAndConcatenation();
     testInheritedFunctionFallbackInvokedAtRuntime();
     testInheritedObjectVariableSlotsShareStorageWithParent();
@@ -8246,6 +8532,10 @@ int main() {
     testBreakStopsForLoopEarlyVmExecution();
     testContinueSkipsRestOfForLoopBodyVmExecution();
     testContinueInWhileLoopSkipsToConditionRecheckVmExecution();
+    testDoWhileExecutesBodyAtLeastOnceEvenWhenConditionFalseVmExecution();
+    testDoWhileLoopsWhileConditionTrueVmExecution();
+    testContinueInDoWhileLoopSkipsToConditionRecheckVmExecution();
+    testBreakStopsDoWhileLoopEarlyVmExecution();
     testBreakInInnerLoopDoesNotAffectOuterLoopVmExecution();
     testNullStatementAsLoopBodyParsesAndExecutesAsNoOp();
     testReadFileReturnsFileContentAndFalsyForMissingFile();
@@ -8407,6 +8697,14 @@ int main() {
     testSprintfColonFieldWidthPadsAShorterStringLeftJustified();
     testSprintfColonFieldWidthTruncatesALongerString();
     testSprintfBuildingAndThenUsingADynamicColonFormatString();
+    testSprintfPercentXEmitsLowercaseHex();
+    testSprintfPercentXThrowsOnNonIntArgument();
+    testSprintfPercentOEmitsOctal();
+    testSprintfDotPrecisionTruncatesLongerString();
+    testSprintfDotPrecisionWidensFieldWhenGreaterThanExplicitWidth();
+    testSprintfStarFieldWidthPullsWidthFromLeadingArgument();
+    testSprintfStarPrecisionPullsPrecisionFromLeadingArgument();
+    testSprintfZeroPaddedStarFieldWidthThrows();
     testPpCombatBonusEfunMatchesLpcAcrossBoundaries();
     testPsDamageBonusEfunMatchesLpcAcrossBoundariesAndSupernatural();
     testOccBaseApmEfunMatchesLpcAcrossAllCategoriesAndEdgeCases();

@@ -52,6 +52,7 @@ private:
     void emitIndexAssignStmt(const IndexAssignStmt& stmt);
     void emitIfStmt(const IfStmt& stmt);
     void emitWhileStmt(const WhileStmt& stmt);
+    void emitDoWhileStmt(const DoWhileStmt& stmt);
     void emitForStmt(const ForStmt& stmt);
     void emitForeachStmt(const ForeachStmt& stmt);
     void emitSwitchStmt(const SwitchStmt& stmt);

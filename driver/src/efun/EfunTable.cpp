@@ -902,10 +902,34 @@ void registerCoreEfuns() {
     // plus the ":" field-size-and-precision modifier (secure/SimulEfun/
     // strings.c's own arrange_string()/center()/wrap(), the mechanism
     // this mudlib uses throughout for column-aligned list output).
-    // Still scoped, not the full real modifier set ("|"/"="/"#"/"'X'"/
-    // "@" are not implemented); throws rather than silently mishandling
-    // anything else, matching this codebase's existing convention for
-    // other partially-implemented efuns.
+    //
+    // Extended (general LPC-compliance pass, not driven by a new real
+    // call site this time) against fluffos-2.9-ds2.08/sprintf.c's own
+    // doc comment and its field-size/precision parsing loop, read
+    // directly rather than guessed: a separate "."n precision modifier
+    // (distinct from ":", which ties precision to the field size --
+    // "."n truncates a %s argument on its own, and widens the field to
+    // match if the precision given is larger than an explicit field
+    // size, matching the doc's own "if precision is greater than field
+    // size, then field size = precision"), "*" in place of either a
+    // literal field-size or precision digit sequence to pull that value
+    // from the next argument instead (confirmed via sprintf.c's own
+    // GET_NEXT_ARG-on-'*' handling: the size/precision argument is
+    // consumed *before* the value argument itself, so "%*d" is called
+    // as sprintf("%*d", width, value)), and the "%o"/"%x" integer
+    // specifiers (plain C octal/hex via snprintf, matching sprintf.c's
+    // INFO_T_OCT/INFO_T_HEX doing the equivalent in C). "%0*d" (a
+    // zero-padded dynamic width) is explicitly not implemented -- rare
+    // enough combination that it is not worth the added parsing
+    // ambiguity with the plain "*" case, throws its own clear error
+    // rather than being silently misparsed as a stray "%*" specifier.
+    // Still scoped, not the full real modifier set: "|" (centre), "="
+    // (column mode), "#" (table mode), "@" (array-spread), "'X'"
+    // (custom pad string), " "/"+" (positive-integer pad), "%O" (LPC
+    // datatype), "%f" (float), and capital "%X" are all not
+    // implemented; throws rather than silently mishandling anything
+    // else, matching this codebase's existing convention for other
+    // partially-implemented efuns.
     t.registerEfun("sprintf", [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("sprintf: expected a string format argument");
@@ -965,13 +989,67 @@ void registerCoreEfuns() {
             bool zeroPad = false;
             int fieldWidth = 0;
             bool haveWidth = false;
-            if (i + 1 < fmt.size() && fmt[i + 1] == '0') {
-                zeroPad = true;
-            }
-            while (i + 1 < fmt.size() && fmt[i + 1] >= '0' && fmt[i + 1] <= '9') {
+            if (i + 1 < fmt.size() && fmt[i + 1] == '*') {
+                // Dynamic field width: pulls the size from the next
+                // argument instead of a literal digit sequence, consumed
+                // here -- before the value argument itself -- matching
+                // real sprintf.c's own GET_NEXT_ARG-on-'*' order (see this
+                // efun's own top comment).
+                if (argIdx >= args.size() || !std::holds_alternative<int64_t>(args[argIdx].data)) {
+                    throw LpcRuntimeError("sprintf: '*' field width argument is not an int");
+                }
+                fieldWidth = static_cast<int>(std::get<int64_t>(args[argIdx++].data));
+                if (fieldWidth < 0) fieldWidth = 0;
                 haveWidth = true;
-                fieldWidth = fieldWidth * 10 + (fmt[i + 1] - '0');
                 ++i;
+            } else {
+                if (i + 1 < fmt.size() && fmt[i + 1] == '0') {
+                    if (i + 2 < fmt.size() && fmt[i + 2] == '*') {
+                        // "%0*d" -- zero-padded dynamic width. Real
+                        // sprintf.c supports this combination; this driver
+                        // does not, deliberately (see this efun's own top
+                        // comment) -- throws its own clear error instead of
+                        // falling through and misparsing the '*' as a
+                        // stray, unsupported type specifier.
+                        throw LpcRuntimeError(
+                            "sprintf: zero-padded dynamic field width ('%0*') is not implemented");
+                    }
+                    zeroPad = true;
+                }
+                while (i + 1 < fmt.size() && fmt[i + 1] >= '0' && fmt[i + 1] <= '9') {
+                    haveWidth = true;
+                    fieldWidth = fieldWidth * 10 + (fmt[i + 1] - '0');
+                    ++i;
+                }
+            }
+            // "."n -- precision, distinct from ":" (which ties precision
+            // to the field size). Only meaningful for %s (real sprintf.c:
+            // "all other types ignore this"), parsed for every specifier
+            // regardless so a stray "." on a non-%s call still consumes
+            // its digits/arg correctly rather than being misread as
+            // literal text or the type-specifier character itself.
+            bool havePrecision = false;
+            int precision = 0;
+            if (i + 1 < fmt.size() && fmt[i + 1] == '.') {
+                ++i;
+                if (i + 1 < fmt.size() && fmt[i + 1] == '*') {
+                    if (argIdx >= args.size() || !std::holds_alternative<int64_t>(args[argIdx].data)) {
+                        throw LpcRuntimeError("sprintf: '.*' precision argument is not an int");
+                    }
+                    precision = static_cast<int>(std::get<int64_t>(args[argIdx++].data));
+                    if (precision < 0) precision = 0;
+                    havePrecision = true;
+                    ++i;
+                } else {
+                    while (i + 1 < fmt.size() && fmt[i + 1] >= '0' && fmt[i + 1] <= '9') {
+                        havePrecision = true;
+                        precision = precision * 10 + (fmt[i + 1] - '0');
+                        ++i;
+                    }
+                    if (!havePrecision) {
+                        throw LpcRuntimeError("sprintf: expected precision digits after '.'");
+                    }
+                }
             }
             char spec = fmt[++i];
             if (argIdx >= args.size()) {
@@ -989,6 +1067,19 @@ void registerCoreEfuns() {
                     throw LpcRuntimeError("sprintf: %d argument is not an int");
                 }
                 piece = std::to_string(std::get<int64_t>(argVal.data));
+            } else if (spec == 'o' || spec == 'x') {
+                // sprintf.c's own INFO_T_OCT/INFO_T_HEX: the integer arg
+                // printed in octal/hex, plain C conversion, no leading
+                // "0"/"0x" prefix added (real sprintf.c does not add one
+                // either -- confirmed by its own doc comment describing
+                // these as the plain "printed in octal"/"printed in hex").
+                if (!std::holds_alternative<int64_t>(argVal.data)) {
+                    throw LpcRuntimeError(std::string("sprintf: %") + spec + " argument is not an int");
+                }
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), spec == 'o' ? "%llo" : "%llx",
+                              static_cast<long long>(std::get<int64_t>(argVal.data)));
+                piece = buf;
             } else if (spec == 'c') {
                 // sprintf.c's own INFO_T_CHAR handling (fluffos-2.9-ds2.08/
                 // sprintf.c line 1165 assigns 'c' into a real C
@@ -1006,7 +1097,7 @@ void registerCoreEfuns() {
             } else {
                 throw LpcRuntimeError(
                     std::string("sprintf: unsupported format specifier '%") + spec +
-                    "' (only %s, %d, and %c are implemented)");
+                    "' (only %s, %d, %c, %o, and %x are implemented)");
             }
             // ":" sets precision == field size, truncating a %s
             // argument longer than the field ("all other types ignore
@@ -1014,6 +1105,19 @@ void registerCoreEfuns() {
             if (colonMode && spec == 's' && haveWidth &&
                 static_cast<int>(piece.size()) > fieldWidth) {
                 piece = piece.substr(0, static_cast<size_t>(fieldWidth));
+            }
+            // "."n -- independent precision. Truncates on its own, and
+            // (real sprintf.c's own doc: "if precision is greater than
+            // field size, then field size = precision") widens an
+            // already-explicit field width to match, but does not
+            // conjure a field width out of nothing when none was given.
+            if (havePrecision && spec == 's') {
+                if (static_cast<int>(piece.size()) > precision) {
+                    piece = piece.substr(0, static_cast<size_t>(precision));
+                }
+                if (haveWidth && precision > fieldWidth) {
+                    fieldWidth = precision;
+                }
             }
             if (haveWidth && static_cast<int>(piece.size()) < fieldWidth) {
                 std::string pad(static_cast<size_t>(fieldWidth) - piece.size(),
