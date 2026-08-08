@@ -2436,6 +2436,234 @@ void registerCoreEfuns() {
         }
         return Value(int64_t{1});
     });
+
+    // ---- Rifts combat math (phase 1 of the game-logic-mechanics move,
+    // 2026-08-08): pure math extracted from the LPC mudlib's own
+    // daemon/rifts_combat.c, one function at a time, each verified
+    // against the original LPC implementation across a range of real
+    // inputs (see tests/test_lexer.cpp) before the LPC copy was
+    // removed. Orchestration (apply_rifts_damage, combat_round,
+    // npc_combat_tick, execute_attack) and the inherited std/living/
+    // combat.c stay in LPC; see docs/STATUS.md for the scoping.
+
+    // int pp_combat_bonus(int pp) -- PP attribute combat bonus lookup.
+    // Transcribed unchanged from daemon/rifts_combat.c's own private
+    // pp_combat_bonus(): a stepped threshold table, no object access.
+    static const auto ppCombatBonusCore = [](int64_t pp) -> int64_t {
+        if (pp >= 26) return 6;
+        if (pp >= 21) return 5;
+        if (pp >= 19) return 4;
+        if (pp >= 18) return 3;
+        if (pp >= 16) return 2;
+        if (pp >= 13) return 1;
+        return 0;
+    };
+    t.registerEfun("pp_combat_bonus", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("pp_combat_bonus: expected an int argument");
+        }
+        return Value(ppCombatBonusCore(std::get<int64_t>(args[0].data)));
+    });
+
+    // int ps_damage_bonus(int ps, int supernatural) -- PS attribute
+    // damage bonus; supernatural PS doubles the raw bonus. Transcribed
+    // unchanged from daemon/rifts_combat.c's own private
+    // ps_damage_bonus().
+    static const auto psDamageBonusCore = [](int64_t ps, bool supernatural) -> int64_t {
+        int64_t bonus;
+        if (ps >= 31) bonus = 7;
+        else if (ps >= 30) bonus = 6;
+        else if (ps >= 26) bonus = 5;
+        else if (ps >= 21) bonus = 4;
+        else if (ps >= 18) bonus = 3;
+        else if (ps >= 16) bonus = 2;
+        else bonus = 0;
+        return supernatural ? bonus * 2 : bonus;
+    };
+    t.registerEfun("ps_damage_bonus", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("ps_damage_bonus: expected (int ps, int supernatural)");
+        }
+        int64_t ps = std::get<int64_t>(args[0].data);
+        bool supernatural = std::holds_alternative<int64_t>(args[1].data) &&
+                             std::get<int64_t>(args[1].data) != 0;
+        return Value(psDamageBonusCore(ps, supernatural));
+    });
+
+    // int occ_base_apm(string occ) -- APM base by OCC combat category.
+    // Transcribed unchanged from daemon/rifts_combat.c's own private
+    // occ_base_apm(): a fixed occ-name -> bonus table, default 2 for
+    // an unset/empty/unrecognized occ. Case-sensitive, matching the
+    // LPC switch statement's own exact-string-match semantics.
+    static const auto occBaseApmCore = [](const std::string& occ) -> int64_t {
+        static const std::unordered_map<std::string, int64_t> table = {
+            {"cyber-knight", 6}, {"crazy", 6}, {"juicer", 6},
+            {"ninja juicer", 6}, {"delphi juicer", 6}, {"hyperion juicer", 6},
+            {"tattooed man", 6}, {"tattoo warrior", 6},
+
+            {"master assassin", 5}, {"city rat", 5}, {"forger", 5},
+            {"freelance spy", 5}, {"professional thief", 5}, {"smuggler", 5},
+            {"iss peacekeeper", 5}, {"iss specter", 5},
+
+            {"headhunter", 4}, {"bounty hunter", 4}, {"cs grunt", 4},
+            {"cs dead boy", 4}, {"cs ranger", 4}, {"cs military specialist", 4},
+            {"cs samas rpa pilot", 4}, {"cs technical officer", 4},
+            {"merc soldier", 4}, {"special forces (merc)", 4},
+            {"tribal warrior", 4}, {"wilderness scout", 4}, {"borg", 4},
+            {"glitter boy pilot", 4}, {"robot pilot", 4}, {"ntset protector", 4},
+            {"knight (europe)", 4}, {"royal knight", 4}, {"pirate (s.a.)", 4},
+            {"sailor (s.a.)", 4},
+
+            {"ley line walker", 3}, {"mystic", 3}, {"shifter", 3},
+            {"shaman", 3}, {"techno-wizard", 3}, {"ley line rifter", 3},
+            {"air warlock", 3}, {"nega-psychic", 3},
+        };
+        if (occ.empty()) return 2;
+        auto it = table.find(occ);
+        return it != table.end() ? it->second : 2;
+    };
+    t.registerEfun("occ_base_apm", [](VM&, std::vector<Value>& args) -> Value {
+        std::string occ;
+        if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
+            occ = std::get<std::string>(args[0].data);
+        }
+        return Value(occBaseApmCore(occ));
+    });
+
+    // int roll_weapon_damage_dice(int num, int sides, int bonus) -- pure
+    // dice-rolling core split out of daemon/rifts_combat.c's own private
+    // roll_rifts_weapon_damage(): rolls num dice of size sides (each via
+    // the real random() efun's own [0, n) plus 1 convention, so this
+    // reuses the same efun-table random() rather than a second
+    // generator), sums them, adds bonus, and floors the total at 1,
+    // exactly matching the LPC original's "damage > 0 ? damage : 1".
+    // The ammo check/consume and the "clicks empty" message stayed in
+    // LPC: they are object-graph orchestration with a player-visible
+    // side effect, not math (see docs/STATUS.md). The LPC wrapper alone
+    // decides whether a weapon has valid dice (num > 0 && sides > 0)
+    // before calling this.
+    t.registerEfun("roll_weapon_damage_dice", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 ||
+            !std::holds_alternative<int64_t>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data) ||
+            !std::holds_alternative<int64_t>(args[2].data)) {
+            throw LpcRuntimeError("roll_weapon_damage_dice: expected (int num, int sides, int bonus)");
+        }
+        int64_t num   = std::get<int64_t>(args[0].data);
+        int64_t sides = std::get<int64_t>(args[1].data);
+        int64_t bonus = std::get<int64_t>(args[2].data);
+        int64_t damage = 0;
+        for (int64_t j = 0; j < num; ++j) {
+            std::vector<Value> sidesArg{ Value(sides) };
+            Value roll = EfunTable::instance().call("random", vm, sidesArg);
+            damage += std::get<int64_t>(roll.data) + 1;
+        }
+        damage += bonus;
+        return Value(damage > 0 ? damage : int64_t{1});
+    });
+
+    // Shared helper for query_strike_bonus/query_parry_bonus below: real
+    // stat/env/property reads on the player object are LPC methods in
+    // this mudlib (query_stats, query_level, getenv, query_property all
+    // live in std/, not the efun table), so these two efuns call back
+    // into LPC for them via vm.callFunction(), the same mechanism
+    // map_array()/filter_array()/present() already use to call back
+    // into LPC by function name. ADDICTION_D->query_combat_modifiers()
+    // is resolved the same way call_other() itself resolves a string
+    // target (vm.findObject(), see that efun's own comment above).
+    static const auto riftsCombatStanceMod = [](VM& vm, const std::shared_ptr<LpcObject>& player,
+                                                  bool offensiveBonus) -> int64_t {
+        Value stance = vm.callFunction(player, "query_property", { Value(std::string("combat_stance")) });
+        if (!std::holds_alternative<std::string>(stance.data)) return 0;
+        const std::string& pos = std::get<std::string>(stance.data);
+        if (pos == "offensive") return offensiveBonus ? 2 : -2;
+        if (pos == "defensive") return offensiveBonus ? -2 : 2;
+        return 0;
+    };
+    static const auto riftsAddictionMod = [](VM& vm, const std::shared_ptr<LpcObject>& player,
+                                              const std::string& key) -> int64_t {
+        auto addictionD = vm.findObject("/daemon/addiction_d");
+        if (!addictionD) return 0;
+        Value mods = vm.callFunction(addictionD, "query_combat_modifiers", { Value(player) });
+        auto* map = std::get_if<std::shared_ptr<Mapping>>(&mods.data);
+        if (!map || !*map) return 0;
+        for (const auto& entry : (*map)->entries) {
+            if (valuesEqual(entry.first, Value(key)) &&
+                std::holds_alternative<int64_t>(entry.second.data)) {
+                return std::get<int64_t>(entry.second.data);
+            }
+        }
+        return 0;
+    };
+    static const auto riftsLevelBonus = [](int64_t occApm, int64_t level) -> int64_t {
+        switch (occApm) {
+        case 6: return level / 2;
+        case 5: return level / 3;
+        case 4: return level / 3;
+        case 3: return level / 4;
+        default: return level / 5;
+        }
+    };
+
+    // int query_strike_bonus(object player) -- transcribed unchanged
+    // from daemon/rifts_combat.c's own query_strike_bonus(); the two
+    // private helpers it alone called (position_strike_mod(),
+    // position_defense_mod()) had no other caller once
+    // query_strike_bonus()/query_parry_bonus() moved, and are now dead
+    // LPC code left in place rather than deleted this phase (see
+    // docs/STATUS.md).
+    t.registerEfun("query_strike_bonus", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data) ||
+            !std::get<std::shared_ptr<LpcObject>>(args[0].data)) {
+            return Value(int64_t{0});
+        }
+        auto player = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+
+        Value ppVal = vm.callFunction(player, "query_stats", { Value(std::string("PP")) });
+        Value levelVal = vm.callFunction(player, "query_level", {});
+        Value occVal = vm.callFunction(player, "getenv", { Value(std::string("rifts_occ")) });
+
+        int64_t pp = std::holds_alternative<int64_t>(ppVal.data) ? std::get<int64_t>(ppVal.data) : 0;
+        int64_t level = std::holds_alternative<int64_t>(levelVal.data) ? std::get<int64_t>(levelVal.data) : 0;
+        std::string occ = std::holds_alternative<std::string>(occVal.data) ? std::get<std::string>(occVal.data) : "";
+
+        int64_t bonus = ppCombatBonusCore(pp);
+        bonus += riftsLevelBonus(occBaseApmCore(occ), level);
+        bonus += riftsCombatStanceMod(vm, player, true);
+        bonus += riftsAddictionMod(vm, player, "strike");
+        return Value(bonus);
+    });
+
+    // int query_parry_bonus(object player) -- transcribed unchanged
+    // from daemon/rifts_combat.c's own query_parry_bonus().
+    t.registerEfun("query_parry_bonus", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data) ||
+            !std::get<std::shared_ptr<LpcObject>>(args[0].data)) {
+            return Value(int64_t{0});
+        }
+        auto player = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+
+        Value ppVal = vm.callFunction(player, "query_stats", { Value(std::string("PP")) });
+        Value levelVal = vm.callFunction(player, "query_level", {});
+        Value occVal = vm.callFunction(player, "getenv", { Value(std::string("rifts_occ")) });
+
+        int64_t pp = std::holds_alternative<int64_t>(ppVal.data) ? std::get<int64_t>(ppVal.data) : 0;
+        int64_t level = std::holds_alternative<int64_t>(levelVal.data) ? std::get<int64_t>(levelVal.data) : 0;
+        std::string occ = std::holds_alternative<std::string>(occVal.data) ? std::get<std::string>(occVal.data) : "";
+
+        int64_t bonus = ppCombatBonusCore(pp);
+        bonus += riftsLevelBonus(occBaseApmCore(occ), level);
+        bonus += riftsCombatStanceMod(vm, player, false);
+        bonus += riftsAddictionMod(vm, player, "parry");
+        return Value(bonus);
+    });
+
+    // int query_dodge_bonus(object player) -- transcribed unchanged from
+    // daemon/rifts_combat.c's own query_dodge_bonus(): a plain alias for
+    // query_parry_bonus(), same scale as parry.
+    t.registerEfun("query_dodge_bonus", [](VM& vm, std::vector<Value>& args) -> Value {
+        return EfunTable::instance().call("query_parry_bonus", vm, args);
+    });
 }
 
 } // namespace lpcdriver

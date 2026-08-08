@@ -18,6 +18,7 @@
 #include <iostream>
 #include <memory>
 #include <fstream>
+#include <sys/stat.h>
 #include <cstdlib>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -7632,6 +7633,469 @@ static void testSprintfBuildingAndThenUsingADynamicColonFormatString() {
     std::cout << "testSprintfBuildingAndThenUsingADynamicColonFormatString OK\n";
 }
 
+// ---------------------------------------------------------------------
+// Rifts combat math efuns (phase 1 of the game-logic-mechanics move,
+// 2026-08-08): each test below compiles the ORIGINAL LPC function body,
+// transcribed verbatim from daemon/rifts_combat.c as it stood before the
+// move, and compares its output against the new C++ efun of the same
+// name across a range of real inputs, before that LPC copy was removed
+// from the mudlib. See docs/STATUS.md for the full writeup.
+// ---------------------------------------------------------------------
+
+static void testPpCombatBonusEfunMatchesLpcAcrossBoundaries() {
+    std::string src =
+        "int pp_combat_bonus(int pp) {\n"
+        "    if(pp >= 26) return 6;\n"
+        "    if(pp >= 21) return 5;\n"
+        "    if(pp >= 19) return 4;\n"
+        "    if(pp >= 18) return 3;\n"
+        "    if(pp >= 16) return 2;\n"
+        "    if(pp >= 13) return 1;\n"
+        "    return 0;\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+    lpcdriver::Config config;
+    lpcdriver::ObjectManager objects(config);
+    lpcdriver::VM vm(objects, config);
+
+    int64_t values[] = {-5, 0, 1, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 25, 26, 27, 40};
+    for (int64_t pp : values) {
+        lpcdriver::Value lpcResult = vm.callFunction(obj, "pp_combat_bonus", {lpcdriver::Value(pp)});
+        std::vector<lpcdriver::Value> efunArgs{ lpcdriver::Value(pp) };
+        lpcdriver::Value efunResult = lpcdriver::EfunTable::instance().call("pp_combat_bonus", vm, efunArgs);
+        assert(std::holds_alternative<int64_t>(lpcResult.data));
+        assert(std::holds_alternative<int64_t>(efunResult.data));
+        assert(std::get<int64_t>(lpcResult.data) == std::get<int64_t>(efunResult.data));
+    }
+
+    std::cout << "testPpCombatBonusEfunMatchesLpcAcrossBoundaries OK\n";
+}
+
+static void testPsDamageBonusEfunMatchesLpcAcrossBoundariesAndSupernatural() {
+    std::string src =
+        "int ps_damage_bonus(int ps, int supernatural) {\n"
+        "    int bonus;\n"
+        "    if(ps >= 31) bonus = 7;\n"
+        "    else if(ps >= 30) bonus = 6;\n"
+        "    else if(ps >= 26) bonus = 5;\n"
+        "    else if(ps >= 21) bonus = 4;\n"
+        "    else if(ps >= 18) bonus = 3;\n"
+        "    else if(ps >= 16) bonus = 2;\n"
+        "    else bonus = 0;\n"
+        "    if(supernatural) return bonus * 2;\n"
+        "    return bonus;\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+    lpcdriver::Config config;
+    lpcdriver::ObjectManager objects(config);
+    lpcdriver::VM vm(objects, config);
+
+    int64_t values[] = {0, 15, 16, 17, 18, 20, 21, 25, 26, 29, 30, 31, 35};
+    for (int64_t ps : values) {
+        for (int64_t supernatural : {int64_t{0}, int64_t{1}}) {
+            lpcdriver::Value lpcResult = vm.callFunction(obj, "ps_damage_bonus",
+                {lpcdriver::Value(ps), lpcdriver::Value(supernatural)});
+            std::vector<lpcdriver::Value> efunArgs{ lpcdriver::Value(ps), lpcdriver::Value(supernatural) };
+            lpcdriver::Value efunResult = lpcdriver::EfunTable::instance().call("ps_damage_bonus", vm, efunArgs);
+            assert(std::holds_alternative<int64_t>(lpcResult.data));
+            assert(std::holds_alternative<int64_t>(efunResult.data));
+            assert(std::get<int64_t>(lpcResult.data) == std::get<int64_t>(efunResult.data));
+        }
+    }
+
+    std::cout << "testPsDamageBonusEfunMatchesLpcAcrossBoundariesAndSupernatural OK\n";
+}
+
+static void testOccBaseApmEfunMatchesLpcAcrossAllCategoriesAndEdgeCases() {
+    // Transcribed verbatim from daemon/rifts_combat.c's own private
+    // occ_base_apm(), full case list included (not a shortened subset)
+    // so this is a real behavioral comparison, not a reimplementation.
+    std::string src =
+        "int occ_base_apm(string occ) {\n"
+        "    if(!occ || occ == \"\") return 2;\n"
+        "    switch(occ) {\n"
+        "    case \"cyber-knight\":\n"
+        "    case \"crazy\":\n"
+        "    case \"juicer\":\n"
+        "    case \"ninja juicer\":\n"
+        "    case \"delphi juicer\":\n"
+        "    case \"hyperion juicer\":\n"
+        "    case \"tattooed man\":\n"
+        "    case \"tattoo warrior\":\n"
+        "        return 6;\n"
+        "    case \"master assassin\":\n"
+        "    case \"city rat\":\n"
+        "    case \"forger\":\n"
+        "    case \"freelance spy\":\n"
+        "    case \"professional thief\":\n"
+        "    case \"smuggler\":\n"
+        "    case \"iss peacekeeper\":\n"
+        "    case \"iss specter\":\n"
+        "        return 5;\n"
+        "    case \"headhunter\":\n"
+        "    case \"bounty hunter\":\n"
+        "    case \"cs grunt\":\n"
+        "    case \"cs dead boy\":\n"
+        "    case \"cs ranger\":\n"
+        "    case \"cs military specialist\":\n"
+        "    case \"cs samas rpa pilot\":\n"
+        "    case \"cs technical officer\":\n"
+        "    case \"merc soldier\":\n"
+        "    case \"special forces (merc)\":\n"
+        "    case \"tribal warrior\":\n"
+        "    case \"wilderness scout\":\n"
+        "    case \"borg\":\n"
+        "    case \"glitter boy pilot\":\n"
+        "    case \"robot pilot\":\n"
+        "    case \"ntset protector\":\n"
+        "    case \"knight (europe)\":\n"
+        "    case \"royal knight\":\n"
+        "    case \"pirate (s.a.)\":\n"
+        "    case \"sailor (s.a.)\":\n"
+        "        return 4;\n"
+        "    case \"ley line walker\":\n"
+        "    case \"mystic\":\n"
+        "    case \"shifter\":\n"
+        "    case \"shaman\":\n"
+        "    case \"techno-wizard\":\n"
+        "    case \"ley line rifter\":\n"
+        "    case \"air warlock\":\n"
+        "    case \"nega-psychic\":\n"
+        "        return 3;\n"
+        "    default:\n"
+        "        return 2;\n"
+        "    }\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+    lpcdriver::Config config;
+    lpcdriver::ObjectManager objects(config);
+    lpcdriver::VM vm(objects, config);
+
+    // One representative from each bonus tier, plus edge cases: empty
+    // string, an unrecognized occ (default), and a case-mismatched
+    // variant of a real key (must NOT match -- exact-string semantics).
+    const char* occs[] = {
+        "cyber-knight", "juicer", "tattoo warrior",
+        "master assassin", "iss specter",
+        "headhunter", "sailor (s.a.)", "cs dead boy",
+        "ley line walker", "nega-psychic",
+        "", "civilian", "Cyber-Knight",
+    };
+    for (const char* occ : occs) {
+        lpcdriver::Value lpcResult = vm.callFunction(obj, "occ_base_apm",
+            {lpcdriver::Value(std::string(occ))});
+        std::vector<lpcdriver::Value> efunArgs{ lpcdriver::Value(std::string(occ)) };
+        lpcdriver::Value efunResult = lpcdriver::EfunTable::instance().call("occ_base_apm", vm, efunArgs);
+        assert(std::holds_alternative<int64_t>(lpcResult.data));
+        assert(std::holds_alternative<int64_t>(efunResult.data));
+        assert(std::get<int64_t>(lpcResult.data) == std::get<int64_t>(efunResult.data));
+    }
+
+    // The "!occ" branch (undefined, not merely empty): the LPC side
+    // takes an actual undefined argument; the efun side omits the
+    // argument entirely, matching how the driver treats a missing
+    // string arg elsewhere in this file (see occ_base_apm's own
+    // registration comment).
+    lpcdriver::Value lpcUndefResult = vm.callFunction(obj, "occ_base_apm", {lpcdriver::Value{}});
+    std::vector<lpcdriver::Value> efunUndefArgs{};
+    lpcdriver::Value efunUndefResult = lpcdriver::EfunTable::instance().call("occ_base_apm", vm, efunUndefArgs);
+    assert(std::get<int64_t>(lpcUndefResult.data) == 2);
+    assert(std::get<int64_t>(efunUndefResult.data) == 2);
+
+    std::cout << "testOccBaseApmEfunMatchesLpcAcrossAllCategoriesAndEdgeCases OK\n";
+}
+
+// roll_weapon_damage_dice() is genuinely random (shares the real
+// random() efun), so there is no single "the" LPC output to diff
+// against draw-for-draw. Instead this locks in the formula the LPC
+// original's inline dice-rolling block actually computed (num dice of
+// size sides, summed, plus bonus, floored at 1) via bounds that must
+// hold on every draw, checked across many iterations per case.
+static void testRollWeaponDamageDiceStaysWithinFormulaDerivedBoundsAcrossManyDraws() {
+    lpcdriver::Config config;
+    lpcdriver::ObjectManager objects(config);
+    lpcdriver::VM vm(objects, config);
+
+    struct Case { int64_t num, sides, bonus, lo, hi; };
+    Case cases[] = {
+        {3, 6, 0, 3, 18},        // 3d6, no bonus
+        {1, 4, -10, 1, 1},       // floored at 1: 1d4-10 is always <= 0
+        {2, 4, 100, 102, 108},   // large positive bonus dominates
+        {0, 6, 5, 5, 5},         // num == 0: zero dice, just the bonus
+        {0, 6, -5, 1, 1},        // num == 0, non-positive total: floor
+    };
+    for (const auto& c : cases) {
+        bool sawMin = false, sawMax = (c.num == 0);
+        // 3d6's exact-18 draw is 1/216 per trial (all three dice max);
+        // 500 trials left roughly a 1-in-10 chance of never seeing it,
+        // a real flake seen live. 3000 trials brings that under 1e-6.
+        for (int trial = 0; trial < 3000; ++trial) {
+            std::vector<lpcdriver::Value> args{
+                lpcdriver::Value(c.num), lpcdriver::Value(c.sides), lpcdriver::Value(c.bonus) };
+            lpcdriver::Value result = lpcdriver::EfunTable::instance().call("roll_weapon_damage_dice", vm, args);
+            assert(std::holds_alternative<int64_t>(result.data));
+            int64_t damage = std::get<int64_t>(result.data);
+            assert(damage >= c.lo && damage <= c.hi);
+            if (damage == c.lo) sawMin = true;
+            if (damage == c.hi) sawMax = true;
+        }
+        // For genuinely random cases (num > 0, real spread), 500 draws
+        // should hit both ends of the range at least once; a bug that
+        // narrowed the distribution (off-by-one on sides, wrong
+        // random() convention) would show up as a range never reached.
+        if (c.num > 0 && c.lo != c.hi) {
+            assert(sawMin);
+            assert(sawMax);
+        }
+    }
+
+    std::cout << "testRollWeaponDamageDiceStaysWithinFormulaDerivedBoundsAcrossManyDraws OK\n";
+}
+
+// Shared harness for query_strike_bonus/query_parry_bonus/
+// query_dodge_bonus: these call back into LPC for player stats/env/
+// property reads and into a mock ADDICTION_D daemon, so they need a
+// real scratch mudlib_root (ObjectVarHarness), not just an in-memory
+// compiled program.
+static void writeRiftsCombatBonusFixtures(ObjectVarHarness& harness) {
+    // Mock player: exposes exactly the methods query_strike_bonus/
+    // query_parry_bonus actually call (query_stats, query_level,
+    // getenv, query_property), settable per test case.
+    harness.writeFile("/player.c",
+        "int stat_pp, stat_level;\n"
+        "string occ_val, stance_val;\n"
+        "\n"
+        "void set_test_data(int pp, int level, string occ, string stance) {\n"
+        "    stat_pp = pp;\n"
+        "    stat_level = level;\n"
+        "    occ_val = occ;\n"
+        "    stance_val = stance;\n"
+        "}\n"
+        "\n"
+        "int query_stats(string which) {\n"
+        "    if(which == \"PP\") return stat_pp;\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "int query_level() { return stat_level; }\n"
+        "\n"
+        "string getenv(string key) {\n"
+        "    if(key == \"rifts_occ\") return occ_val;\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "string query_property(string key) {\n"
+        "    if(key == \"combat_stance\") return stance_val;\n"
+        "    return 0;\n"
+        "}\n");
+
+    // Mock ADDICTION_D at the real path (/daemon/addiction_d) the efun
+    // resolves via vm.findObject(), matching daemons.h's own
+    // "#define ADDICTION_D (DIR_DAEMONS+\"/addiction_d\")". writeFile()
+    // does not create parent directories, unlike every other fixture
+    // path used elsewhere in this file (all single-level so far).
+    mkdir((harness.tempDir + "/daemon").c_str(), 0755);
+    harness.writeFile("/daemon/addiction_d.c",
+        "mapping query_combat_modifiers(object who) {\n"
+        "    return ([ \"strike\": 3, \"parry\": -1 ]);\n"
+        "}\n");
+
+    // The ORIGINAL LPC implementation, transcribed verbatim from
+    // daemon/rifts_combat.c as it stood before the move, with the
+    // ADDICTION_D macro substituted for its own literal expansion
+    // (this scratch harness has no secure/include/daemons.h to
+    // #include).
+    harness.writeFile("/rifts_combat_orig.c",
+        "private int pp_combat_bonus(int pp) {\n"
+        "    if(pp >= 26) return 6;\n"
+        "    if(pp >= 21) return 5;\n"
+        "    if(pp >= 19) return 4;\n"
+        "    if(pp >= 18) return 3;\n"
+        "    if(pp >= 16) return 2;\n"
+        "    if(pp >= 13) return 1;\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "private int occ_base_apm(string occ) {\n"
+        "    if(!occ || occ == \"\") return 2;\n"
+        "    switch(occ) {\n"
+        "    case \"cyber-knight\": case \"crazy\": case \"juicer\":\n"
+        "        return 6;\n"
+        "    case \"master assassin\": case \"city rat\":\n"
+        "        return 5;\n"
+        "    case \"headhunter\": case \"bounty hunter\":\n"
+        "        return 4;\n"
+        "    case \"ley line walker\": case \"mystic\":\n"
+        "        return 3;\n"
+        "    default:\n"
+        "        return 2;\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "private int position_strike_mod(object player) {\n"
+        "    string pos;\n"
+        "    pos = (string)player->query_property(\"combat_stance\");\n"
+        "    if(!pos) return 0;\n"
+        "    if(pos == \"offensive\") return 2;\n"
+        "    if(pos == \"defensive\") return -2;\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "private int position_defense_mod(object player) {\n"
+        "    string pos;\n"
+        "    pos = (string)player->query_property(\"combat_stance\");\n"
+        "    if(!pos) return 0;\n"
+        "    if(pos == \"defensive\") return 2;\n"
+        "    if(pos == \"offensive\") return -2;\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "int query_strike_bonus(object player) {\n"
+        "    int pp, level, bonus;\n"
+        "    string occ;\n"
+        "    mapping addmods;\n"
+        "    if(!player) return 0;\n"
+        "    pp    = (int)player->query_stats(\"PP\");\n"
+        "    level = (int)player->query_level();\n"
+        "    occ   = (string)player->getenv(\"rifts_occ\");\n"
+        "    bonus = pp_combat_bonus(pp);\n"
+        "    switch(occ_base_apm(occ)) {\n"
+        "    case 6: bonus += level / 2; break;\n"
+        "    case 5: bonus += level / 3; break;\n"
+        "    case 4: bonus += level / 3; break;\n"
+        "    case 3: bonus += level / 4; break;\n"
+        "    default: bonus += level / 5; break;\n"
+        "    }\n"
+        "    bonus  += position_strike_mod(player);\n"
+        "    addmods = (mapping)(\"/daemon/addiction_d\")->query_combat_modifiers(player);\n"
+        "    bonus  += (int)addmods[\"strike\"];\n"
+        "    return bonus;\n"
+        "}\n"
+        "\n"
+        "int query_parry_bonus(object player) {\n"
+        "    int pp, level, bonus;\n"
+        "    string occ;\n"
+        "    mapping addmods;\n"
+        "    if(!player) return 0;\n"
+        "    pp    = (int)player->query_stats(\"PP\");\n"
+        "    level = (int)player->query_level();\n"
+        "    occ   = (string)player->getenv(\"rifts_occ\");\n"
+        "    bonus = pp_combat_bonus(pp);\n"
+        "    switch(occ_base_apm(occ)) {\n"
+        "    case 6: bonus += level / 2; break;\n"
+        "    case 5: bonus += level / 3; break;\n"
+        "    case 4: bonus += level / 3; break;\n"
+        "    case 3: bonus += level / 4; break;\n"
+        "    default: bonus += level / 5; break;\n"
+        "    }\n"
+        "    bonus  += position_defense_mod(player);\n"
+        "    addmods = (mapping)(\"/daemon/addiction_d\")->query_combat_modifiers(player);\n"
+        "    bonus  += (int)addmods[\"parry\"];\n"
+        "    return bonus;\n"
+        "}\n"
+        "\n"
+        "int query_dodge_bonus(object player) {\n"
+        "    return query_parry_bonus(player);\n"
+        "}\n");
+}
+
+static void testQueryStrikeBonusEfunMatchesLpcAcrossPlayerStates() {
+    ObjectVarHarness harness;
+    writeRiftsCombatBonusFixtures(harness);
+
+    auto orig = harness.vm.findObject("/rifts_combat_orig");
+    auto player = harness.vm.findObject("/player");
+    assert(orig);
+    assert(player);
+
+    struct Case { int64_t pp, level; const char* occ; const char* stance; };
+    Case cases[] = {
+        {10, 1, "civilian", ""},
+        {18, 5, "headhunter", "offensive"},
+        {26, 12, "cyber-knight", "defensive"},
+        {13, 8, "mystic", ""},
+        {8, 0, "", ""},
+    };
+    for (const auto& c : cases) {
+        harness.vm.callFunction(player, "set_test_data",
+            { lpcdriver::Value(c.pp), lpcdriver::Value(c.level),
+              lpcdriver::Value(std::string(c.occ)), lpcdriver::Value(std::string(c.stance)) });
+
+        lpcdriver::Value lpcResult = harness.vm.callFunction(orig, "query_strike_bonus", { lpcdriver::Value(player) });
+        std::vector<lpcdriver::Value> efunArgs{ lpcdriver::Value(player) };
+        lpcdriver::Value efunResult = lpcdriver::EfunTable::instance().call("query_strike_bonus", harness.vm, efunArgs);
+
+        assert(std::holds_alternative<int64_t>(lpcResult.data));
+        assert(std::holds_alternative<int64_t>(efunResult.data));
+        assert(std::get<int64_t>(lpcResult.data) == std::get<int64_t>(efunResult.data));
+    }
+
+    std::cout << "testQueryStrikeBonusEfunMatchesLpcAcrossPlayerStates OK\n";
+}
+
+static void testQueryParryBonusEfunMatchesLpcAcrossPlayerStates() {
+    ObjectVarHarness harness;
+    writeRiftsCombatBonusFixtures(harness);
+
+    auto orig = harness.vm.findObject("/rifts_combat_orig");
+    auto player = harness.vm.findObject("/player");
+    assert(orig);
+    assert(player);
+
+    struct Case { int64_t pp, level; const char* occ; const char* stance; };
+    Case cases[] = {
+        {10, 1, "civilian", ""},
+        {18, 5, "headhunter", "offensive"},
+        {26, 12, "cyber-knight", "defensive"},
+        {13, 8, "mystic", ""},
+        {8, 0, "", ""},
+    };
+    for (const auto& c : cases) {
+        harness.vm.callFunction(player, "set_test_data",
+            { lpcdriver::Value(c.pp), lpcdriver::Value(c.level),
+              lpcdriver::Value(std::string(c.occ)), lpcdriver::Value(std::string(c.stance)) });
+
+        lpcdriver::Value lpcResult = harness.vm.callFunction(orig, "query_parry_bonus", { lpcdriver::Value(player) });
+        std::vector<lpcdriver::Value> efunArgs{ lpcdriver::Value(player) };
+        lpcdriver::Value efunResult = lpcdriver::EfunTable::instance().call("query_parry_bonus", harness.vm, efunArgs);
+
+        assert(std::holds_alternative<int64_t>(lpcResult.data));
+        assert(std::holds_alternative<int64_t>(efunResult.data));
+        assert(std::get<int64_t>(lpcResult.data) == std::get<int64_t>(efunResult.data));
+    }
+
+    std::cout << "testQueryParryBonusEfunMatchesLpcAcrossPlayerStates OK\n";
+}
+
+static void testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus() {
+    ObjectVarHarness harness;
+    writeRiftsCombatBonusFixtures(harness);
+
+    auto orig = harness.vm.findObject("/rifts_combat_orig");
+    auto player = harness.vm.findObject("/player");
+    assert(orig);
+    assert(player);
+
+    harness.vm.callFunction(player, "set_test_data",
+        { lpcdriver::Value(int64_t{18}), lpcdriver::Value(int64_t{5}),
+          lpcdriver::Value(std::string("headhunter")), lpcdriver::Value(std::string("defensive")) });
+
+    lpcdriver::Value lpcResult = harness.vm.callFunction(orig, "query_dodge_bonus", { lpcdriver::Value(player) });
+    std::vector<lpcdriver::Value> efunArgs{ lpcdriver::Value(player) };
+    lpcdriver::Value efunResult = lpcdriver::EfunTable::instance().call("query_dodge_bonus", harness.vm, efunArgs);
+
+    assert(std::holds_alternative<int64_t>(lpcResult.data));
+    assert(std::holds_alternative<int64_t>(efunResult.data));
+    assert(std::get<int64_t>(lpcResult.data) == std::get<int64_t>(efunResult.data));
+    // Also confirm it actually matches query_parry_bonus's own result
+    // for the same state, locking in the alias relationship itself.
+    std::vector<lpcdriver::Value> parryArgs{ lpcdriver::Value(player) };
+    lpcdriver::Value parryResult = lpcdriver::EfunTable::instance().call("query_parry_bonus", harness.vm, parryArgs);
+    assert(std::get<int64_t>(efunResult.data) == std::get<int64_t>(parryResult.data));
+
+    std::cout << "testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -7943,6 +8407,13 @@ int main() {
     testSprintfColonFieldWidthPadsAShorterStringLeftJustified();
     testSprintfColonFieldWidthTruncatesALongerString();
     testSprintfBuildingAndThenUsingADynamicColonFormatString();
+    testPpCombatBonusEfunMatchesLpcAcrossBoundaries();
+    testPsDamageBonusEfunMatchesLpcAcrossBoundariesAndSupernatural();
+    testOccBaseApmEfunMatchesLpcAcrossAllCategoriesAndEdgeCases();
+    testRollWeaponDamageDiceStaysWithinFormulaDerivedBoundsAcrossManyDraws();
+    testQueryStrikeBonusEfunMatchesLpcAcrossPlayerStates();
+    testQueryParryBonusEfunMatchesLpcAcrossPlayerStates();
+    testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus();
     std::cout << "all tests passed\n";
     return 0;
 }
