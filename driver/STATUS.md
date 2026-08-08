@@ -68,6 +68,45 @@ genuinely runs" below for the transcript. Not yet a full room: the
 rest of chargen (roll/accept, race, OCC, alignment, skills) has not
 been exercised live yet and may surface further gaps.
 
+**Updated after closing that loop.** Resumed after an unplanned
+reboot; found and killed an orphaned scratch driver process from a
+different, no-longer-reachable session before starting fresh (see
+"Resuming after a reboot: orphaned process, and a stale test script"
+below for how that was confirmed safe). Pushed the live chargen walk
+the rest of the way: race, alignment, and OCC selection all confirmed
+live (including the exact `daemon/occ.c` empty-`attribute_requirements`
+question the prior session had been mid-investigation of when the
+reboot hit -- confirmed genuine content, not a driver bug, both by
+static analysis and by live exercise of an empty-requirements OCC), then
+nine more real, confirmed driver gaps chasing `finish_creation()` all
+the way to an actual room: two missing efuns
+(`all_inventory()`/`deep_inventory()`) whose absence crashed account
+creation itself any time a player declined the name-confirm prompt,
+`strcmp()` and `map_delete()` (the latter fatal to alignment selection),
+a `clone_object()`/`load_object()` path-normalization bug (a caller-
+supplied trailing `.c` produced a literal, never-existing `.c.c` file
+lookup), a missing `intp()` type predicate, a missing `repeat_string()`
+efun, a missing `present()` efun (blocking the very first starting
+room's own `reset()`), and -- the deepest one -- this driver's
+`explode()` never matched real FluffOS's own default leading/trailing-
+separator semantics at all, which silently broke every compile-time
+`privs` assignment for every object with a `/`-leading path (a new,
+previously entirely missing mechanism, `ObjectManager::
+initPrivsForObject()`, added alongside it). Also added
+`remove_call_out()` (a stub matching `call_out()`'s own already-stubbed
+non-scheduling behavior). Full suite: 293 tests passing. **Live-
+confirmed end to end for the first time this project has reached it:**
+a fresh account now runs the complete chargen flow -- login, account
+creation, gender/display name/email/real name, zone, attribute
+roll/accept, race, alignment, OCC pick, automatic starting-equipment
+grant -- and lands in a real starting room (`domains/ChiTown/areas/
+chitown_start.c`) with a live NPC present, full room description, real
+exits, and a working `look` command confirmed both via
+`finish_creation()`'s own automatic room display and via an explicit
+`look` sent afterward. See "Chargen closed the loop: full run confirmed
+live, reaching a real room" below for the full transcript and the
+complete gap-by-gap trail.
+
 ## Working now
 
 - Clean build via `cmake -B build -S . && cmake --build build`.
@@ -1647,6 +1686,235 @@ instrumentation used to root-cause every issue in this and the
 previous section has been removed, confirmed via grep across every
 touched mudlib file.
 
+## Resuming after a reboot: orphaned process, and a stale test script
+
+The previous session ended mid-investigation when an unplanned system
+reboot killed it. On resume, `ps`/`ss` found a driver process already
+listening on the scratch port (1123) -- started *after* the reboot
+(`19:49`, boot was `18:53`), from a scratch config in a different
+session's own scratchpad directory, with an empty log and no reachable
+owning agent. No save/`.o` file anywhere had been touched since boot.
+Confirmed orphaned (a lost session's own scratch instance, not
+something in progress) and killed rather than reused, per this
+project's own "confirm state from live evidence, don't guess" practice.
+
+Driving the live socket test itself needed its own small fix first:
+`mudlib/tools/playtest_create_chars.py` (the project's existing,
+previously-working chargen-driver script, dated 2026-07-10) no longer
+matches `secure/std/login.c`'s current account-confirm prompt. The
+script's `login_new()` expects either "really wish" or "choose a
+password" right after the account name is sent; the real prompt is now
+"Confirm `<Name>` as your account and first character name? (y/n)",
+added since the script was written. Neither substring matches, so the
+script's next `send()` (meant to be the password) actually answers the
+`(y/n)` confirm prombt instead -- landing on `secure/std/login.c`'s own
+`new_user()` decline branch (`if((str = lower_case(str)) == "" ||
+str[0] != 'y') { ... __Player->remove(); ... }`) essentially every time.
+This is almost certainly *why* the previous session was investigating
+`daemon/occ.c` in the first place: not a real content question, but a
+downstream symptom of this same stale-script bug reliably crashing
+account creation. A corrected probe script (this session's own
+`chargen_probe.py`, scratch-only, not committed to the repo) answers
+the confirm prompt explicitly with `y` before sending the password.
+
+## Chargen closed the loop: full run confirmed live, reaching a real room
+
+With the corrected probe script, the live walk reproduced the actual
+blocker directly rather than continuing the grep/awk investigation
+blind: `new_user()`'s decline branch (reached via the stale-script bug
+above, but a real code path a genuine user could also hit by literally
+answering anything other than `y`) called `__Player->remove()` on the
+speculatively pre-created player object (`secure/std/login.c`'s own
+comment explains why `player_object()` runs before the confirmation:
+`compile_object()` needs the char name already set). `std/clean_up.c`'s
+`remove()` needs `all_inventory()` to hand equipment back to the
+environment before destructing -- an efun this driver never had.
+
+**Investigating the `daemon/occ.c` empty-`attribute_requirements`
+question first**, since it was the exact point of interruption: closed
+as genuine content, not a driver bug. Both real consumption sites
+(`domains/Praxis/setter.c`'s `do_occ_pick()` and
+`offer_occ_or_reroll()`) guard with `if(reqs && sizeof(reqs))` before
+ever touching the mapping, so an empty `([])` is unambiguously "no
+requirements" and behaves correctly regardless of how this driver
+represents an empty mapping literal internally. The OCCs carrying it
+(`vagabond`, `wilderness scout`, `city rat`, `rogue scholar`, `tribal
+warrior`, `smuggler`, `pirate (s.a.)`, `sailor (s.a.)`, `gifted gypsy`,
+plus three race-gated OCCs where race membership is already the hard
+gate) are civilian/generalist classes with no stat floor in the source
+material, consistent with every non-empty entry elsewhere in the same
+file. Confirmed live twice over: all of them show up correctly in
+STEP 5's offered OCC list, and `vagabond` specifically (line 225's
+empty mapping) was picked live with no crash and no false rejection.
+
+**Nine more gaps found and fixed continuing the walk from there, each
+root-caused against real FluffOS source before implementing, same as
+every other slice this project has done:**
+
+1. **`all_inventory()`/`deep_inventory()` missing entirely** (func_spec.c:
+   `object *all_inventory(object default: F__THIS_OBJECT);` /
+   `object *deep_inventory(...)`). Confirmed against array.c's own
+   `all_inventory()` (direct children only, no recursion) and
+   `deep_inventory_count()`/`deep_inventory_collect()` (depth-first,
+   target excluded). Backed directly by `LpcObject::inventory_`, already
+   maintained by `VM::moveObject()` -- no new bookkeeping needed. This
+   was the account-creation blocker above.
+2. **`strcmp()` missing**, silently swallowed by `secure/std/login.c`'s
+   own `catch(__Player->setup())` with no console trace -- the same
+   "quiet cascade" shape as the earlier `__HistorySize` investigation.
+   `/secure/daemon/player.c`'s own `sort_list()` needed it; a fresh
+   player's `setup()` was quietly failing to register itself with
+   `player.c`'s own online-player list. Matches real `efuns_main.c`'s
+   `f_strcmp()`: a plain C `strcmp()`.
+3. **`map_delete()` missing**, *not* caught -- fatal to the connection.
+   `std/living/env.c`'s own `remove_env()` (`if(env_var && env_var[env])
+   { map_delete(env_var, env); ... }`), reached unguarded from
+   `domains/Praxis/setter.c`'s `alignment_cmd()`. This is what actually
+   stopped STEP 4 (alignment) from ever reaching STEP 5 (OCC) live.
+   Matches real `efuns_main.c`'s `f_map_delete()`: mutates the mapping
+   in place, void return.
+4. **`clone_object()`/`load_object()` doubled a caller-supplied `.c`
+   extension.** `ObjectManager::compile()` appended `.c` unconditionally,
+   so `daemon/rifts_start_d.c`'s own `give_item(player, "id_card.c")`
+   resolved to a literal, never-existing `id_card.c.c` and aborted
+   `finish_creation()` partway through granting starting equipment --
+   the actual blocker stopping a fresh character from ever reaching a
+   room. New `ObjectManager::normalizeFilename()` strips one trailing
+   `.c` at every entry point (`compile()`, `loadObject()`,
+   `cloneObject()`, `sourceFileExists()`, `lookupLoadedObject()`) so
+   `"id_card"` and `"id_card.c"` resolve to the exact same cache entry
+   and object identity, matching real LPC's own convention that object
+   paths never carry the extension internally.
+5. **`intp()` missing**, the one type predicate not covered alongside
+   `stringp`/`objectp`/`mapp`/`pointerp`/`functionp` from earlier
+   slices. `/domains/Praxis/equipment/id_card.c`'s own `set_value()`
+   needed it directly, reached while granting starting equipment.
+6. **`repeat_string()` missing** (func_spec.c/efun_defs.c: `F_REPEAT_STRING`,
+   real body in `packages/contrib.c`'s `f_repeat_string()`: string
+   concatenated with itself N times, `""` for N <= 0).
+   `cmds/mortal/_score.c`'s own `panel_border()` needed it -- caught by
+   `setter.c`'s own `catch()` around `finish_creation()`'s auto-score-
+   display, so not fatal, but the score panel border was silently never
+   rendering until fixed.
+7. **`present()` missing** (func_spec.c: `object present(object | string,
+   void | object);`). Confirmed against `simulate.c`'s
+   `object_present()`/`object_present2()`: the string form searches a
+   container's direct inventory for an item whose `id()` apply returns
+   truthy (falling back to the calling object's own environment when no
+   container is given and the direct search misses); the object form
+   checks direct-containment or, with no explicit container,
+   sibling-of-current-object. This blocked `domains/ChiTown/areas/
+   chitown_start.c`'s own `reset()` -- the very first starting room a
+   fresh character reaches -- via exactly the `present("id",
+   this_object())` idiom `mudlib/CLAUDE.md`'s rule 11 documents as the
+   standard anti-duplication check. Not implemented: the numbered-suffix
+   form (`"sword 2"`), not confirmed needed anywhere reached live yet.
+8. **The deepest one: `explode()` never matched real FluffOS's own
+   default separator semantics.** Confirmed against fluffos-2.9-ds2.08's
+   own `array.c` `explode_string()` *and* this exact vendored
+   reference's own `options.h` (`#undef SANE_EXPLODE_STRING` / `#undef
+   REVERSIBLE_EXPLODE_STRING` -- the default build any of this mudlib's
+   own content was written against): every **leading** occurrence of the
+   separator is stripped before splitting (repeatedly, not just the one
+   `SANE_EXPLODE_STRING` would limit it to), and the final chunk is only
+   kept if non-empty, so a **trailing** separator never produces a
+   trailing `""` element. This driver's original implementation did a
+   naive split with neither behavior. Root-caused by tracing why
+   `secure/SimulEfun/security.c`'s own `file_privs()` never matched any
+   of its `switch(path[0])` cases for a real object path:
+   `"/domains/..."` exploded on `"/"` produced a leading `""` as
+   `path[0]` instead of `"domains"`, shifting every real path segment
+   one index late -- which is what made every object's compile-time
+   `privs` assignment fail silently (see the next item), which is in
+   turn what made `secure/SimulEfun/log_file.c`'s own
+   `explode(query_privs(previous_object()), ":")` throw for any object
+   reached through it (`domains/Praxis/obj/mon/rift_survivor.c`'s own
+   `set_stats()`/`set_level()`, cloned by the starting room's own
+   `reset()`). The trailing-empty-element half of this same bug had
+   already been worked around locally in `daemon/race.c` (`LIMB_DIR`
+   file reading) in the previous session, before this root cause was
+   found; that guard is left in place as a harmless, independently
+   reasonable defensive check (it matches this mudlib's own
+   `database_filter()` convention, per its own comment) rather than
+   reverted now that the driver itself is fixed.
+9. **A previously entirely missing mechanism: this driver never
+   auto-assigned an object's compile-time `privs`.** Real `simulate.c`'s
+   own `init_privs_for_object()` (called from `init_object()` for every
+   freshly compiled or cloned object, before its own `create()` runs)
+   applies `master()->privs_file(filename)` and stores the result if
+   it's a string. This driver had no equivalent at all -- `query_privs()`
+   only ever returned a real value if a mudlib file called `set_privs()`
+   on itself directly, which essentially nothing in this mudlib does
+   (privs are meant to come from `master.c`'s own `privs_file()`
+   automatically). New `ObjectManager::initPrivsForObject()`, called
+   from both `loadObject()` and `cloneObject()` right after construction,
+   closes this gap. Skipped only when `master_` itself is not loaded yet
+   (matches real `init_privs_for_object()`'s own `!current_object`
+   bootstrap-skip outcome closely enough -- nothing this driver runs
+   depends on the master object's own privs).
+
+Also added **`remove_call_out()`** (func_spec.c: `int
+remove_call_out(int | void | string);`) alongside the fixes above, found
+needing it the same pass: `domains/Praxis/obj/mon/rift_survivor.c`'s own
+`init()` does the common defensive cancel-then-reschedule idiom for a
+repeating `call_out()`. Since this driver's own `call_out()` is a
+documented stub that never actually schedules anything yet
+(`Scheduler::tickCallOuts()` is still an empty body), `remove_call_out()`
+always returns `-1` -- the real "nothing found" outcome, honestly
+reflecting that nothing is ever really pending, not a fake success.
+
+Full suite: 293 tests passing (11 new regression tests this session,
+one per confirmed gap above).
+
+**Confirmed live, full transcript (fresh account `chargenthirteen`,
+scratch instance, port 1123):** login through account creation
+(gender, display name, email, real name all accepted blank), the
+one-time first-account admin-bootstrap offer (declined), zone
+(`americas`), attribute roll/accept, race (`human`, `list` also
+exercised), alignment (`scrupulous`), OCC pick (`vagabond`, the
+empty-`attribute_requirements` case deliberately chosen), automatic
+starting-equipment grant (combat knife, C-18 laser pistol, leather
+jacket, all via real `clone_object()` calls), `finish_creation()`'s own
+automatic room entry:
+
+```
+A Rift tears open around you and reality reassembles.
+You step onto Rifts Earth. Welcome, Human.
+A human appears from the shadows.
+A reinforced shelter of scavenged plating and pre-Rifts ferrocrete,
+built into the corridor between the old Coalition road south to
+Praxis and the checkpoints of Chi-Town to the north. A steady
+trickle of new arrivals passes through here: refugees, mercs, and
+the newly rifted-in alike.
+
+A battered sign is nailed to a support beam near the door. A
+survivor watches the corridor from a folding chair. There are two exits: north, south
+A weathered survivor.
+```
+
+-- and then a separately, explicitly sent `look` command, confirmed
+producing the same real room description a second time (not just
+`finish_creation()`'s own one-shot display): full description, exit
+line, live NPC (`rift_survivor`) present and correctly rendered. This
+is the first time this project has reached a real room with a
+confirmed working `look` command end to end.
+
+**One remaining known gap surfaced live, non-fatal:** `cmds/mortal/
+_score.c`'s own `panel_two_col()` (part of the automatic score display
+`finish_creation()` triggers) uses `sprintf`'s `%*` dynamic-field-width
+specifier, still not implemented (see "Known stubs" below -- this
+extends that existing, already-documented `sprintf` scope limitation,
+not a new one). Caught by `setter.c`'s own `catch()` around
+`finish_creation()`, so it does not block reaching the room or using
+`look` -- only the score panel's two-column layout silently fails to
+render. Test data cleanup: all scratch-instance test accounts created
+this session (`chargenthree` through `chargenthirteen`) were throwaway
+names on the scratch port only, confirmed by mtime to be within this
+session, and deleted (`secure/save/login_accounts/c/*.o`,
+`secure/save/postal/c/*`) before the scratch driver was stopped; no
+player-object save under `secure/save/users/` was ever created (no
+test character reached `quit`).
+
 ## Known stubs / scope limitations (intentional, not bugs)
 
 - Object-bound closures (`(: obj_expr, "funcname" :)`), bare string-
@@ -1680,10 +1948,14 @@ touched mudlib file.
   mishandling if ever called with more args, matching this codebase's
   existing convention for other partially-implemented efuns (e.g.
   `sscanf`'s `%f`/`%x`).
-- `sprintf()` implements only bare `%s`/`%d`, positionally, with no
-  field width/precision/flags and no literal `%%` -- confirmed the only
-  shapes used anywhere on this driver's login/account-creation path;
-  throws on anything else.
+- `sprintf()` implements bare `%s`/`%d`/`%c` (the third added later, see
+  "Three more gaps found live" above), positionally, with no field
+  width/precision/flags and no literal `%%` -- throws on anything else.
+  Confirmed still missing live this session: `%*` (dynamic field width),
+  needed by `cmds/mortal/_score.c`'s own `panel_two_col()` -- caught by
+  `setter.c`'s own `catch()` around `finish_creation()`'s automatic
+  score display, so non-fatal (the score panel's two-column layout
+  silently fails to render), not blocking reaching a room or `look`.
 - `save_object()`/`restore_object()` use this driver's own recursive
   serialization format (see "Working now" above), not real FluffOS's
   on-disk text format. A real, pre-existing save file in that format

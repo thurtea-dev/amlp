@@ -4441,6 +4441,23 @@ static void testCallOutAcceptsRealArgumentShapeAndReturnsHandle() {
     std::cout << "testCallOutAcceptsRealArgumentShapeAndReturnsHandle OK\n";
 }
 
+// remove_call_out() -- always -1 (nothing found), matching real
+// semantics honestly given call_out() above never actually schedules
+// anything in this driver yet. Found live needing this: domains/Praxis/
+// obj/mon/rift_survivor.c's own init().
+static void testRemoveCallOutAlwaysReturnsMinusOneSinceNothingIsEverScheduled() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rco_probe.c",
+        "int probe() { return remove_call_out(\"idle\"); }\n"
+        "void idle() {}\n");
+    auto obj = harness.objects.cloneObject("/rco_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == -1);
+    std::cout << "testRemoveCallOutAlwaysReturnsMinusOneSinceNothingIsEverScheduled OK\n";
+}
+
 static void testCallOtherWithStringTargetResolvesAlreadyLoadedObject() {
     ObjectVarHarness harness;
     harness.writeFile("/daemon_a.c", "int ping() { return 42; }\n");
@@ -5119,6 +5136,92 @@ static void testLoadObjectReturnsNullWhenCompileObjectDeclines() {
     assert(ob == nullptr);
 
     std::cout << "testLoadObjectReturnsNullWhenCompileObjectDeclines OK\n";
+}
+
+// Real simulate.c's own init_privs_for_object(): every freshly compiled
+// or cloned object gets query_privs() populated from
+// master()->privs_file(filename) automatically, with no set_privs()
+// call needed from the object's own code. Found live needing this:
+// secure/SimulEfun/log_file.c's own "explode(query_privs(
+// previous_object()), \":\")" throws when an object's privs were never
+// assigned at all (this driver had no equivalent of init_privs_for_object
+// before this fix -- see ObjectManager.hpp's own comment).
+static void testLoadObjectAndCloneObjectAutoPopulatePrivsFromMasterPrivsFile() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "string privs_file(string file) {\n"
+        "    if(file == \"/priv_item\") return \"TestPriv\";\n"
+        "    return 0;\n"
+        "}\n");
+    harness.writeFile("/priv_item.c",
+        "string probe() { return query_privs(this_object()); }\n");
+    assert(harness.objects.loadMasterObject());
+
+    auto loaded = harness.objects.loadObject("/priv_item");
+    assert(loaded != nullptr);
+    lpcdriver::Value loadedPrivs = harness.vm.callFunction(loaded, "probe", {});
+    auto* loadedStr = std::get_if<std::string>(&loadedPrivs.data);
+    assert(loadedStr != nullptr && *loadedStr == "TestPriv");
+
+    auto cloned = harness.objects.cloneObject("/priv_item");
+    assert(cloned != nullptr);
+    lpcdriver::Value clonedPrivs = harness.vm.callFunction(cloned, "probe", {});
+    auto* clonedStr = std::get_if<std::string>(&clonedPrivs.data);
+    assert(clonedStr != nullptr && *clonedStr == "TestPriv");
+
+    std::cout << "testLoadObjectAndCloneObjectAutoPopulatePrivsFromMasterPrivsFile OK\n";
+}
+
+// explode(string, string) -- confirmed against fluffos-2.9-ds2.08's own
+// array.c explode_string() and this exact vendored reference's own
+// options.h (neither REVERSIBLE_EXPLODE_STRING nor SANE_EXPLODE_STRING
+// defined): all leading separator occurrences are stripped before
+// splitting, and a trailing separator never produces a trailing "".
+// Found live root-causing why secure/SimulEfun/security.c's own
+// file_privs() never matched any switch(path[0]) case for a real
+// "/domains/..." object path.
+static void testExplodeStripsAllLeadingSeparatorsAndNeverEmitsTrailingEmpty() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ex_probe.c",
+        "mixed *leading(string s) { return explode(s, \"/\"); }\n"
+        "mixed *trailing(string s) { return explode(s, \"\\n\"); }\n"
+        "mixed *middle(string s) { return explode(s, \"/\"); }\n"
+        "mixed *all_seps(string s) { return explode(s, \"/\"); }\n");
+    auto ob = harness.objects.cloneObject("/ex_probe");
+    assert(ob != nullptr);
+
+    // Leading "/" stripped entirely -- path[0] must be "domains", not "".
+    lpcdriver::Value leading = harness.vm.callFunction(ob, "leading",
+        {lpcdriver::Value(std::string("/domains/Praxis/rift_survivor"))});
+    auto* leadingArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&leading.data);
+    assert(leadingArr != nullptr && (*leadingArr)->items.size() == 3);
+    assert(std::get<std::string>((*leadingArr)->items[0].data) == "domains");
+    assert(std::get<std::string>((*leadingArr)->items[1].data) == "Praxis");
+    assert(std::get<std::string>((*leadingArr)->items[2].data) == "rift_survivor");
+
+    // Trailing separator: no spurious trailing "" element.
+    lpcdriver::Value trailing = harness.vm.callFunction(ob, "trailing",
+        {lpcdriver::Value(std::string("line one\nline two\n"))});
+    auto* trailingArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&trailing.data);
+    assert(trailingArr != nullptr && (*trailingArr)->items.size() == 2);
+    assert(std::get<std::string>((*trailingArr)->items[1].data) == "line two");
+
+    // A separator in the middle still produces an empty element there --
+    // only LEADING runs are collapsed, nothing in the middle is special.
+    lpcdriver::Value middle = harness.vm.callFunction(ob, "middle",
+        {lpcdriver::Value(std::string("a//b"))});
+    auto* middleArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&middle.data);
+    assert(middleArr != nullptr && (*middleArr)->items.size() == 3);
+    assert(std::get<std::string>((*middleArr)->items[1].data) == "");
+
+    // A string made entirely of the separator explodes to an empty array.
+    lpcdriver::Value allSeps = harness.vm.callFunction(ob, "all_seps",
+        {lpcdriver::Value(std::string("///"))});
+    auto* allSepsArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&allSeps.data);
+    assert(allSepsArr != nullptr && (*allSepsArr)->items.empty());
+
+    std::cout << "testExplodeStripsAllLeadingSeparatorsAndNeverEmitsTrailingEmpty OK\n";
 }
 
 static void testLoadObjectWithNoMasterLoadedFailsCleanlyOnMissingFile() {
@@ -7098,6 +7201,7 @@ int main() {
     testInputToCanReRegisterFromWithinDispatchedHandler();
     testLogonSendsBannerAndRegistersInputToPrompt();
     testCallOutAcceptsRealArgumentShapeAndReturnsHandle();
+    testRemoveCallOutAlwaysReturnsMinusOneSinceNothingIsEverScheduled();
     testCallOtherWithStringTargetResolvesAlreadyLoadedObject();
     testCallOtherWithStringTargetAutoCompilesAndLoadsOnFirstUse();
     testCallOtherWithStringTargetToNonexistentFileThrows();
@@ -7124,6 +7228,8 @@ int main() {
     testLoadVirtualObjectRebindsFilenameToVirtualPath();
     testLoadObjectCachesVirtualObjectAcrossRepeatedCalls();
     testLoadObjectReturnsNullWhenCompileObjectDeclines();
+    testLoadObjectAndCloneObjectAutoPopulatePrivsFromMasterPrivsFile();
+    testExplodeStripsAllLeadingSeparatorsAndNeverEmitsTrailingEmpty();
     testLoadObjectWithNoMasterLoadedFailsCleanlyOnMissingFile();
     testNewEfunIsAnAliasOfCloneObject();
     testStatusTypeKeywordParsesAsPlainIntSynonym();

@@ -415,6 +415,32 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
+    // string *explode(string, string) -- confirmed against
+    // fluffos-2.9-ds2.08's own array.c explode_string(), and against
+    // this exact vendored reference's own options.h (neither
+    // REVERSIBLE_EXPLODE_STRING nor SANE_EXPLODE_STRING defined, the
+    // default build any of this mudlib's own content was written
+    // against): every LEADING occurrence of the separator is stripped
+    // before splitting (repeatedly, not just one -- SANE_EXPLODE_STRING
+    // is what would limit it to one), and the final chunk is only kept
+    // if non-empty, so a string ending in the separator never produces
+    // a trailing "" element either. This driver's original
+    // implementation did a naive split with neither behavior. Found
+    // live root-causing why secure/SimulEfun/security.c's own
+    // file_privs() never matched any of its switch(path[0]) cases for a
+    // real object path ("/domains/..." exploded on "/" produced a
+    // leading "" as path[0] instead of "domains", shifting every real
+    // segment one index late) -- this is what actually blocked every
+    // object's compile-time privs from ever being assigned (see
+    // ObjectManager::initPrivsForObject()), which in turn is what made
+    // secure/SimulEfun/log_file.c's own "explode(query_privs(...), \":\")"
+    // throw for any object reached through it. The trailing-empty-
+    // element half of this same bug was worked around locally in
+    // daemon/race.c (LIMB_DIR file reading) before this root cause was
+    // found; that guard is left in place as a harmless, independently
+    // reasonable defensive check (matching this mudlib's own
+    // database_filter() convention, per its own comment) rather than
+    // reverted.
     t.registerEfun("explode", [](VM&, std::vector<Value>& args) -> Value {
         if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
             !std::holds_alternative<std::string>(args[1].data)) {
@@ -429,11 +455,19 @@ void registerCoreEfuns() {
             return Value(result);
         }
 
-        size_t start = 0;
+        size_t begin = 0;
+        while (str.compare(begin, sep.size(), sep) == 0) {
+            begin += sep.size();
+            if (begin >= str.size()) {
+                return Value(result); // all separators, matches the_null_array
+            }
+        }
+
+        size_t start = begin;
         for (;;) {
             size_t pos = str.find(sep, start);
             if (pos == std::string::npos) {
-                result->items.emplace_back(str.substr(start));
+                if (start < str.size()) result->items.emplace_back(str.substr(start));
                 break;
             }
             result->items.emplace_back(str.substr(start, pos - start));
@@ -776,6 +810,23 @@ void registerCoreEfuns() {
             throw LpcRuntimeError("call_out: second argument must be an int or float delay");
         }
         return Value(int64_t{1});
+    });
+
+    // int remove_call_out(int | void | string) -- func_spec.c's real
+    // signature. Real semantics: cancels a pending call_out (by handle
+    // or function name) and returns the time remaining, or -1 if none
+    // was found. Since this driver's own call_out() (just above) is a
+    // documented stub that validates its arguments and returns a handle
+    // but never actually schedules anything (see STATUS.md's "Known
+    // stubs" -- Scheduler::tickCallOuts() is still an empty body), there
+    // is never really anything pending to remove either -- always -1,
+    // matching the real "not found" outcome exactly rather than
+    // pretending success. Found live needing this: domains/Praxis/obj/
+    // mon/rift_survivor.c's own init() (a real, extremely common
+    // defensive idiom: cancel-then-reschedule a repeating call_out
+    // rather than risk two copies running).
+    t.registerEfun("remove_call_out", [](VM&, std::vector<Value>&) -> Value {
+        return Value(int64_t{-1});
     });
 
     // string capitalize(string) -- efuns_main.c's f_capitalize(): the
