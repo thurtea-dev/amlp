@@ -1,5 +1,40 @@
 # STATUS
 
+**2026-08-08: `throw()` implemented; `catch()` now carries an arbitrary
+value, not just a string.** Picked from several deferred items sitting
+in this file (the Tier 2/3 general-LPC-compliance gaps, the reconnect/
+take-over save-flag bug, and this) as the single most logical next
+task: it is core language completeness rather than mudlib-specific, the
+design was already fully settled in a prior session (blast radius
+measured: 198 `throw LpcRuntimeError(...)` call sites and 14 `.what()`
+call sites across 4-6 files), and it directly matters for testing
+against other mudlibs later, which lean on `catch()`/`throw()` pairs
+for error signaling. Implemented exactly the already-recommended
+design rather than changing `LpcRuntimeError`'s own payload type: a new
+`LpcThrownValue` (`Value.hpp`), a subclass of `LpcRuntimeError` carrying
+the exact `Value` passed to `throw()` -- every one of the existing
+`LpcRuntimeError` throw sites and `.what()` call sites needed zero
+changes. New `throw` efun (real FluffOS: a genuine efun per
+`func_spec.c`'s own `void throw(mixed);`, not special grammar the way
+`catch()` is -- confirmed by reading the vendored source directly, not
+guessed), requiring exactly one argument. `VM::run()`'s catch-frame
+handling gained a dedicated `LpcThrownValue` branch, checked before the
+existing plain `LpcRuntimeError` branch since `LpcThrownValue` is-a
+`LpcRuntimeError`. One real bug found while implementing, not just
+during design: when a function's own `catchFrames` is empty, the
+existing code rewraps the exception into a *new* plain `LpcRuntimeError`
+carrying only a stringified, file/function-prefixed message before
+rethrowing to the caller -- correct for an ordinary runtime error
+(always a string anyway), but for a real `throw(value)` this would have
+silently flattened the original value into a string before it ever
+reached a `catch()` one call further up the stack than the throwing
+function's own. Fixed with a dedicated rethrow-unchanged path for
+`LpcThrownValue` specifically. 5 new regression tests (int/string/array
+values caught verbatim, wrong-argument-count throws, and the critical
+case: `throw()` inside a called function with no `catch()` of its own
+still reaches the caller's `catch()` with the value intact). Full
+suite: 336 tests passing, up from 331, no regressions.
+
 **2026-08-08: `driver/mudlib_stub/` replaced with a minimal test
 mudlib.** Direction change: further mudlib-parity/gap-analysis work on
 the `nightmare3_fluffos_v2` mudlib is paused. The priority is now a
@@ -2315,7 +2350,11 @@ fix).
   literal text between them is not implemented.
 - Postfix/prefix `++`/`--` only support a bare variable name target, not
   an index expression (`arr[i]++`).
-- `throw()` is not implemented (`catch()` is).
+- ~~`throw()` is not implemented (`catch()` is)~~ -- fixed, see the new
+  dated entry at the top of this file: `throw()` is a real efun (matching
+  `func_spec.c`'s own `void throw(mixed);`), hands the exact value it was
+  given back to the nearest `catch()`, including through a called
+  function that has no `catch()` of its own.
 - `replace_string()`'s optional 4th/5th occurrence-range arguments (the
   real efun's `first`/`last` bounds) are not implemented, only the
   plain 3-arg replace-all form -- throws rather than silently

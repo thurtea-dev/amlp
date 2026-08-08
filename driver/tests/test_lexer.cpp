@@ -3533,6 +3533,108 @@ static void testCatchInlineInsideIfConditionMatchesMasterConnectShape() {
     std::cout << "testCatchInlineInsideIfConditionMatchesMasterConnectShape OK\n";
 }
 
+// --- throw() -----------------------------------------------------------
+// Real FluffOS: a real efun (func_spec.c: "void throw(mixed);"), not
+// special grammar the way catch() is -- see EfunTable.cpp's own
+// registration comment. Unlike an ordinary runtime error, which catch()
+// always sees as a string message, throw() hands back the *exact* value
+// it was given, of any type -- confirmed against interpret.c's own
+// catch_value svalue_t (not a string-typed field).
+
+static void testThrowIntIsCaughtVerbatimByCatch() {
+    lpcdriver::Value result = runProbe(
+        "mixed err;\n"
+        "err = catch(throw(42));\n"
+        "return err;\n");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+
+    std::cout << "testThrowIntIsCaughtVerbatimByCatch OK\n";
+}
+
+static void testThrowStringIsCaughtVerbatimByCatch() {
+    lpcdriver::Value result = runProbe(
+        "mixed err;\n"
+        "err = catch(throw(\"custom error\"));\n"
+        "return err;\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "custom error");
+
+    std::cout << "testThrowStringIsCaughtVerbatimByCatch OK\n";
+}
+
+static void testThrowArrayValueIsCaughtVerbatimByCatch() {
+    // The actual point of the feature: an ordinary runtime error can
+    // only ever produce a string, but throw() can hand back any value,
+    // including a structured one -- a real, common LPC idiom for
+    // signaling an error code plus data together.
+    lpcdriver::Value result = runProbe(
+        "mixed err;\n"
+        "err = catch(throw(({ \"ERR_CODE\", 7 })));\n"
+        "return err;\n");
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::Array>>(result.data));
+    auto arr = std::get<std::shared_ptr<lpcdriver::Array>>(result.data);
+    assert(arr != nullptr);
+    assert(arr->items.size() == 2);
+    assert(std::holds_alternative<std::string>(arr->items[0].data));
+    assert(std::get<std::string>(arr->items[0].data) == "ERR_CODE");
+    assert(std::holds_alternative<int64_t>(arr->items[1].data));
+    assert(std::get<int64_t>(arr->items[1].data) == 7);
+
+    std::cout << "testThrowArrayValueIsCaughtVerbatimByCatch OK\n";
+}
+
+static void testThrowWithWrongArgCountThrowsLpcRuntimeError() {
+    bool threw = false;
+    try {
+        runProbe("throw();\nreturn 0;\n");
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testThrowWithWrongArgCountThrowsLpcRuntimeError OK\n";
+}
+
+// The critical case: throw() inside a called function that has no
+// catch() of its own must still reach the *caller*'s catch() with the
+// exact original value intact, not flattened into a rewrapped string
+// LpcRuntimeError -- confirmed by reading VM::run()'s own no-active-
+// catch-frame branch, which does exactly that flattening for an
+// ordinary LpcRuntimeError (adding a "file::function(): " prefix to the
+// message) and would silently destroy a thrown array/int the same way
+// without its own dedicated LpcThrownValue branch ahead of it.
+static void testThrowInsideCalledFunctionWithNoCatchOfItsOwnReachesCallersCatchIntact() {
+    ObjectVarHarness harness;
+
+    harness.writeFile("/callee.c",
+        "int explode_now() {\n"
+        "    throw(({ \"ERR_CODE\", 99 }));\n"
+        "    return 0;\n"
+        "}\n");
+
+    harness.writeFile("/caller.c",
+        "mixed probe() {\n"
+        "    object callee;\n"
+        "    mixed err;\n"
+        "    callee = clone_object(\"/callee\");\n"
+        "    err = catch(callee->explode_now());\n"
+        "    return err;\n"
+        "}\n");
+
+    auto caller = harness.objects.cloneObject("/caller");
+    assert(caller != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::Array>>(result.data));
+    auto arr = std::get<std::shared_ptr<lpcdriver::Array>>(result.data);
+    assert(arr != nullptr);
+    assert(arr->items.size() == 2);
+    assert(std::get<std::string>(arr->items[0].data) == "ERR_CODE");
+    assert(std::get<int64_t>(arr->items[1].data) == 99);
+
+    std::cout << "testThrowInsideCalledFunctionWithNoCatchOfItsOwnReachesCallersCatchIntact OK\n";
+}
+
 // --- adjacent string literal concatenation --------------------------
 // Hit immediately after the & operator while re-attempting the real
 // master.c boot (a shout() message split across two source lines purely
@@ -8525,6 +8627,11 @@ int main() {
     testCatchLogsTrappedErrorToStderrByDefault();
     testCatchTrapsErrorThrownInsideCalledFunctionWithNoCatchOfItsOwn();
     testCatchInlineInsideIfConditionMatchesMasterConnectShape();
+    testThrowIntIsCaughtVerbatimByCatch();
+    testThrowStringIsCaughtVerbatimByCatch();
+    testThrowArrayValueIsCaughtVerbatimByCatch();
+    testThrowWithWrongArgCountThrowsLpcRuntimeError();
+    testThrowInsideCalledFunctionWithNoCatchOfItsOwnReachesCallersCatchIntact();
     testAdjacentStringLiteralsParseAsSingleConcatenatedLiteral();
     testAdjacentStringLiteralsVmExecution();
     testBreakAndContinueParseToDedicatedStmtNodes();

@@ -1782,6 +1782,30 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 throw NotImplementedError(
                     "VM::run opcode " + std::to_string(static_cast<int>(instr.op)));
         }
+      } catch (const LpcThrownValue& tv) {
+        // A real LPC throw(value) -- caught separately from the plain
+        // LpcRuntimeError case just below (this handler must come first;
+        // LpcThrownValue is-a LpcRuntimeError) specifically so the
+        // no-active-catch-frame path never flattens it into a rewrapped
+        // string LpcRuntimeError the way an ordinary runtime error is
+        // just below. Real throw(value) must reach the *nearest*
+        // catch(), anywhere up the call stack, with the exact value
+        // still intact -- rewrapping here would silently turn
+        // "throw(({\"ERR\", data}))" into a plain string by the time it
+        // reached a catch() one function call further up than this
+        // one's own (empty) catchFrames.
+        if (catchFrames.empty()) {
+            throw;
+        }
+
+        std::cerr << "[catch] " << obj->filename() << "::" << fn.name
+                   << "(): " << tv.what() << "\n";
+
+        CatchFrame frame = catchFrames.back();
+        catchFrames.pop_back();
+        localStack.resize(frame.stackDepth);
+        localStack.push_back(tv.value);
+        ip = frame.resumeIp;
       } catch (const LpcRuntimeError& e) {
         // No active catch() anywhere in this call: behave exactly as
         // before catch() existed, propagate to whatever wraps this

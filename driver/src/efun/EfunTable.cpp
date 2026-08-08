@@ -1536,6 +1536,21 @@ void registerCoreEfuns() {
         throw LpcRuntimeError(msg);
     });
 
+    // void throw(mixed) -- real FluffOS: a real efun (func_spec.c: "void
+    // throw(mixed);", not special grammar the way catch() is), taking
+    // exactly one argument of any type (efun_defs.c's own min/max arg
+    // count for F_THROW is 1/1). Unlike error(), which is always a
+    // string, throw() hands the *exact* value given back to the nearest
+    // enclosing catch() -- see Value.hpp's own LpcThrownValue comment for
+    // the full citation trail and why this is a dedicated exception type
+    // rather than a change to LpcRuntimeError itself.
+    t.registerEfun("throw", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() != 1) {
+            throw LpcRuntimeError("throw: expected exactly one argument");
+        }
+        throw LpcThrownValue(args[0]);
+    });
+
     // void set_eval_limit(int x) -- real FluffOS raises (or, with -1,
     // restores) the per-call eval-cost ceiling, guarded so only master()
     // can call it at all (secure/SimulEfun/SimulEfun.c's own wrapper:

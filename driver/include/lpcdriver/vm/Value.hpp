@@ -4,6 +4,7 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include "lpcdriver/core/Errors.hpp"
 
 namespace lpcdriver {
 
@@ -35,6 +36,41 @@ struct Value {
 
 bool isTruthy(const Value& v);
 bool valuesEqual(const Value& a, const Value& b);
+
+// throw(mixed) -- real FluffOS's own F_THROW (efuns_main.c's f_throw():
+// stores the argument into the single global "value to hand back to the
+// nearest catch()" (catch_value, interpret.h), then unwinds via the same
+// longjmp a runtime error already uses; func_spec.c: "void throw(mixed);"
+// -- a real efun, not special grammar the way catch() is). This driver's
+// catch() is already implemented as real C++ try/catch bracketing rather
+// than setjmp/longjmp (see VM::run()'s own PushCatchFrame/PopCatchFrame
+// handling), so throw()'s "carry an arbitrary value to the nearest
+// catch()" role is ported the same way: a dedicated exception type
+// carrying the real Value, deliberately kept as a subclass of
+// LpcRuntimeError rather than changing LpcRuntimeError's own payload
+// type -- every existing "throw LpcRuntimeError(...)" call site across
+// the compiler/VM/efun table, and every .what() call site that prints
+// one, keeps working completely unchanged; only VM::run()'s own
+// catch-frame handler needs to tell the two apart (see its own comment).
+class LpcThrownValue : public LpcRuntimeError {
+public:
+    explicit LpcThrownValue(Value v)
+        : LpcRuntimeError(describeForWhat(v)), value(std::move(v)) {}
+
+    Value value;
+
+private:
+    // Only used if this ever reaches an uncaught-error diagnostic path
+    // (the [object]/[net]-prefixed .what() printers) instead of a
+    // catch() -- real LPC throw() calls overwhelmingly carry a plain
+    // string, matching an ordinary error() message; a non-string thrown
+    // value gets a generic placeholder here rather than a full
+    // generic Value formatter nothing else in this driver has either.
+    static std::string describeForWhat(const Value& v) {
+        if (auto* s = std::get_if<std::string>(&v.data)) return *s;
+        return "thrown non-string value";
+    }
+};
 
 struct Array {
     std::vector<Value> items;
