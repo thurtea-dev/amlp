@@ -3,6 +3,80 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-09: `sprintf()`'s `"|"` centre-justify field modifier
+implemented; two stale Known Stubs claims corrected, one investigated
+and disproven.** Per this session's own added instruction, re-verified
+every remaining Known Stubs candidate against the real reference source
+rather than trusting an existing description, the same way that caught
+`find_player()`'s own real bug last slice. Re-confirmed (not just
+re-asserted) that array `&` intersection, `compile_object()`'s virtual-
+clone gap, and `set_eval_limit()` all stay narrow/low-risk on fresh
+inspection -- same conclusions as before, arrived at independently
+rather than assumed. `to_int()`'s buffer case is still unreachable in
+principle: `Value.hpp`'s own variant list has no buffer type at all,
+confirmed by reading it directly again.
+
+Two real, previously undetected doc problems found this pass, both
+corrected: the `sprintf()` Known Stubs bullet was badly stale -- it
+described a several-sessions-old state ("bare `%s`/`%d`/`%c`... no
+field width/precision/flags") flatly contradicted by the efun's own
+current implementation and its own top comment, which already documents
+field width, left-justify, zero-pad, colon mode, dynamic `*` width and
+precision, and `%o`/`%x` -- all added in sessions whose own dated
+entries are already in this file or its archive, just never reflected
+back into the summary bullet. The `find_player()`/`userp()` bullet's
+own most recent correction (last slice) was itself re-verified and
+holds up on a second look, no new problem there.
+One real, live-reachable gap investigated to ground truth rather than
+guessed at: whether the `$1`/`$(name)` closure-lambda forms (recorded,
+still unimplemented, in this file's own archived closures recon,
+"confirmed... none on this driver's current path") might now be
+live-reachable, since `filter()`/`map()` grep across the mudlib turned
+up several real call sites using that exact form, including inside
+`daemon/chat.c`'s own `do_chat()` -- called from `std/living.c`'s
+general command-dispatch fallback for any unrecognized verb, a path
+every single mistyped or unrecognized player command reaches. Checked
+directly with a standalone compile probe against this driver's own
+`ObjectManager` (real mudlib root, no server/listener involved) rather
+than assumed: `daemon/chat.c` (the actual file `CHAT_D` resolves to,
+confirmed via `secure/include/daemons.h`) compiles cleanly under this
+driver today. The `$1` usage that looked alarming is in a different,
+unrelated file, `secure/daemon/chat.c`, not reachable from `std/
+living.c`'s own dispatch fallback -- the original archived assessment
+holds, this was a false alarm resolved by checking rather than
+extrapolating from a filename match.
+
+The actual pick: real usage confirmed (`secure/SimulEfun/misc.c`'s own
+`dump_socket_status()`, `"%2d  %|9s  %|8s  %-21s  %-21s\n"`), currently
+throwing a clear "unsupported format specifier" error the instant that
+function runs, since `"|"` was one of the several field-justify
+modifiers this driver's own `sprintf()` never implemented. Small and
+well-scoped once actually read against `fluffos-2.9-ds2.08/sprintf.c`
+directly: `"|"` is parsed as a plain sibling flag alongside the already-
+implemented `"-"` (`INFO_J_CENTRE` next to `INFO_J_LEFT` in the same
+flag-parsing switch), and its own `add_justified()` shows the exact
+padding split -- when the total padding does not divide evenly, the
+extra character goes on the *leading* side (`"i = fs / 2 + fs % 2"`),
+not the trailing one, a real detail that would have been easy to get
+backwards without reading the source directly.
+
+Implementation: `EfunTable.cpp`'s `sprintf()` gained a `centreJustify`
+flag recognized alongside the existing `"-"`/`":"` modifier scan, and
+its final padding step now branches three ways (left/centre/right)
+instead of two, splitting centre padding via the same `lead = padLen /
+2 + padLen % 2` formula confirmed above. Zero-padding is suppressed for
+centre-justify, matching this driver's own existing precedent for
+left-justify (zero-padding a centred value has no real meaning either).
+2 new regression tests: the real call site's own exact shape (`"%|9s"`,
+even padding, split evenly) and an odd-padding case confirming the
+extra character lands on the left, not the right. Full suite: 367 tests
+passing, up from 365, no regressions. Not live-verified over a socket
+this slice -- unlike recent picks, this is a pure string-formatting
+change with no connection/protocol state involved, and the regression
+tests already exercise the exact real format string byte for byte, so a
+network-level check would not add anything the unit tests do not
+already prove.
+
 **2026-08-09: `find_player()` now uses real O_ONCE_INTERACTIVE
 semantics instead of "currently connected", and `find_living()` is a
 real efun for the first time.** Same standard as the last several
@@ -328,66 +402,6 @@ correctly reported every one of its real variables (`__Names` through
 `__TmpBanish`) as present and empty, with the driver's own console log
 staying silent throughout.
 
-**2026-08-08: `destruct()` now closes the destructed object's OWN
-connection, not whichever connection happens to be `current()`.** This
-was the bug flagged, but deliberately left unfixed, at the end of the
-previous slice's own report. Weighed against the remaining Known Stubs
-list (array `&` intersection ordering, `replace_string()`'s range
-args, `to_int()`'s missing buffer case, `implode()`'s function-per-
-element form, `query_ip_name()`'s no-DNS fallback -- all either narrow
-edge cases nothing live has ever hit, or cases that already throw a
-clear error rather than misbehaving silently) and the reconnect/take-
-over save-flag bug (stays paused, mudlib-specific): this was the clear
-pick, both because it directly follows from last slice's own `net_dead()`
-work and because it is real-world reachable in the exact way that has
-driven every recent pick -- any mudlib with a wizard `boot`/kick command
-hits it, and the previous slice's own `O_DESTRUCTED` guard had
-inadvertently made the failure mode worse, not just unfixed: a
-"kicked" player's connection used to at least keep functioning
-normally (the bug predates that guard); now their commands went
-silently inert instead (`VM::callFunction()`/`dispatchCommand()` both
-already refuse a destructed target) while their socket stayed open --
-no error, no disconnect, nothing dispatched, forever, until they closed
-the client themselves.
-
-Root cause (`EfunTable.cpp`'s `destruct` efun): it looked up
-`OutputContext::current()` -- the connection driving *this call* -- and
-only closed it if that connection's own bound object happened to match
-the object being destructed. Real `destruct_object()`'s own actual rule
-(`simulate.c`: `if (ob->interactive) remove_interactive(ob, 1);`) has
-nothing to do with which connection is currently active; it is always
-the destructed object's *own* interactive. Fixed by looking the
-connection up via `InteractiveRegistry::find(ob)` (the same object-to-
-`Connection*` lookup `message()`/`tell_object()` already use to reach an
-arbitrary target) and closing that instead. `Connection::close()`
-itself already does the `InteractiveRegistry` removal (see its own
-comment), so this also let the previous slice's separate, unconditional
-`InteractiveRegistry::remove(ob)` call be deleted entirely -- redundant
-once `close()` runs, and correctly a no-op via `find()` returning null
-when `ob` was never interactive at all, matching real `if
-(ob->interactive)` exactly rather than approximating it.
-
-3 new regression tests: the actual bug (an "actor" object destructs a
-*different*, still-connected object while its own connection is
-`current()` -- confirms the target's connection actually closes and the
-actor's own is untouched), the pre-existing case this fix must not
-break (`secure/std/login.c`'s own `internal_remove()` pattern,
-`destruct(this_object())` on the object bound to the *currently active*
-connection -- still closes correctly), and destructing a plain, never-
-interactive object (confirms `InteractiveRegistry::find()` returning
-null is a clean no-op, no crash, real `if (ob->interactive)` semantics).
-Full suite: 347 tests passing, up from 344, no regressions. Live-
-confirmed end to end on port 1129: added a minimal `cmd_boot(string)`
-to `mudlib_stub/obj/user.c` (destructs another named player's object in
-the same room -- a stand-in for a real mudlib's admin boot command,
-existing purely to exercise this fix live, same rationale as last
-slice's `net_dead()` addition to the same file) and drove two
-connections, Alice booting Bob. Bob's own socket received a genuine
-EOF immediately (confirmed by a real `recv()` on Bob's own side, not
-just inferred from Alice's output), a post-boot command attempt from
-Bob's side produced nothing further (socket already gone), and Alice's
-own connection was completely unaffected throughout. Driver console log
-stayed silent (no errors, no crash).
 
 ## Known stubs / scope limitations (intentional, not bugs)
 
@@ -442,14 +456,22 @@ stayed silent (no errors, no crash).
   mishandling if ever called with more args, matching this codebase's
   existing convention for other partially-implemented efuns (e.g.
   `sscanf`'s `%f`/`%x`).
-- `sprintf()` implements bare `%s`/`%d`/`%c` (the third added later, see
-  "Three more gaps found live" above), positionally, with no field
-  width/precision/flags and no literal `%%` -- throws on anything else.
-  Confirmed still missing live this session: `%*` (dynamic field width),
-  needed by `cmds/mortal/_score.c`'s own `panel_two_col()` -- caught by
-  `setter.c`'s own `catch()` around `finish_creation()`'s automatic
-  score display, so non-fatal (the score panel's two-column layout
-  silently fails to render), not blocking reaching a room or `look`.
+- ~~`sprintf()` implements bare `%s`/`%d`/`%c`... positionally, with no
+  field width/precision/flags and no literal `%%` -- throws on anything
+  else. Confirmed still missing live this session: `%*` (dynamic field
+  width)~~ -- stale, this bullet described a several-sessions-old state
+  never reflected back here as the efun grew (see its own top comment
+  in `EfunTable.cpp` for the real, session-by-session citation trail).
+  Actually implemented today: `%s`/`%d`/`%c`/`%o`/`%x`, literal `%%`,
+  field width (literal or dynamic via `%*`), precision (via `.`n or
+  `.*`, meaningful for `%s`), and three justify modes -- `-` (left),
+  `|` (centre, added this slice, see the new dated entry at the top of
+  this file), and right (default), plus zero-padding. Still not
+  implemented, throws a clear error rather than mishandling: `=`
+  (column mode), `#` (table mode), `@` (array-spread), `'X'` (custom pad
+  string), ` `/`+` (positive-integer pad), `%O` (LPC datatype dump),
+  `%f` (float), capital `%X`, and `%0*` (zero-padded dynamic width,
+  deliberately excluded -- see the efun's own comment).
 - ~~`save_object()`/`restore_object()` use this driver's own recursive
   serialization format ... A real, pre-existing save file in that
   format ... is not parsed -- every line is silently skipped~~ --

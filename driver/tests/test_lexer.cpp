@@ -8704,6 +8704,26 @@ static void testSprintfFieldWidthDoesNotTruncateAWiderValue() {
     std::cout << "testSprintfFieldWidthDoesNotTruncateAWiderValue OK\n";
 }
 
+static void testSprintfCentreJustifiedFieldWidthSplitsPaddingEvenly() {
+    // real sprintf.c's own add_justified(): "abc" in a field of 9 pads
+    // 6 total, 3 on each side when the padding divides evenly -- the
+    // exact shape secure/SimulEfun/misc.c's own dump_socket_status()
+    // uses ("%|9s").
+    lpcdriver::Value result = runProbe("return sprintf(\"[%|9s]\", \"abc\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[   abc   ]");
+    std::cout << "testSprintfCentreJustifiedFieldWidthSplitsPaddingEvenly OK\n";
+}
+
+static void testSprintfCentreJustifiedFieldWidthPutsExtraPadOnTheLeft() {
+    // real add_justified(): "i = fs / 2 + fs % 2" -- when the padding is
+    // odd, the extra character goes on the leading side, not trailing.
+    lpcdriver::Value result = runProbe("return sprintf(\"[%|5s]\", \"ab\");\n");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "[  ab ]");
+    std::cout << "testSprintfCentreJustifiedFieldWidthPutsExtraPadOnTheLeft OK\n";
+}
+
 static void testSprintfStringFieldWidthLeftJustifies() {
     lpcdriver::Value result = runProbe("return sprintf(\"[%-5s]\", \"ab\");\n");
     assert(std::holds_alternative<std::string>(result.data));
@@ -9641,6 +9661,8 @@ int main() {
     testSprintfRightJustifiedFieldWidthPadsWithSpaces();
     testSprintfZeroPaddedFieldWidthPadsWithZeros();
     testSprintfFieldWidthDoesNotTruncateAWiderValue();
+    testSprintfCentreJustifiedFieldWidthSplitsPaddingEvenly();
+    testSprintfCentreJustifiedFieldWidthPutsExtraPadOnTheLeft();
     testSprintfStringFieldWidthLeftJustifies();
     testSprintfDoublePercentEmitsLiteralPercentAndConsumesNoArgument();
     testSprintfColonFieldWidthPadsAShorterStringLeftJustified();

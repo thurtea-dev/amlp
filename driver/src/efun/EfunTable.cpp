@@ -1038,13 +1038,19 @@ void registerCoreEfuns() {
     // enough combination that it is not worth the added parsing
     // ambiguity with the plain "*" case, throws its own clear error
     // rather than being silently misparsed as a stray "%*" specifier.
-    // Still scoped, not the full real modifier set: "|" (centre), "="
-    // (column mode), "#" (table mode), "@" (array-spread), "'X'"
-    // (custom pad string), " "/"+" (positive-integer pad), "%O" (LPC
-    // datatype), "%f" (float), and capital "%X" are all not
-    // implemented; throws rather than silently mishandling anything
-    // else, matching this codebase's existing convention for other
-    // partially-implemented efuns.
+    // "|" (centre-justify) added this slice, confirmed real-reachable:
+    // secure/SimulEfun/misc.c's own dump_socket_status()
+    // ("%2d  %|9s  %|8s  %-21s  %-21s\n") -- grounded directly in
+    // sprintf.c's own add_justified(): when the padding does not split
+    // evenly, the extra character goes on the *leading* side ("i = fs /
+    // 2 + fs % 2"), not the trailing one.
+    //
+    // Still scoped, not the full real modifier set: "=" (column mode),
+    // "#" (table mode), "@" (array-spread), "'X'" (custom pad string),
+    // " "/"+" (positive-integer pad), "%O" (LPC datatype), "%f" (float),
+    // and capital "%X" are all not implemented; throws rather than
+    // silently mishandling anything else, matching this codebase's
+    // existing convention for other partially-implemented efuns.
     t.registerEfun("sprintf", [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("sprintf: expected a string format argument");
@@ -1095,9 +1101,11 @@ void registerCoreEfuns() {
             // real mechanism this mudlib uses throughout for
             // column-aligned list output like the race/OCC lists).
             bool leftJustify = false;
+            bool centreJustify = false;
             bool colonMode = false;
-            while (i + 1 < fmt.size() && (fmt[i + 1] == '-' || fmt[i + 1] == ':')) {
+            while (i + 1 < fmt.size() && (fmt[i + 1] == '-' || fmt[i + 1] == ':' || fmt[i + 1] == '|')) {
                 if (fmt[i + 1] == '-') leftJustify = true;
+                else if (fmt[i + 1] == '|') centreJustify = true;
                 else colonMode = true;
                 ++i;
             }
@@ -1235,9 +1243,19 @@ void registerCoreEfuns() {
                 }
             }
             if (haveWidth && static_cast<int>(piece.size()) < fieldWidth) {
-                std::string pad(static_cast<size_t>(fieldWidth) - piece.size(),
-                                 zeroPad && !leftJustify ? '0' : ' ');
-                piece = leftJustify ? (piece + pad) : (pad + piece);
+                int padLen = fieldWidth - static_cast<int>(piece.size());
+                char padChar = (zeroPad && !leftJustify && !centreJustify) ? '0' : ' ';
+                if (centreJustify) {
+                    // real sprintf.c's own add_justified(): the leading
+                    // half gets the extra character when padLen is odd
+                    // ("i = fs / 2 + fs % 2"), not the trailing half.
+                    int lead = padLen / 2 + padLen % 2;
+                    piece = std::string(static_cast<size_t>(lead), padChar) + piece +
+                        std::string(static_cast<size_t>(padLen - lead), padChar);
+                } else {
+                    std::string pad(static_cast<size_t>(padLen), padChar);
+                    piece = leftJustify ? (piece + pad) : (pad + piece);
+                }
             }
             result += piece;
         }
