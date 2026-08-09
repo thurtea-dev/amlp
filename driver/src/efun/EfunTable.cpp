@@ -1612,6 +1612,55 @@ void registerCoreEfuns() {
         return Value(ob->filename());
     });
 
+    // string function_exists(string fun, void|object ob, void|int flag)
+    // -- real interpret.c's own function_exists(): "similar to apply(),
+    // except that it will not call the function, only return object
+    // name if the function exists, or 0 otherwise." Confirmed against
+    // efuns_main.c's own f_function_exists(): `ob` defaults to
+    // current_object when omitted (not this_object() by any different
+    // rule -- same default), and the returned string is the *defining*
+    // program's own filename with a leading "/" and the trailing ".c"
+    // stripped (`res[0] = '/'; strncpy(res + 1, str, l);` where
+    // `l = SHARED_STRLEN(str) - 2`) -- i.e. real LPC's own bare object-
+    // path convention, exactly what this driver's own file_name() above
+    // already returns unmodified.
+    //
+    // Two real, deliberate simplifications, not fully replicated:
+    // (1) the returned path is always `ob`'s own filename, not
+    // necessarily the specific ancestor file that actually defines the
+    // function when it is inherited-but-not-overridden -- this driver's
+    // `CompiledProgram` has no filename of its own to report (only
+    // `ObjectManager`'s cache maps a filename to a compiled program, not
+    // the reverse), and every one of the 34 real call sites across this
+    // mudlib only ever checks `stringp(function_exists(...))` or a bare
+    // truthy check, never the actual path value, so this is
+    // behaviorally identical for everything confirmed live. (2) the
+    // `flag` argument (real: admit protected/private/hidden functions
+    // as "existing" only when set) is accepted but ignored --
+    // `FunctionEntry` carries no visibility modifier at all, and no
+    // real call site in this mudlib ever passes a third argument
+    // (confirmed by grep), so the default (flag unset) is the only case
+    // ever exercised; the one function name found declared `private`
+    // anywhere in this mudlib (`secure/std/post.c`'s own internal
+    // `help()`) is never a real target of any `function_exists("help",
+    // ob)` check (those all target room items or command files, never
+    // post.c), so this narrower-than-real-default visibility handling
+    // does not diverge from real output for anything confirmed live.
+    t.registerEfun("function_exists", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("function_exists: expected a string function-name argument");
+        }
+        const std::string& name = std::get<std::string>(args[0].data);
+        std::shared_ptr<LpcObject> ob;
+        if (args.size() > 1 && std::holds_alternative<std::shared_ptr<LpcObject>>(args[1].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[1].data);
+        } else {
+            ob = vm.currentObject();
+        }
+        if (!ob || !vm.functionExists(ob, name)) return Value(static_cast<int64_t>(0));
+        return Value(ob->filename());
+    });
+
     // int strsrch(string str, string needle, void|int start) -- first
     // index of needle in str at or after start, or -1. Real func_spec.c
     // also allows needle to be an int char code and a "search

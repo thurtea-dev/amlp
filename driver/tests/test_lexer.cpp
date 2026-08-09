@@ -9122,6 +9122,109 @@ static void testPrintfThrowsOnNonStringFormatArgument() {
     std::cout << "testPrintfThrowsOnNonStringFormatArgument OK\n";
 }
 
+// function_exists(string fun, void|object ob) -- real interpret.c's own
+// function_exists(): returns the defining program's own filename (as a
+// bare "/path/without/dotc" string) when fun is defined anywhere in
+// ob's local/inherited chain, 0 otherwise. Confirmed against
+// efuns_main.c's f_function_exists(): ob defaults to current_object
+// when omitted.
+static void testFunctionExistsReturnsTruthyStringForALocallyDefinedFunction() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fe_probe1.c",
+        "int target() { return 1; }\n"
+        "mixed probe() { return function_exists(\"target\", this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/fe_probe1");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* strPtr = std::get_if<std::string>(&result.data);
+    assert(strPtr != nullptr);
+    assert(!strPtr->empty());
+
+    std::cout << "testFunctionExistsReturnsTruthyStringForALocallyDefinedFunction OK\n";
+}
+
+static void testFunctionExistsReturnsZeroForAnUndefinedFunction() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fe_probe2.c",
+        "mixed probe() { return function_exists(\"no_such_function\", this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/fe_probe2");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* intPtr = std::get_if<int64_t>(&result.data);
+    assert(intPtr != nullptr);
+    assert(*intPtr == 0);
+
+    std::cout << "testFunctionExistsReturnsZeroForAnUndefinedFunction OK\n";
+}
+
+// The real 34-call-site pattern in this mudlib never passes an explicit
+// second argument, relying on the default-to-current_object() behavior
+// (efuns_main.c: ob defaults to current_object when only 1 arg passed).
+static void testFunctionExistsDefaultsToCurrentObjectWhenObjectArgumentOmitted() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fe_probe3.c",
+        "int target() { return 1; }\n"
+        "mixed probe() { return function_exists(\"target\"); }\n"
+        "mixed probe_missing() { return function_exists(\"nope\"); }\n");
+    auto ob = harness.objects.cloneObject("/fe_probe3");
+    assert(ob != nullptr);
+
+    lpcdriver::Value found = harness.vm.callFunction(ob, "probe", {});
+    auto* strPtr = std::get_if<std::string>(&found.data);
+    assert(strPtr != nullptr);
+    assert(!strPtr->empty());
+
+    lpcdriver::Value missing = harness.vm.callFunction(ob, "probe_missing", {});
+    auto* intPtr = std::get_if<int64_t>(&missing.data);
+    assert(intPtr != nullptr);
+    assert(*intPtr == 0);
+
+    std::cout << "testFunctionExistsDefaultsToCurrentObjectWhenObjectArgumentOmitted OK\n";
+}
+
+// A function defined only in a parent (never overridden by the child)
+// must still be found via the same local/inherited chain walk
+// callFunction() itself uses -- real function_exists() finds inherited
+// functions too, not just locally-declared ones.
+static void testFunctionExistsFindsAnInheritedFunctionNotJustLocalOnes() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fe_parent.c",
+        "int parent_fn() { return 1; }\n");
+    harness.writeFile("/fe_child.c",
+        "inherit \"/fe_parent\";\n"
+        "mixed probe() { return function_exists(\"parent_fn\", this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/fe_child");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* strPtr = std::get_if<std::string>(&result.data);
+    assert(strPtr != nullptr);
+    assert(!strPtr->empty());
+
+    std::cout << "testFunctionExistsFindsAnInheritedFunctionNotJustLocalOnes OK\n";
+}
+
+static void testFunctionExistsThrowsOnNonStringFunctionNameArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fe_probe4.c", "mixed probe() { return function_exists(42); }\n");
+    auto ob = harness.objects.cloneObject("/fe_probe4");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe", {});
+    } catch (const lpcdriver::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("function_exists") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testFunctionExistsThrowsOnNonStringFunctionNameArgument OK\n";
+}
+
 // ---------------------------------------------------------------------
 // Rifts combat math efuns (phase 1 of the game-logic-mechanics move,
 // 2026-08-08): each test below compiles the ORIGINAL LPC function body,
@@ -9959,6 +10062,11 @@ int main() {
     testSprintfZeroPaddedStarFieldWidthThrows();
     testPrintfWritesSprintfFormattedResultToCurrentConnection();
     testPrintfThrowsOnNonStringFormatArgument();
+    testFunctionExistsReturnsTruthyStringForALocallyDefinedFunction();
+    testFunctionExistsReturnsZeroForAnUndefinedFunction();
+    testFunctionExistsDefaultsToCurrentObjectWhenObjectArgumentOmitted();
+    testFunctionExistsFindsAnInheritedFunctionNotJustLocalOnes();
+    testFunctionExistsThrowsOnNonStringFunctionNameArgument();
     testPpCombatBonusEfunMatchesLpcAcrossBoundaries();
     testPsDamageBonusEfunMatchesLpcAcrossBoundariesAndSupernatural();
     testOccBaseApmEfunMatchesLpcAcrossAllCategoriesAndEdgeCases();

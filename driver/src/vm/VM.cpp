@@ -499,6 +499,11 @@ Value VM::callFunctionInProgram(const std::shared_ptr<LpcObject>& obj, const Com
     return Value{};
 }
 
+bool VM::functionExists(const std::shared_ptr<LpcObject>& obj, const std::string& functionName) const {
+    if (!obj || obj->isDestructed()) return false;
+    return findFunctionInChain(obj->program(), functionName).program != nullptr;
+}
+
 Value VM::applyMaster(const std::string& applyName, std::vector<Value> args) {
     auto master = objects_.masterObject();
     if (!master) {

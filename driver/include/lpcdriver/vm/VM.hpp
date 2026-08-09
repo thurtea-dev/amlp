@@ -47,6 +47,18 @@ public:
     Value callFunctionInProgram(const std::shared_ptr<LpcObject>& obj, const CompiledProgram& program,
                                  const std::string& functionName, std::vector<Value> args);
 
+    // Backs the function_exists() efun: true if functionName is defined
+    // anywhere in obj's own local/inherited chain (the same
+    // findFunctionInChain() walk callFunction() itself uses to resolve a
+    // bare or call_other call), false otherwise -- does not call it, and
+    // does not distinguish public from real O_DESTRUCTED-adjacent
+    // protected/private/hidden visibility the way real function_exists()'s
+    // own third "flag" argument does (this driver's own FunctionEntry
+    // carries no visibility modifier at all -- see function_exists()'s
+    // own EfunTable.cpp comment for why nothing confirmed live in this
+    // mudlib needs that distinction).
+    bool functionExists(const std::shared_ptr<LpcObject>& obj, const std::string& functionName) const;
+
     std::shared_ptr<LpcObject> cloneObject(const std::string& filename);
 
     // real destruct(): removes obj from the object table (thin wrapper
