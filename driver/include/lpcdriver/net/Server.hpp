@@ -32,6 +32,27 @@ public:
     // call.
     static void dispatchLine(VM& vm, Connection& conn, const std::string& line);
 
+    // Fires real FluffOS's own link-death apply (comm.c's
+    // remove_interactive(ob, dested): "if (!dested) safe_apply(
+    // APPLY_NET_DEAD, ob, 0, ORIGIN_DRIVER);") on a connection whose
+    // underlying socket has already gone away (Connection::pollLines()
+    // detected EOF/a read error and set closed_, but the connection's
+    // own boundObject() is still intact -- close() itself hasn't run
+    // yet). Pulled out as its own directly-testable static method for
+    // the same reason dispatchLine() is: no live socket accept loop
+    // needed, just a Connection built over one half of a socketpair.
+    // A no-op if the connection isn't actually closed yet, or has no
+    // bound object (covers the real dested=1 case too: the destruct()
+    // efun already closes the connection itself -- see its own comment
+    // -- which clears boundObject() before this could ever run, so a
+    // destructed object's own connection teardown correctly never
+    // reaches net_dead(), matching the "dested" skip exactly). Deliberately
+    // scoped to only this EOF/read-error path, not this driver's own
+    // separate mid-dispatch runtime-error connection close (see
+    // handleConnection()'s own catch block) -- flagged as a scope
+    // simplification, not assumed equivalent.
+    static void fireNetDeadIfLinkDead(VM& vm, Connection& conn);
+
 private:
     void acceptNewConnections();
     void handleConnection(Connection& conn);

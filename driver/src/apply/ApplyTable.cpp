@@ -5,7 +5,13 @@ namespace lpcdriver {
 const std::unordered_set<std::string>& ApplyTable::known() {
     static const std::unordered_set<std::string> names = {
         "create", "init", "clean_up", "heart_beat",
-        "connect", "logon", "disconnect",
+        // Real FluffOS has no "disconnect" apply at all (confirmed by
+        // grepping applies.h directly) -- the actual link-death apply is
+        // "net_dead" (APPLY_NET_DEAD), now genuinely fired, see
+        // Server::fireNetDeadIfLinkDead(). This entry used to say
+        // "disconnect", a name that never existed in the reference
+        // driver and was never wired to anything here either.
+        "connect", "logon", "net_dead",
         "id", "short", "long",
         "catch_tell", "receive_message", "process_input",
         "compile_object", "valid_read", "valid_write",

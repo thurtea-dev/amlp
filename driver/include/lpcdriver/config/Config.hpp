@@ -30,7 +30,7 @@ public:
 private:
     std::string mudlibRoot_ = "./mudlib_stub";
     std::string masterFile_ = "/master";
-    int port_ = 3000;
+    int port_ = 1129;
     int heartbeatIntervalMs_ = 2000;
     int maxEvalCost_ = 10000000;
     std::string includeDir_ = "secure/include";

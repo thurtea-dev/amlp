@@ -1,5 +1,94 @@
 # STATUS
 
+**2026-08-08: real `net_dead()` link-death apply implemented; port
+inconsistency fixed first.** Two logical pieces this slice.
+
+Port cleanup (housekeeping, done first): `driver/config/driver.cfg`
+(the `mudlib_stub` config) was still on port 3000, set up in an earlier
+session specifically to avoid colliding with the real mudlib's own
+port 1122 -- but 3000 was never actually one of this project's
+established ports (1122 the real mudlib's live/dev port, 1123 a prior
+session's own scratch port for driver-vs-real-mudlib testing, 1129 the
+real mudlib's own websocket port per its install docs). Changed to
+1129. Also updated the two other places 3000 had leaked into (`Config.hpp`'s
+own hardcoded default `port_`, and `driver/README.md`'s quick-start `nc`
+example), both introduced in the same original commit as the config
+change per `git log -p`. Confirmed by full-repo grep: every other "3000"
+hit left in the tree is unrelated (an evaluator-stack-size constant, a
+test's own trial count) or historical narrative in this file describing
+what was true in past sessions, deliberately left as-is rather than
+rewritten. Rebuilt, full suite reconfirmed passing, then live-verified
+end to end on port 1129 against `mudlib_stub` (two connections: login,
+item present, cross-connection `say` broadcast, movement between rooms)
+-- output identical to the prior session's own transcript. Port 1129 is
+now what all future live verification against `mudlib_stub` should use.
+
+Picked next, weighed against the other two candidates sitting in this
+file (remaining Tier 2/3 general-LPC-compliance gaps, and the
+reconnect/take-over save-flag bug, which stays paused -- mudlib-
+specific investigation on `nightmare3_fluffos_v2`, not general driver
+work): a **real `net_dead()` apply, fired on genuine connection link
+death**. Found while auditing the "Known stubs" list for what else
+might be silently wrong rather than loudly erroring, the same standard
+that made the destructed-object guard the pick last slice. `ApplyTable.cpp`
+had long listed `"disconnect"` as a "known apply" alongside `logon`/
+`connect` -- checked directly against the vendored
+`fluffos-2.9-ds2.08/applies.h` rather than assumed, and real FluffOS has
+no such apply at all. The actual apply is `net_dead` (`APPLY_NET_DEAD`,
+`comm.c`'s `remove_interactive()`), fired on every interactive whose
+connection drops while the object itself is still alive (`dested=0`)
+-- and this driver never called it, under any name, from anywhere.
+Confirmed live-reachable for real mudlib content, not theoretical:
+`nightmare3_fluffos_v2/lib/std/user.c` defines a real `net_dead()`
+(save-on-linkdeath/reconnect handling), and link death itself -- a
+client crashing, a network drop -- is one of the most ordinary events
+in real MUD play, happening to every player eventually. Silently never
+firing this apply is the connection-lifecycle equivalent of the
+destructed-object gap: no crash, no error, just cleanup logic that
+never runs.
+
+New `Server::fireNetDeadIfLinkDead(VM&, Connection&)`, a public static
+method (same "pull it out so it's directly testable without a real
+listening socket" pattern `dispatchLine()` already established): a
+no-op unless the connection is actually `closed()` *and* still has a
+bound object, which is exactly the state `Connection::pollLines()`
+leaves a connection in the moment it detects EOF/a read error (`closed_`
+set, but `close()` itself -- the `InteractiveRegistry` removal and
+actual fd close -- hasn't run yet). Called from `handleConnection()`
+after its existing per-line dispatch loop, unconditionally. This
+guard structure was deliberately chosen so every *other* way a
+connection ends up closed correctly still skips it with zero extra
+logic needed: the `destruct()` efun's own connection close (`EfunTable.cpp`,
+matching real `destruct_object()`'s own `dested=1` case, which
+correctly never calls `net_dead()` either) already clears the bound
+object before this check ever runs, and a connection closed via this
+driver's own mid-dispatch runtime-error isolation (`handleConnection()`'s
+existing `catch` block) does too -- deliberately scoped out rather than
+chased into that block this slice, flagged as a scope simplification
+in `fireNetDeadIfLinkDead()`'s own comment rather than assumed
+equivalent to real semantics. Also corrected `ApplyTable.cpp`'s known-
+apply entry from the never-real `"disconnect"` to the real `"net_dead"`,
+with a comment recording why (that table itself is otherwise unused
+anywhere in this codebase -- confirmed by grep -- so this is a
+documentation-accuracy fix, not a functional one on its own).
+
+3 new regression tests, using the same `ObjectVarHarness` + `AF_UNIX
+socketpair` pattern the existing connect/input-protocol tests already
+use: `net_dead()` genuinely firing when the peer side of a real
+socketpair is closed and `pollLines()` picks up the resulting EOF, a
+no-op while the connection is still open, and a no-op after an explicit
+`close()` (standing in for `destruct()`'s own path) has already cleared
+the bound object. Full suite: 344 tests passing, up from 341, no
+regressions. Live-confirmed end to end on port 1129: added a minimal
+`net_dead()` to `mudlib_stub/obj/user.c` (broadcasts "X has gone
+link-dead." to the room, mirroring the existing `say` broadcast
+pattern -- not a real save/reconnect implementation, this stub mudlib
+deliberately has neither) and drove it with two connections, the
+second closed abruptly mid-session with no `quit` command (a raw
+socket close, the same shape as a real client crash or network drop);
+the first connection received the broadcast, and the driver's own
+console log stayed silent (no errors, no crash).
+
 **2026-08-08: destructed-object guard added (real `O_DESTRUCTED`
 semantics for every call/apply entry point).** Picked over the
 remaining Tier 2/3 general-LPC-compliance gaps, the reconnect/take-over
@@ -2386,10 +2475,14 @@ fix).
   dereference-call syntax are all implemented now (see "Closure/
   function-pointer forms completed" above) -- this bullet is
   historical, kept for the git-blame trail rather than deleted.
-- `ApplyTable::isKnownApply()` recognizes `disconnect` (never called yet)
-  alongside `heart_beat`, which is now real -- see "Real call_out()/
-  heart_beat() scheduler" below. This bullet is historical for
-  `heart_beat`, kept for the git-blame trail rather than deleted.
+- ~~`ApplyTable::isKnownApply()` recognizes `disconnect` (never called
+  yet)~~ -- `disconnect` was never a real FluffOS apply at all (confirmed
+  against `applies.h` directly); fixed, see the new dated entry at the
+  top of this file: the table now lists the real apply, `net_dead`,
+  which is genuinely fired on link death. Also see the same entry for
+  `heart_beat`, which is now real too -- see "Real call_out()/
+  heart_beat() scheduler" below. This bullet is otherwise historical,
+  kept for the git-blame trail rather than deleted.
 - ~~`Scheduler::tickHeartbeats()` / `tickCallOuts()` are empty function
   bodies~~ -- fixed, see "Real call_out()/heart_beat() scheduler" below.
   `logon()`'s own `call_out("idle", LOGON_TIMEOUT)` (a 180-second idle-

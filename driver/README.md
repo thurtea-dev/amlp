@@ -22,7 +22,7 @@ ctest --test-dir build --output-on-failure
 Then, in another terminal:
 
 ```bash
-nc localhost 3000
+nc localhost 1129
 ```
 
 Type any line and press enter to see it echoed back. Type `quit` to see

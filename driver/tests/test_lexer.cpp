@@ -4734,6 +4734,102 @@ static void testLogonSendsBannerAndRegistersInputToPrompt() {
     std::cout << "testLogonSendsBannerAndRegistersInputToPrompt OK\n";
 }
 
+// ---------------------------------------------------------------------
+// Real link-death net_dead() apply (Server::fireNetDeadIfLinkDead())
+// ---------------------------------------------------------------------
+//
+// Previously a connection whose peer simply vanished (EOF/read error via
+// Connection::pollLines()) was torn down with no apply fired on its
+// still-bound object at all -- real FluffOS's own remove_interactive()
+// always calls net_dead() first for a still-alive object (comm.c: "if
+// (!dested) safe_apply(APPLY_NET_DEAD, ob, 0, ORIGIN_DRIVER)"). Nothing
+// in this driver exercised that gap before now: every prior connection-
+// close test drove either the mid-dispatch runtime-error close path or
+// the destruct() efun's own close, both of which correctly still skip
+// it (see fireNetDeadIfLinkDead()'s own comment for why).
+
+static void testFireNetDeadIfLinkDeadCallsApplyWhenPeerClosesConnection() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nd_target.c",
+        "int ran;\n"
+        "void net_dead() { ran = 1; }\n");
+    auto target = harness.objects.cloneObject("/nd_target");
+    assert(target != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(target);
+
+    ::close(fds[1]); // peer goes away -- real link death
+    auto lines = conn.pollLines(); // read() returns 0 (EOF), sets closed_
+    assert(lines.empty());
+    assert(conn.closed());
+    assert(conn.boundObject() == target); // close() itself hasn't run yet
+
+    lpcdriver::Server::fireNetDeadIfLinkDead(harness.vm, conn);
+
+    lpcdriver::Value ranVal = target->variables()[0];
+    assert(std::holds_alternative<int64_t>(ranVal.data));
+    assert(std::get<int64_t>(ranVal.data) == 1);
+
+    std::cout << "testFireNetDeadIfLinkDeadCallsApplyWhenPeerClosesConnection OK\n";
+}
+
+static void testFireNetDeadIfLinkDeadIsNoOpWhileConnectionStillOpen() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nd_open.c",
+        "int ran;\n"
+        "void net_dead() { ran = 1; }\n");
+    auto target = harness.objects.cloneObject("/nd_open");
+    assert(target != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(target);
+
+    assert(!conn.closed());
+    lpcdriver::Server::fireNetDeadIfLinkDead(harness.vm, conn);
+
+    lpcdriver::Value ranVal = target->variables()[0];
+    assert(std::get<int64_t>(ranVal.data) == 0); // never fired
+
+    ::close(fds[1]);
+    std::cout << "testFireNetDeadIfLinkDeadIsNoOpWhileConnectionStillOpen OK\n";
+}
+
+// Matches real remove_interactive()'s own "dested=1" skip: the destruct()
+// efun already closes the connection itself (EfunTable.cpp), clearing
+// boundObject() before fireNetDeadIfLinkDead could ever see it -- so an
+// explicitly destructed interactive's own teardown must never reach
+// net_dead(), same distinction the real reference driver makes.
+static void testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nd_destructed.c",
+        "int ran;\n"
+        "void net_dead() { ran = 1; }\n");
+    auto target = harness.objects.cloneObject("/nd_destructed");
+    assert(target != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(target);
+
+    conn.close(); // same effect as destruct()'s own conn->close() call
+    assert(conn.closed());
+    assert(conn.boundObject() == nullptr);
+
+    lpcdriver::Server::fireNetDeadIfLinkDead(harness.vm, conn);
+
+    lpcdriver::Value ranVal = target->variables()[0];
+    assert(std::get<int64_t>(ranVal.data) == 0); // net_dead() never ran
+
+    ::close(fds[1]);
+    std::cout << "testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose OK\n";
+}
+
 // Real, confirmed-live bug (see EfunTable.cpp's own comment on
 // message()): this efun used to always write to whichever connection is
 // "currently active" (OutputContext::current()), completely ignoring its
@@ -8815,6 +8911,9 @@ int main() {
     testDispatchLinePrefersPendingInputToHandlerOverProcessInput();
     testInputToCanReRegisterFromWithinDispatchedHandler();
     testLogonSendsBannerAndRegistersInputToPrompt();
+    testFireNetDeadIfLinkDeadCallsApplyWhenPeerClosesConnection();
+    testFireNetDeadIfLinkDeadIsNoOpWhileConnectionStillOpen();
+    testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose();
     testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne();
     testCallOutAcceptsRealArgumentShapeAndReturnsHandle();
     testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName();

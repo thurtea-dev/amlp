@@ -93,6 +93,28 @@ void go(string dir) {
     cmd_look("");
 }
 
+// Real FluffOS's own link-death apply (APPLY_NET_DEAD, comm.c's
+// remove_interactive()): fired by the driver when this player's
+// connection drops (EOF/read error), before the connection is actually
+// torn down. Kept deliberately minimal for this stub mudlib -- just
+// enough to prove live that the driver's new Server::fireNetDeadIfLinkDead()
+// genuinely reaches it, not a real save/reconnect implementation.
+void net_dead() {
+    object room;
+    object *inv;
+    int i;
+
+    room = environment(this_object());
+    if (!room) return;
+
+    inv = all_inventory(room);
+    for (i = 0; i < sizeof(inv); i++) {
+        if (inv[i] != this_object()) {
+            message("say", name + " has gone link-dead.\n", inv[i]);
+        }
+    }
+}
+
 void cmd_say(string arg) {
     object room;
     object *inv;

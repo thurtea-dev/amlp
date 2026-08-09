@@ -228,29 +228,50 @@ void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
     vm.dispatchCommand(obj, toDispatch);
 }
 
-void Server::handleConnection(Connection& conn) {
-    auto lines = conn.pollLines();
-    if (lines.empty()) return;
-
+void Server::fireNetDeadIfLinkDead(VM& vm, Connection& conn) {
+    if (!conn.closed()) return;
     auto obj = conn.boundObject();
     if (!obj) return;
 
     OutputContext::set(&conn);
-    for (const auto& line : lines) {
-        // Same reasoning as onNewConnection()'s own try/catch: a runtime
-        // error handling one player's input line must close only that
-        // player's connection, not crash the driver out from under
-        // everyone else currently connected.
-        try {
-            dispatchLine(vm_, conn, line);
-        } catch (const std::exception& e) {
-            std::cerr << "[net] connection fd=" << conn.fd()
-                       << " input handling failed: " << e.what() << "\n";
-            conn.close();
-            break;
-        }
+    try {
+        vm.callFunction(obj, "net_dead", {});
+    } catch (const std::exception& e) {
+        std::cerr << "[net] connection fd=" << conn.fd()
+                   << " net_dead() failed: " << e.what() << "\n";
     }
     OutputContext::set(nullptr);
+}
+
+void Server::handleConnection(Connection& conn) {
+    auto lines = conn.pollLines();
+
+    auto obj = conn.boundObject();
+    if (obj && !lines.empty()) {
+        OutputContext::set(&conn);
+        for (const auto& line : lines) {
+            // Same reasoning as onNewConnection()'s own try/catch: a runtime
+            // error handling one player's input line must close only that
+            // player's connection, not crash the driver out from under
+            // everyone else currently connected.
+            try {
+                dispatchLine(vm_, conn, line);
+            } catch (const std::exception& e) {
+                std::cerr << "[net] connection fd=" << conn.fd()
+                           << " input handling failed: " << e.what() << "\n";
+                conn.close();
+                break;
+            }
+        }
+        OutputContext::set(nullptr);
+    }
+
+    // Catches the case pollLines() just detected: the peer's socket is
+    // gone (EOF/read error), but close() itself (and the InteractiveRegistry
+    // removal/fd close it does) hasn't run yet -- see fireNetDeadIfLinkDead's
+    // own comment for why this is also correctly a no-op for every other
+    // way a connection ends up closed.
+    fireNetDeadIfLinkDead(vm_, conn);
 }
 
 void Server::pollOnce() {
