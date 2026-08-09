@@ -5609,6 +5609,137 @@ static void testCallOutSkipsDestructedTargetEvenWhenStillReferenced() {
     std::cout << "testCallOutSkipsDestructedTargetEvenWhenStillReferenced OK\n";
 }
 
+// --- destructed-object read coercion (real F_LOCAL/F_GLOBAL/F_INDEX) ---
+// See VM.cpp's own coerceIfDestructed() comment for the exact real
+// mechanism this mirrors: every "read a value out of storage" opcode
+// rewrites a destructed-object reference to a real int 0 in place,
+// self-healing the storage so the same slot never needs re-checking.
+// Each test below destructs an object while it is still referenced from
+// LPC-visible storage (a local, an object variable, an array element, a
+// mapping value) and confirms a later LPC-level read of that same
+// storage location comes back as a genuine int 0 -- not just falsy, the
+// exact type real destruct_object() leaves behind -- matching real
+// semantics precisely rather than approximating "still callable but
+// somehow falsy."
+
+static void testDestructedObjectInLocalVariableReadsBackAsIntZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/drc_item1.c", "int probe() { return 0; }\n");
+    harness.writeFile("/drc_probe1.c",
+        "mixed check() {\n"
+        "    object o;\n"
+        "    o = clone_object(\"/drc_item1\");\n"
+        "    destruct(o);\n"
+        "    return o;\n"
+        "}\n");
+    auto probe = harness.objects.cloneObject("/drc_probe1");
+    assert(probe != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testDestructedObjectInLocalVariableReadsBackAsIntZero OK\n";
+}
+
+static void testDestructedObjectInObjectVariableReadsBackAsIntZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/drc_item2.c", "int probe() { return 0; }\n");
+    harness.writeFile("/drc_probe2.c",
+        "object stored;\n"
+        "void set_and_destruct() {\n"
+        "    stored = clone_object(\"/drc_item2\");\n"
+        "    destruct(stored);\n"
+        "}\n"
+        "mixed check() { return stored; }\n");
+    auto probe = harness.objects.cloneObject("/drc_probe2");
+    assert(probe != nullptr);
+
+    harness.vm.callFunction(probe, "set_and_destruct", {});
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testDestructedObjectInObjectVariableReadsBackAsIntZero OK\n";
+}
+
+static void testDestructedObjectInArrayElementReadsBackAsIntZeroWhenIndexed() {
+    ObjectVarHarness harness;
+    harness.writeFile("/drc_item3.c", "int probe() { return 0; }\n");
+    harness.writeFile("/drc_probe3.c",
+        "mixed *arr;\n"
+        "void set_and_destruct() {\n"
+        "    object o;\n"
+        "    o = clone_object(\"/drc_item3\");\n"
+        "    arr = ({ o });\n"
+        "    destruct(o);\n"
+        "}\n"
+        "mixed check() { return arr[0]; }\n");
+    auto probe = harness.objects.cloneObject("/drc_probe3");
+    assert(probe != nullptr);
+
+    harness.vm.callFunction(probe, "set_and_destruct", {});
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testDestructedObjectInArrayElementReadsBackAsIntZeroWhenIndexed OK\n";
+}
+
+static void testDestructedObjectInMappingValueReadsBackAsIntZeroWhenIndexed() {
+    ObjectVarHarness harness;
+    harness.writeFile("/drc_item4.c", "int probe() { return 0; }\n");
+    harness.writeFile("/drc_probe4.c",
+        "mapping m;\n"
+        "void set_and_destruct() {\n"
+        "    object o;\n"
+        "    o = clone_object(\"/drc_item4\");\n"
+        "    m = ([ \"k\": o ]);\n"
+        "    destruct(o);\n"
+        "}\n"
+        "mixed check() { return m[\"k\"]; }\n");
+    auto probe = harness.objects.cloneObject("/drc_probe4");
+    assert(probe != nullptr);
+
+    harness.vm.callFunction(probe, "set_and_destruct", {});
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testDestructedObjectInMappingValueReadsBackAsIntZeroWhenIndexed OK\n";
+}
+
+static void testNonDestructedObjectInVariableAndArrayStillReadsBackAsRealObject() {
+    // Confirms coerceIfDestructed() only fires for an actually-destructed
+    // object -- an ordinary, still-alive object reference stored the
+    // same way must keep working exactly as before.
+    ObjectVarHarness harness;
+    harness.writeFile("/drc_item5.c", "int probe() { return 0; }\n");
+    harness.writeFile("/drc_probe5.c",
+        "object stored;\n"
+        "mixed *arr;\n"
+        "void set() {\n"
+        "    object o;\n"
+        "    o = clone_object(\"/drc_item5\");\n"
+        "    stored = o;\n"
+        "    arr = ({ o });\n"
+        "}\n"
+        "mixed check_var() { return stored; }\n"
+        "mixed check_arr() { return arr[0]; }\n");
+    auto probe = harness.objects.cloneObject("/drc_probe5");
+    assert(probe != nullptr);
+
+    harness.vm.callFunction(probe, "set", {});
+    lpcdriver::Value varResult = harness.vm.callFunction(probe, "check_var", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(varResult.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(varResult.data) != nullptr);
+    lpcdriver::Value arrResult = harness.vm.callFunction(probe, "check_arr", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(arrResult.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(arrResult.data) != nullptr);
+
+    std::cout << "testNonDestructedObjectInVariableAndArrayStillReadsBackAsRealObject OK\n";
+}
+
 static void testCallOutAcceptsClosureAsFirstArgument() {
     ObjectVarHarness harness;
     lpcdriver::Scheduler scheduler(harness.vm);
@@ -9255,6 +9386,11 @@ int main() {
     testCallClosureThrowsForDestructedOwnerEvenWhenStillReferenced();
     testDispatchCommandSkipsActionFromDestructedOwnerEvenWhenStillReferenced();
     testCallOutSkipsDestructedTargetEvenWhenStillReferenced();
+    testDestructedObjectInLocalVariableReadsBackAsIntZero();
+    testDestructedObjectInObjectVariableReadsBackAsIntZero();
+    testDestructedObjectInArrayElementReadsBackAsIntZeroWhenIndexed();
+    testDestructedObjectInMappingValueReadsBackAsIntZeroWhenIndexed();
+    testNonDestructedObjectInVariableAndArrayStillReadsBackAsRealObject();
     testCallOutAcceptsClosureAsFirstArgument();
     testPreviousObjectReturnsCallerAcrossCallOther();
     testPreviousObjectDoesNotChangeAcrossSameObjectLocalCall();

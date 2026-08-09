@@ -17,6 +17,37 @@ namespace lpcdriver {
 
 namespace {
 
+// Real F_LOCAL/F_GLOBAL/F_INDEX (interpret.c): every time a value is
+// read out of storage -- a local, an object variable, an array element,
+// or a mapping value -- and it turns out to hold a reference to a
+// destructed object, the storage itself is rewritten to a real int 0
+// right there ("assign_svalue(s, &const0u)") before the read completes,
+// not just for this one read: permanently, so every later read of the
+// same slot is already a plain 0 with no check needed. This is the
+// actual, narrow mechanism behind real LPC's "a destructed object reads
+// back as 0" semantics -- confirmed by reading interpret.c directly,
+// not guessed: no other opcode (comparison, branch, arithmetic) checks
+// O_DESTRUCTED at all (eoperators.c's own f_eq(), for one confirmed
+// example, does a raw pointer compare on a T_OBJECT operand with no
+// destructed check whatsoever), because by the time a value reaches one
+// of those, it has already been coerced here if it needed to be. Array
+// range-slicing (array.c's slice_array()) does NOT coerce either,
+// confirmed by the same reading -- a destructed element copied into a
+// freshly sliced sub-array stays a raw object reference until that new
+// array's own element is itself read through one of these same points.
+// Wiring this in at exactly PushLocal/PushObjectVar/Index (both the
+// array and mapping cases) is therefore not a narrowed-down practical
+// subset of real semantics, it is the complete mechanism -- closing the
+// "any stale object-typed value silently reads back as 0" gap this
+// project's own Known Stubs list had flagged as broader, unfixed scope.
+void coerceIfDestructed(Value& v) {
+    if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&v.data)) {
+        if (*ob && (*ob)->isDestructed()) {
+            v = Value(static_cast<int64_t>(0));
+        }
+    }
+}
+
 // Pushes obj as the current object for as long as this guard is alive,
 // on both of VM's call-tracking stacks -- real FluffOS's
 // setup_fake_frame() (interpret.c), which runs unconditionally at the
@@ -889,6 +920,7 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= locals.size()) {
                     throw LpcRuntimeError("PushLocal: bad local slot index");
                 }
+                coerceIfDestructed(locals[instr.operand]);
                 localStack.push_back(locals[instr.operand]);
                 ++ip;
                 break;
@@ -913,6 +945,7 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 if (slot < 0 || static_cast<size_t>(slot) >= vars.size()) {
                     throw LpcRuntimeError("PushObjectVar: bad object variable slot index");
                 }
+                coerceIfDestructed(vars[static_cast<size_t>(slot)]);
                 localStack.push_back(vars[static_cast<size_t>(slot)]);
                 ++ip;
                 break;
@@ -1399,6 +1432,7 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     if (i < 0 || static_cast<size_t>(i) >= (*arr)->items.size()) {
                         throw LpcRuntimeError("Index: array index out of bounds");
                     }
+                    coerceIfDestructed((*arr)->items[static_cast<size_t>(i)]);
                     localStack.push_back((*arr)->items[static_cast<size_t>(i)]);
                 } else if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&targetVal.data)) {
                     if (!*map) {
@@ -1406,8 +1440,9 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     }
                     bool hit = false;
                     Value found;
-                    for (const auto& entry : (*map)->entries) {
+                    for (auto& entry : (*map)->entries) {
                         if (valuesEqual(entry.first, indexVal)) {
+                            coerceIfDestructed(entry.second);
                             found = entry.second;
                             hit = true;
                             break;

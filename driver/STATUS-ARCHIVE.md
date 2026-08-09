@@ -15,6 +15,60 @@ content originally pointed at the Known Stubs section, which now lives
 in `STATUS.md` instead of this file -- left as-is (verbatim), not
 rewritten.
 
+**2026-08-08: destructed-object guard added (real `O_DESTRUCTED`
+semantics for every call/apply entry point).** Picked over the
+remaining Tier 2/3 general-LPC-compliance gaps, the reconnect/take-over
+save-flag bug (mudlib-specific, and that whole track is paused), and a
+proposed "dev-check.sh" script that, on checking, does not actually
+exist anywhere in this repo -- weighed specifically against the stated
+end goal of eventually running real-world mudlibs, not just this
+project's own minimal test one: this was the single item most likely to
+cause *silent* wrong behavior (not a loud crash) the moment a real
+mudlib's normal gameplay content -- corpses, temp effects, spent
+projectiles, any object destructed during ordinary play -- got pointed
+at this driver, since this driver previously had no destructed-object
+guard of any kind. Confirmed live-reachable, not theoretical: a
+destructed object was never unlinked from its own environment's
+inventory (`ObjectManager::destructObject()` only ever removed it from
+`ObjectManager`'s own filename cache), so it stayed visible in
+`all_inventory()`/`environment()` results, still callable via
+`call_other()`, indefinitely, until every last `shared_ptr` reference to
+it happened to drop. New `LpcObject::isDestructed()` (a real
+`O_DESTRUCTED`-equivalent flag, set once by
+`ObjectManager::destructObject()`), checked at every "call into an
+object from outside" entry point this driver has: `VM::callFunction()`
+(the single choke point behind `call_other()`, `applyMaster()`,
+`moveObject()`'s own `init()` propagation, and `Scheduler`'s
+`call_out()`/`heart_beat()` firing -- one change covers all of them),
+`VM::callClosure()` (previously only caught an *expired* weak_ptr owner,
+not an explicitly-destructed-but-still-referenced one), `VM::moveObject()`
+(refuses to move a destructed item or into a destructed destination),
+and `VM::dispatchCommand()` (both the command_giver itself and each
+individual action-table owner). `ObjectManager::destructObject()` also
+now unlinks the object from its old environment's inventory immediately,
+matching real `destruct_object()`'s own `ob->super = 0` step -- not
+replicated: real `destruct_object()`'s own contents-relocation loop
+(each contained item's own `move()` apply, run automatically before
+severing), flagged as a deliberate simplification rather than assumed
+equivalent. `destruct()` also now removes the object from
+`InteractiveRegistry` unconditionally rather than only when it happens
+to be the currently active connection, closing a related, smaller gap
+in the same area (found while reading the existing `destruct()` code,
+not separately planned). 5 new regression tests, each deliberately
+keeping the destructed object alive via a live reference rather than
+letting its last `shared_ptr` drop, to prove the new flag itself is
+doing the work rather than incidentally relying on weak_ptr expiry the
+way two pre-existing tests already did. Full suite: 341 tests passing,
+up from 336, no regressions. Live-reverified against the minimal test
+mudlib (`driver/mudlib_stub/`, port 3000) end to end afterward as a
+sanity check -- identical output to the prior session's own transcript,
+confirming the new checks do not interfere with ordinary (non-
+destructed) operation. Also folded in, per standing instruction to fold
+small doc corrections into whatever else is being worked on rather than
+treat them as their own task: corrected the stale `sscanf()` "%s"-
+adjacent-specifier line in Known Stubs (fixed several sessions back,
+the bullet was just never updated at the time).
+
 **2026-08-08: `throw()` implemented; `catch()` now carries an arbitrary
 value, not just a string.** Picked from several deferred items sitting
 in this file (the Tier 2/3 general-LPC-compliance gaps, the reconnect/

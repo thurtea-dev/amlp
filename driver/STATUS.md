@@ -3,6 +3,83 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-09: a destructed object stored in a variable, array element,
+or mapping value now reads back as a real int 0, not the stale
+reference.** Picked from the remaining Known Stubs list, same standard
+as the last several slices: weighed for silent-wrong-behavior risk on a
+real-world-reachable path, not narrow edge cases or stubs that already
+throw a clear error. This was already flagged, but explicitly deferred
+each time it came up, in the destructed-object-guard bullet: "the
+broader 'any stale object-typed value silently reads back as 0'
+semantics real FluffOS enforces at many more read sites (array/mapping
+entries, comparisons, etc, not just applies) -- this driver only gates
+the actual call/apply entry points." Every other remaining candidate
+was re-checked first and still deprioritized for the same reasons as
+recorded in the last two entries below (array `&` intersection order
+being non-contractual, `replace_string()`/`implode()`/`sprintf()`'s
+gaps all throwing clear errors already, `to_int()`'s buffer case being
+unreachable in principle). This was the one item left that is both
+silent and, once actually read against the real reference source
+instead of assumed, turned out to be considerably more tractable than
+its own "broader... many more read sites" description suggested.
+
+Confirmed directly against `fluffos-2.9-ds2.08/interpret.c` rather than
+guessed: the "stale object reads as 0" semantics are not scattered
+across every comparison/branch/arithmetic opcode the way the existing
+bullet's own phrasing implied. `F_BRANCH_WHEN_ZERO`/`F_NOT` treat any
+non-number type (including a destructed object reference) as
+unconditionally truthy, and `eoperators.c`'s own `f_eq()` does a raw
+pointer compare on a `T_OBJECT` operand with no `O_DESTRUCTED` check at
+all -- neither opcode coerces anything itself. The actual mechanism
+lives entirely at the point a value is *read out of storage*: `F_LOCAL`,
+`F_GLOBAL`, and `F_INDEX`'s array/mapping cases each check
+`O_DESTRUCTED` on the value about to be pushed and, if set, call
+`assign_svalue(s, &const0u)` -- rewriting the *storage itself* to a
+real int 0, permanently, not just for this one read, so every later
+read of the same slot is already a plain 0 with nothing left to check.
+Also confirmed the boundary of this mechanism, not just its center:
+`array.c`'s own `slice_array()` (backing range indexing, `arr[a..b]`)
+does not coerce at all -- a destructed element copied into a freshly
+sliced sub-array stays a raw reference until *that* array's own element
+is separately read through one of the four points above. Implementing
+exactly this (not more, not less) is therefore not a narrowed-down
+practical subset of real semantics, it is the complete mechanism.
+
+New `coerceIfDestructed(Value&)` (`VM.cpp`, anonymous namespace):
+checks whether a `Value` holds a reference to a now-destructed
+`LpcObject` and, if so, overwrites it in place with `Value(int64_t{0})`
+-- the same self-healing, mutate-the-storage-not-just-the-read
+behavior `assign_svalue()` has in the real driver. Wired into exactly
+the four matching read points this driver has: `OpCode::PushLocal`,
+`OpCode::PushObjectVar`, and `OpCode::Index`'s array and mapping
+branches (the mapping branch needed its loop variable changed from
+`const auto&` to `auto&` to allow the in-place coercion, mirroring
+`find_in_mapping()`'s own real behavior of coercing the mapping entry
+itself, not just the copy returned to the caller). `OpCode::RangeIndex`
+was deliberately left untouched, matching `slice_array()`'s own
+confirmed real behavior above. No other opcode needed changes --
+comparisons, truthiness checks, and arithmetic all consume a value that
+was necessarily read through one of these four points first, so they
+correctly see an already-coerced `0` with no separate fix required,
+exactly mirroring why real FluffOS's own `f_eq()` needs no
+`O_DESTRUCTED` check of its own either.
+
+5 new regression tests: a destructed object stored in a local variable,
+an object variable, an array element, and a mapping value each reading
+back as a genuine `int64_t` `0` (not just falsy -- the exact type,
+matching real semantics precisely rather than approximating "still
+callable but somehow falsy"), plus a confirmation that an ordinary,
+still-alive object reference stored the same way is completely
+unaffected. Full suite: 358 tests passing, up from 353, no regressions.
+Live-confirmed end to end on port 1129: a temporary `cmd_zerotest` on
+`mudlib_stub/obj/user.c` (removed after this check, same as this
+project's own prior throwaway probes) cloned an item, stored it in both
+an object variable and an array element, destructed it, and reported
+back `var=0 arr0=0 eq=1` -- the object variable, the array element, and
+an explicit `== 0` comparison against the object variable all agreeing
+it now reads as a real `0`. Driver console log stayed silent throughout
+(no errors, no crash).
+
 **2026-08-09: `userp()`/`query_once_interactive()` now a real, sticky
 O_ONCE_INTERACTIVE-equivalent instead of an alias of `interactive()`.**
 Picked over the remaining Known Stubs candidates and the still-paused
@@ -306,60 +383,6 @@ socket close, the same shape as a real client crash or network drop);
 the first connection received the broadcast, and the driver's own
 console log stayed silent (no errors, no crash).
 
-**2026-08-08: destructed-object guard added (real `O_DESTRUCTED`
-semantics for every call/apply entry point).** Picked over the
-remaining Tier 2/3 general-LPC-compliance gaps, the reconnect/take-over
-save-flag bug (mudlib-specific, and that whole track is paused), and a
-proposed "dev-check.sh" script that, on checking, does not actually
-exist anywhere in this repo -- weighed specifically against the stated
-end goal of eventually running real-world mudlibs, not just this
-project's own minimal test one: this was the single item most likely to
-cause *silent* wrong behavior (not a loud crash) the moment a real
-mudlib's normal gameplay content -- corpses, temp effects, spent
-projectiles, any object destructed during ordinary play -- got pointed
-at this driver, since this driver previously had no destructed-object
-guard of any kind. Confirmed live-reachable, not theoretical: a
-destructed object was never unlinked from its own environment's
-inventory (`ObjectManager::destructObject()` only ever removed it from
-`ObjectManager`'s own filename cache), so it stayed visible in
-`all_inventory()`/`environment()` results, still callable via
-`call_other()`, indefinitely, until every last `shared_ptr` reference to
-it happened to drop. New `LpcObject::isDestructed()` (a real
-`O_DESTRUCTED`-equivalent flag, set once by
-`ObjectManager::destructObject()`), checked at every "call into an
-object from outside" entry point this driver has: `VM::callFunction()`
-(the single choke point behind `call_other()`, `applyMaster()`,
-`moveObject()`'s own `init()` propagation, and `Scheduler`'s
-`call_out()`/`heart_beat()` firing -- one change covers all of them),
-`VM::callClosure()` (previously only caught an *expired* weak_ptr owner,
-not an explicitly-destructed-but-still-referenced one), `VM::moveObject()`
-(refuses to move a destructed item or into a destructed destination),
-and `VM::dispatchCommand()` (both the command_giver itself and each
-individual action-table owner). `ObjectManager::destructObject()` also
-now unlinks the object from its old environment's inventory immediately,
-matching real `destruct_object()`'s own `ob->super = 0` step -- not
-replicated: real `destruct_object()`'s own contents-relocation loop
-(each contained item's own `move()` apply, run automatically before
-severing), flagged as a deliberate simplification rather than assumed
-equivalent. `destruct()` also now removes the object from
-`InteractiveRegistry` unconditionally rather than only when it happens
-to be the currently active connection, closing a related, smaller gap
-in the same area (found while reading the existing `destruct()` code,
-not separately planned). 5 new regression tests, each deliberately
-keeping the destructed object alive via a live reference rather than
-letting its last `shared_ptr` drop, to prove the new flag itself is
-doing the work rather than incidentally relying on weak_ptr expiry the
-way two pre-existing tests already did. Full suite: 341 tests passing,
-up from 336, no regressions. Live-reverified against the minimal test
-mudlib (`driver/mudlib_stub/`, port 3000) end to end afterward as a
-sanity check -- identical output to the prior session's own transcript,
-confirming the new checks do not interfere with ordinary (non-
-destructed) operation. Also folded in, per standing instruction to fold
-small doc corrections into whatever else is being worked on rather than
-treat them as their own task: corrected the stale `sscanf()` "%s"-
-adjacent-specifier line in Known Stubs (fixed several sessions back,
-the bullet was just never updated at the time).
-
 ## Known stubs / scope limitations (intentional, not bugs)
 
 - Object-bound closures (`(: obj_expr, "funcname" :)`), bare string-
@@ -464,12 +487,20 @@ the bullet was just never updated at the time).
   `destruct_object()`'s own contents-relocation loop (each contained
   item's own `move()` apply, run automatically before severing) -- a
   destructed object's own remaining inventory is unlinked from its
-  former environment but not relocated anywhere. Also still not done:
+  former environment but not relocated anywhere. ~~Also still not done:
   the broader "any stale object-typed value silently reads back as 0"
   semantics real FluffOS enforces at many more read sites (array/mapping
-  entries, comparisons, etc, not just applies) -- this driver only gates
-  the actual call/apply entry points, not every place an object
-  reference could be read.
+  entries, comparisons, etc, not just applies)~~ -- fixed, see the new
+  dated entry at the top of this file: a destructed object read out of a
+  local variable, an object variable, an array element, or a mapping
+  value now self-heals to a real int `0` in place, matching real
+  `F_LOCAL`/`F_GLOBAL`/`F_INDEX`'s own mechanism exactly (confirmed
+  against `interpret.c` directly: no other opcode, including comparisons
+  and truthiness checks, needs its own separate check). Real range-index
+  slicing (`arr[a..b]`) does not coerce either, matching real
+  `slice_array()`'s own confirmed behavior -- a destructed element
+  copied into a freshly sliced sub-array stays a raw reference until
+  that array's own element is separately read.
 - The `compile_object()` virtual-object fallback (see "Working now"
   above) is only wired into `ObjectManager::loadObject()`, matching the
   one real call site this driver has confirmed needs it
