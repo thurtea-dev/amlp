@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <arpa/inet.h>
+#include <cctype>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
@@ -163,6 +164,119 @@ Value deserializeValue(const std::string& s, size_t& pos) {
         default:
             throw LpcRuntimeError("restore_object: corrupt save data (unknown value kind)");
     }
+}
+
+// Real FluffOS on-disk save_object()/restore_object() text format --
+// read-only support. This driver only ever *writes* its own format
+// (serializeValue() above); this is purely a fallback reader for
+// restore_object() so a genuine, pre-existing FluffOS save file (one
+// that shipped with a real mudlib, never touched by this driver) loads
+// its real historical data instead of being silently skipped line by
+// line (see restore_object's own comment for how a line is dispatched
+// to this parser vs. deserializeValue() above). Grounded directly in
+// fluffos-2.9-ds2.08/object.c's own save_svalue() (the writer) and
+// restore_string()/restore_array()/restore_mapping()/parse_numeric()
+// (the readers) -- not guessed. Real "class" values ("(/ ... /)") are
+// not implemented (this driver has no class/struct type anywhere else
+// either) -- throws rather than silently mishandling, matching this
+// codebase's existing convention for other unimplemented shapes.
+
+// Real restore_string(): reads up to an unescaped '"'. save_svalue()
+// itself only ever backslash-escapes '"' and '\\', but the real reader
+// is more lenient than its own writer -- a backslash before *any*
+// character is taken literally, not just those two -- so this mirrors
+// the reader's actual leniency rather than only the two escapes the
+// paired writer happens to produce. A raw '\r' byte (real save_svalue()'s
+// own on-disk encoding of an embedded '\n', done so a literal newline
+// in the string can't be mistaken for the end of the save-file line) is
+// translated back to '\n'.
+std::string parseRealSaveString(const std::string& s, size_t& pos) {
+    std::string result;
+    while (pos < s.size() && s[pos] != '"') {
+        char c = s[pos++];
+        if (c == '\\' && pos < s.size()) {
+            result += s[pos++];
+        } else if (c == '\r') {
+            result += '\n';
+        } else {
+            result += c;
+        }
+    }
+    if (pos < s.size() && s[pos] == '"') ++pos; // consume closing quote
+    return result;
+}
+
+// Real parse_numeric(): an optional leading '-', digits, and an
+// optional '.'-led fractional part -- present only when the source is
+// genuinely a float, matching save_svalue()'s own T_REAL case
+// ("sprintf(*buf, \"%f\", ...)", always a fixed-notation decimal point,
+// never exponential notation) versus its plain-digits T_NUMBER case.
+// No exponent handling: real save_svalue() never writes one, so a
+// faithful reader for genuine on-disk data from this exact vendored
+// driver doesn't need to parse one either.
+Value parseRealSaveNumber(const std::string& s, size_t& pos) {
+    size_t start = pos;
+    if (pos < s.size() && s[pos] == '-') ++pos;
+    while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+    bool isFloat = false;
+    if (pos < s.size() && s[pos] == '.') {
+        isFloat = true;
+        ++pos;
+        while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+    }
+    std::string token = s.substr(start, pos - start);
+    if (isFloat) return Value(std::stod(token));
+    return Value(static_cast<int64_t>(std::stoll(token)));
+}
+
+Value parseRealSaveValue(const std::string& s, size_t& pos) {
+    if (pos >= s.size()) return Value(static_cast<int64_t>(0));
+    char c = s[pos];
+    if (c == '"') {
+        ++pos;
+        return Value(parseRealSaveString(s, pos));
+    }
+    if (c == '(') {
+        ++pos;
+        if (pos < s.size() && s[pos] == '{') {
+            ++pos;
+            auto arr = std::make_shared<Array>();
+            // Real restore_array(): a bare ',' with nothing before it
+            // is a skipped element, defaulting to int 0 -- the trailing
+            // comma save_svalue() always writes after every element
+            // (including the last) is what this same leniency correctly
+            // consumes as "no more elements follow", not a real gap.
+            while (pos < s.size() && s[pos] != '}') {
+                if (s[pos] == ',') { arr->items.emplace_back(static_cast<int64_t>(0)); ++pos; continue; }
+                arr->items.push_back(parseRealSaveValue(s, pos));
+                if (pos < s.size() && s[pos] == ',') ++pos;
+            }
+            if (pos < s.size()) ++pos; // '}'
+            if (pos < s.size() && s[pos] == ')') ++pos;
+            return Value(arr);
+        }
+        if (pos < s.size() && s[pos] == '[') {
+            ++pos;
+            auto map = std::make_shared<Mapping>();
+            while (pos < s.size() && s[pos] != ']') {
+                Value key = parseRealSaveValue(s, pos);
+                if (pos < s.size() && s[pos] == ':') ++pos;
+                Value val = parseRealSaveValue(s, pos);
+                map->entries.emplace_back(std::move(key), std::move(val));
+                if (pos < s.size() && s[pos] == ',') ++pos;
+            }
+            if (pos < s.size()) ++pos; // ']'
+            if (pos < s.size() && s[pos] == ')') ++pos;
+            return Value(map);
+        }
+        throw LpcRuntimeError("restore_object: class-typed save data is not supported");
+    }
+    if (c == '-' || std::isdigit(static_cast<unsigned char>(c))) {
+        return parseRealSaveNumber(s, pos);
+    }
+    // Real restore_svalue()'s own default branch: anything else is a
+    // plain int 0, not an error.
+    return Value(static_cast<int64_t>(0));
 }
 
 // Real object.c's save_object() normalization (confirmed live: see
@@ -2494,19 +2608,29 @@ void registerCoreEfuns() {
     // value", values written in LPC literal syntax -- see save.c) and
     // restore_object() parses that same format back, matching each line
     // to a same-named variable on the *calling* object (current_object,
-    // not some other target). This driver does not implement that exact
-    // on-disk format: no other tool needs to read these files, and
-    // nothing this driver runs needs to interoperate with a real
-    // FluffOS save file, only to round-trip its own. Values are instead
-    // serialized with this driver's own simple recursive, self-
-    // delimiting format (see serializeValue()/deserializeValue() just
-    // below) covering every Value kind this driver has (int, float,
-    // string, array, mapping -- arbitrarily nested, not just the flat
-    // shapes secure/daemon/account_d.c's own account records happen to
-    // use) except object references and closures, which real
-    // save_object() cannot serialize either (an object reference saved
-    // to disk cannot survive a reboot, and neither real FluffOS nor
-    // this driver attempts it). __SAVE_EXTENSION__ (".o") is appended
+    // not some other target). save_object() itself still only ever
+    // writes this driver's own simpler recursive, self-delimiting
+    // format (see serializeValue()/deserializeValue() just below):
+    // nothing else needs to read a file this driver wrote, so there is
+    // no reason to pay for real save_svalue()'s escaping/formatting
+    // exactly on the write side. restore_object() now reads *both*
+    // formats, auto-detected per line (this driver's own tab-delimited
+    // format if a tab is found, the real space-delimited LPC-literal
+    // format otherwise -- see parseRealSaveValue() above, and the loop
+    // below for the actual dispatch) -- so a real, pre-existing
+    // FluffOS save file that ships with a real mudlib (e.g.
+    // daemon/save/banish.o) now actually loads its real historical
+    // data instead of being silently skipped line by line the way it
+    // was before (every line looked for a tab that was never there,
+    // "no tab separator matches" -- see this file's own STATUS.md
+    // history). This driver's own recursive format covers every Value
+    // kind this driver has (int, float, string, array, mapping --
+    // arbitrarily nested, not just the flat shapes secure/daemon/
+    // account_d.c's own account records happen to use) except object
+    // references and closures, which real save_object() cannot
+    // serialize either (an object reference saved to disk cannot
+    // survive a reboot, and neither real FluffOS nor this driver
+    // attempts it). __SAVE_EXTENSION__ (".o") is appended
     // by the *caller* in this mudlib's own code (e.g. account_d.c's
     // account_path()+__SAVE_EXTENSION__), so these two efuns use the
     // path normalized the same way real object.c's save_object() itself
@@ -2561,9 +2685,27 @@ void registerCoreEfuns() {
 
         std::string line;
         while (std::getline(f, line)) {
+            // Real restore_object_from_line(): a line starting with '#'
+            // is a comment (real save_object() writes one itself, the
+            // originating filename -- see the real banish.o example in
+            // this project's own mudlib tree) and is always skipped,
+            // in either format.
+            if (line.empty() || line[0] == '#') continue;
+
+            std::string name;
+            size_t valueStart;
+            bool realFormat = false;
             size_t tab = line.find('\t');
-            if (tab == std::string::npos) continue;
-            std::string name = line.substr(0, tab);
+            if (tab != std::string::npos) {
+                name = line.substr(0, tab);
+                valueStart = tab + 1;
+            } else {
+                size_t space = line.find(' ');
+                if (space == std::string::npos) continue;
+                name = line.substr(0, space);
+                valueStart = space + 1;
+                realFormat = true;
+            }
 
             size_t slot = names.size();
             for (size_t i = 0; i < names.size(); ++i) {
@@ -2571,8 +2713,8 @@ void registerCoreEfuns() {
             }
             if (slot >= names.size() || slot >= vars.size()) continue;
 
-            size_t pos = tab + 1;
-            vars[slot] = deserializeValue(line, pos);
+            size_t pos = valueStart;
+            vars[slot] = realFormat ? parseRealSaveValue(line, pos) : deserializeValue(line, pos);
         }
         return Value(int64_t{1});
     });

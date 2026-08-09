@@ -5722,6 +5722,132 @@ static void testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays() {
     std::cout << "testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays OK\n";
 }
 
+static void testRestoreObjectParsesRealFluffosOnDiskFormatScalarsAndNesting() {
+    // restore_object() previously only understood this driver's own
+    // tab-delimited save format (see serializeValue()/deserializeValue()
+    // in EfunTable.cpp) -- a real, pre-existing FluffOS save file (real
+    // format: "varname value\n", value in plain LPC literal syntax, a
+    // single space as the delimiter, not a tab) silently matched no
+    // line at all and left every variable at its create()-time default,
+    // with no error (see this file's own "Known stubs" entry for
+    // save_object()/restore_object()). This writes a save file by hand
+    // in the real on-disk shape (never touched by this driver's own
+    // save_object()) and confirms restore_object() now actually loads
+    // it: an int, a negative int, a float, a string, and a nested
+    // array-of-{int,string,mapping} value, matching real save_svalue()'s
+    // own grammar (fluffos-2.9-ds2.08's object.c).
+    ObjectVarHarness harness;
+    harness.writeFile("/real_probe.o",
+        "n 42\n"
+        "neg -7\n"
+        "f 3.500000\n"
+        "s \"hello\"\n"
+        "data ({1,\"two\",([\"k\":3,]),})\n");
+    harness.writeFile("/real_probe.c",
+        "int n;\n"
+        "int neg;\n"
+        "float f;\n"
+        "string s;\n"
+        "mixed *data;\n"
+        "int load() { return restore_object(\"/real_probe.o\"); }\n"
+        "int query_n() { return n; }\n"
+        "int query_neg() { return neg; }\n"
+        "float query_f() { return f; }\n"
+        "string query_s() { return s; }\n"
+        "mixed *query_data() { return data; }\n");
+    auto obj = harness.objects.cloneObject("/real_probe");
+    assert(obj != nullptr);
+
+    lpcdriver::Value loadResult = harness.vm.callFunction(obj, "load", {});
+    assert(std::holds_alternative<int64_t>(loadResult.data));
+    assert(std::get<int64_t>(loadResult.data) == 1);
+
+    lpcdriver::Value n = harness.vm.callFunction(obj, "query_n", {});
+    assert(std::get<int64_t>(n.data) == 42);
+    lpcdriver::Value neg = harness.vm.callFunction(obj, "query_neg", {});
+    assert(std::get<int64_t>(neg.data) == -7);
+    lpcdriver::Value f = harness.vm.callFunction(obj, "query_f", {});
+    assert(std::get<double>(f.data) == 3.5);
+    lpcdriver::Value s = harness.vm.callFunction(obj, "query_s", {});
+    assert(std::get<std::string>(s.data) == "hello");
+
+    lpcdriver::Value data = harness.vm.callFunction(obj, "query_data", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&data.data);
+    assert(arr != nullptr && *arr != nullptr);
+    assert((*arr)->items.size() == 3);
+    assert(std::get<int64_t>((*arr)->items[0].data) == 1);
+    assert(std::get<std::string>((*arr)->items[1].data) == "two");
+    auto* map = std::get_if<std::shared_ptr<lpcdriver::Mapping>>(&(*arr)->items[2].data);
+    assert(map != nullptr && *map != nullptr);
+    assert((*map)->entries.size() == 1);
+    assert(std::get<std::string>((*map)->entries[0].first.data) == "k");
+    assert(std::get<int64_t>((*map)->entries[0].second.data) == 3);
+
+    std::cout << "testRestoreObjectParsesRealFluffosOnDiskFormatScalarsAndNesting OK\n";
+}
+
+static void testRestoreObjectSkipsRealFormatCommentHeaderLineAndParsesEmptyContainers() {
+    // Mirrors this project's own real, shipped example of a genuine
+    // FluffOS save file (nightmare3_fluffos_v2/lib/daemon/save/
+    // banish.o, confirmed against an untouched backup copy): a leading
+    // "#/path/to/originating_file.c" comment line (real
+    // restore_object_from_line()'s own "ignore 'comments'" case), then
+    // several empty-array and one empty-mapping variables.
+    ObjectVarHarness harness;
+    harness.writeFile("/banish_probe.o",
+        "#/daemon/banish.c\n"
+        "__Names ({})\n"
+        "__TmpBanish ([])\n");
+    harness.writeFile("/banish_probe.c",
+        "mixed *__Names;\n"
+        "mapping __TmpBanish;\n"
+        "int load() { return restore_object(\"/banish_probe.o\"); }\n"
+        "int query_names_size() { return sizeof(__Names); }\n"
+        "int query_tmpbanish_size() { return sizeof(__TmpBanish); }\n");
+    auto obj = harness.objects.cloneObject("/banish_probe");
+    assert(obj != nullptr);
+
+    lpcdriver::Value loadResult = harness.vm.callFunction(obj, "load", {});
+    assert(std::holds_alternative<int64_t>(loadResult.data));
+    assert(std::get<int64_t>(loadResult.data) == 1);
+
+    lpcdriver::Value namesSize = harness.vm.callFunction(obj, "query_names_size", {});
+    assert(std::get<int64_t>(namesSize.data) == 0);
+    lpcdriver::Value tmpBanishSize = harness.vm.callFunction(obj, "query_tmpbanish_size", {});
+    assert(std::get<int64_t>(tmpBanishSize.data) == 0);
+
+    std::cout << "testRestoreObjectSkipsRealFormatCommentHeaderLineAndParsesEmptyContainers OK\n";
+}
+
+static void testRestoreObjectRealFormatStringEscapesAndEmbeddedNewline() {
+    // Real save_svalue()'s own string writer (object.c) backslash-
+    // escapes '"' and '\\', and encodes an embedded '\n' as a raw '\r'
+    // byte on disk (so the save file itself stays one line per
+    // variable) -- restore_string() undoes both. Confirms this
+    // driver's real-format reader matches: a literal quote, a literal
+    // backslash, and a raw CR byte translated back to '\n'.
+    ObjectVarHarness harness;
+    std::string onDisk = "s \"she said \\\"hi\\\" then a\\\\b then a";
+    onDisk += '\r';
+    onDisk += "newline\"\n";
+    harness.writeFile("/escape_probe.o", onDisk);
+    harness.writeFile("/escape_probe.c",
+        "string s;\n"
+        "int load() { return restore_object(\"/escape_probe.o\"); }\n"
+        "string query_s() { return s; }\n");
+    auto obj = harness.objects.cloneObject("/escape_probe");
+    assert(obj != nullptr);
+
+    lpcdriver::Value loadResult = harness.vm.callFunction(obj, "load", {});
+    assert(std::holds_alternative<int64_t>(loadResult.data));
+    assert(std::get<int64_t>(loadResult.data) == 1);
+
+    lpcdriver::Value s = harness.vm.callFunction(obj, "query_s", {});
+    assert(std::get<std::string>(s.data) == "she said \"hi\" then a\\b then a\nnewline");
+
+    std::cout << "testRestoreObjectRealFormatStringEscapesAndEmbeddedNewline OK\n";
+}
+
 static void testEvaluateOfEfunBoundClosureSetsCurrentObjectToClosureOwnerNotCaller() {
     // Regression test for a real bug found live: secure/daemon/
     // account_d.c's own "unguarded((: save_object, path :))" chain
@@ -9062,6 +9188,9 @@ int main() {
     testPreviousObjectMinusOneReturnsFullChain();
     testUnguardedClosureRoundTripsThroughSecurityAndMasterShape();
     testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays();
+    testRestoreObjectParsesRealFluffosOnDiskFormatScalarsAndNesting();
+    testRestoreObjectSkipsRealFormatCommentHeaderLineAndParsesEmptyContainers();
+    testRestoreObjectRealFormatStringEscapesAndEmbeddedNewline();
     testEvaluateOfEfunBoundClosureSetsCurrentObjectToClosureOwnerNotCaller();
     testLoadObjectFallsBackToCompileObjectOnMissingSourceFile();
     testLoadVirtualObjectRebindsFilenameToVirtualPath();
