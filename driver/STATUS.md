@@ -3,6 +3,101 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-09: `find_player()` now uses real O_ONCE_INTERACTIVE
+semantics instead of "currently connected", and `find_living()` is a
+real efun for the first time.** Same standard as the last several
+slices, with this session's own added instruction to verify each
+remaining Known Stubs candidate against the real reference source
+before trusting a prior session's characterization of its size, not
+just its existence. Re-checked every remaining bullet that way: array
+`&` intersection's own real usage (`daemon/command.c`'s `find_cmd()`,
+the one confirmed real call site, itself only order-sensitive when the
+same verb exists in two searched directories at once, an exceptional
+case) still confirms last session's conclusion, not a new one;
+`compile_object()`'s virtual-clone gap (real `simulate.c`'s own
+`clone_object()`, only reachable by cloning an object that is *already*
+virtual, not how this mudlib's own `new(OB_USER)` player-creation path
+works) stayed narrow on inspection; `set_eval_limit()`'s no-op stayed
+low-risk (this driver's own fixed per-call ceiling is already far more
+generous than real accumulated-eval-cost semantics, not less). Also
+found and fixed in passing, per standing instruction to fold small doc
+corrections into whatever else is worked on: the "postfix/prefix
+`++`/`--` only support a bare variable" bullet was stale -- indexed
+`++`/`--` (`arr[i]++`) was actually implemented several sessions ago
+and has had a passing regression test since; the bullet was just never
+updated (see its own strikethrough below).
+
+The actual pick, found the same way as `net_dead()`, `destruct()`'s
+connection-close fix, `userp()`, and last slice's destructed-value read
+coercion: checking a Known Stubs bullet's own real mechanism directly
+rather than trusting its existing description. The `set_living_name()`
+bullet said this driver stores the name but "wires up no lookup table
+for it, matching `find_player()`'s own pre-existing simplification" --
+checking `find_player()`'s own actual implementation (an
+`InteractiveRegistry` walk plus a `query_name()` call on each currently-
+connected object) against real `add_action.c` directly showed that
+description was itself wrong in two ways, not just incomplete: real
+`find_player()` and `find_living()` are the *same* function,
+`find_living_object(str, user)`, differing only in one extra flag check
+-- `user=1` requires real `O_ONCE_INTERACTIVE` (`LpcObject::
+wasEverInteractive()`, the same flag `userp()` was fixed to use two
+slices ago), not "currently connected" at all, so a link-dead-but-
+still-present player should still be findable and this driver's old
+approximation could never do that. It also matched against
+`query_name()` rather than the real `living_name` `set_living_name()`
+actually sets, which happen to agree for a player in this mudlib but
+not in general, and not for NPCs at all. `find_living()` itself was not
+registered as an efun -- confirmed real-reachable, not theoretical: 18+
+call sites (`cmds/mortal/_whisper.c`, `daemon/mail_d.c`,
+`cmds/mortal/_psi.c`, several admin commands --
+`_scan.c`/`_trans.c`/`_wizheal.c`/`_teleport.c` -- and several
+NPC-targeting object files under `domains/Praxis/`), every one of them
+throwing "undefined function or efun: find_living" the instant it was
+reached.
+
+New `LivingNameRegistry` (`object/LivingNameRegistry.hpp`/`.cpp`),
+mirroring real `add_action.c`'s own `hashed_living[]` table: a name-to-
+`weak_ptr<LpcObject>` registry, kept separate from `InteractiveRegistry`
+because the real mechanism is not connection-scoped at all (`std/
+monster.c`'s own NPCs call `set_living_name()` too). `set_living_name()`
+now registers into it (`set()`, itself doing a `remove()`-then-insert
+first, matching real `set_living_name()`'s own `remove_living_name(ob)`
+call at the top). `find()` takes a `requireOnceInteractive` flag, gates
+on `LpcObject::commandsEnabled()` (real `O_ENABLE_COMMANDS`) always and
+`wasEverInteractive()` only when that flag is set, and skips a
+destructed or expired candidate -- exactly `find_living_object()`'s own
+three checks. `find_player`/`find_living` are now one shared lambda
+factory differing only in that flag, matching the real driver's own
+"one function, one flag" design instead of two separate
+implementations. `ObjectManager::destructObject()` now also calls
+`LivingNameRegistry::remove()`, matching real `destruct_object()`'s own
+`remove_living_name(ob)` call (found sitting directly next to the
+already-replicated `ob->super = 0` step in `simulate.c`) -- without
+this a destructed object with a still-live `shared_ptr` reference
+elsewhere would keep matching lookups, the exact class of bug the
+`O_DESTRUCTED` guard and last slice's read-coercion fix both exist to
+close.
+
+7 new regression tests: `find_player()` finding a currently-connected
+object, still finding it after the connection closes (the actual
+`find_player()` bug), correctly not matching an object that was never
+interactive at all, `find_living()` matching an NPC-shaped object that
+was never interactive, `find_living()` declining an object with no
+`enable_commands()`, `find_living()` returning null for an unknown
+name, and `find_living()` no longer matching a destructed object's
+former name. Full suite: 365 tests passing, up from 358, no
+regressions. Live-confirmed end to end on port 1129: a temporary
+`cmd_findtest` on `mudlib_stub/obj/user.c` (removed after this check,
+same as this project's own prior throwaway probes), with `setup()`
+temporarily also calling `set_living_name(name)`, drove two
+connections, Alice and Bob -- while Bob was connected, Alice's check
+reported `find_player=1 find_living=1`; after Bob's connection was
+closed abruptly (a raw socket close, no `quit`), the same check still
+reported `find_player=1 find_living=1` -- exactly the real-semantics
+divergence this slice fixed -- and a check against an unknown name
+correctly reported `find_player=0 find_living=0`. Driver console log
+stayed silent throughout (no errors, no crash).
+
 **2026-08-09: a destructed object stored in a variable, array element,
 or mapping value now reads back as a real int 0, not the stale
 reference.** Picked from the remaining Known Stubs list, same standard
@@ -294,95 +389,6 @@ Bob's side produced nothing further (socket already gone), and Alice's
 own connection was completely unaffected throughout. Driver console log
 stayed silent (no errors, no crash).
 
-**2026-08-08: real `net_dead()` link-death apply implemented; port
-inconsistency fixed first.** Two logical pieces this slice.
-
-Port cleanup (housekeeping, done first): `driver/config/driver.cfg`
-(the `mudlib_stub` config) was still on port 3000, set up in an earlier
-session specifically to avoid colliding with the real mudlib's own
-port 1122 -- but 3000 was never actually one of this project's
-established ports (1122 the real mudlib's live/dev port, 1123 a prior
-session's own scratch port for driver-vs-real-mudlib testing, 1129 the
-real mudlib's own websocket port per its install docs). Changed to
-1129. Also updated the two other places 3000 had leaked into (`Config.hpp`'s
-own hardcoded default `port_`, and `driver/README.md`'s quick-start `nc`
-example), both introduced in the same original commit as the config
-change per `git log -p`. Confirmed by full-repo grep: every other "3000"
-hit left in the tree is unrelated (an evaluator-stack-size constant, a
-test's own trial count) or historical narrative in this file describing
-what was true in past sessions, deliberately left as-is rather than
-rewritten. Rebuilt, full suite reconfirmed passing, then live-verified
-end to end on port 1129 against `mudlib_stub` (two connections: login,
-item present, cross-connection `say` broadcast, movement between rooms)
--- output identical to the prior session's own transcript. Port 1129 is
-now what all future live verification against `mudlib_stub` should use.
-
-Picked next, weighed against the other two candidates sitting in this
-file (remaining Tier 2/3 general-LPC-compliance gaps, and the
-reconnect/take-over save-flag bug, which stays paused -- mudlib-
-specific investigation on `nightmare3_fluffos_v2`, not general driver
-work): a **real `net_dead()` apply, fired on genuine connection link
-death**. Found while auditing the "Known stubs" list for what else
-might be silently wrong rather than loudly erroring, the same standard
-that made the destructed-object guard the pick last slice. `ApplyTable.cpp`
-had long listed `"disconnect"` as a "known apply" alongside `logon`/
-`connect` -- checked directly against the vendored
-`fluffos-2.9-ds2.08/applies.h` rather than assumed, and real FluffOS has
-no such apply at all. The actual apply is `net_dead` (`APPLY_NET_DEAD`,
-`comm.c`'s `remove_interactive()`), fired on every interactive whose
-connection drops while the object itself is still alive (`dested=0`)
--- and this driver never called it, under any name, from anywhere.
-Confirmed live-reachable for real mudlib content, not theoretical:
-`nightmare3_fluffos_v2/lib/std/user.c` defines a real `net_dead()`
-(save-on-linkdeath/reconnect handling), and link death itself -- a
-client crashing, a network drop -- is one of the most ordinary events
-in real MUD play, happening to every player eventually. Silently never
-firing this apply is the connection-lifecycle equivalent of the
-destructed-object gap: no crash, no error, just cleanup logic that
-never runs.
-
-New `Server::fireNetDeadIfLinkDead(VM&, Connection&)`, a public static
-method (same "pull it out so it's directly testable without a real
-listening socket" pattern `dispatchLine()` already established): a
-no-op unless the connection is actually `closed()` *and* still has a
-bound object, which is exactly the state `Connection::pollLines()`
-leaves a connection in the moment it detects EOF/a read error (`closed_`
-set, but `close()` itself -- the `InteractiveRegistry` removal and
-actual fd close -- hasn't run yet). Called from `handleConnection()`
-after its existing per-line dispatch loop, unconditionally. This
-guard structure was deliberately chosen so every *other* way a
-connection ends up closed correctly still skips it with zero extra
-logic needed: the `destruct()` efun's own connection close (`EfunTable.cpp`,
-matching real `destruct_object()`'s own `dested=1` case, which
-correctly never calls `net_dead()` either) already clears the bound
-object before this check ever runs, and a connection closed via this
-driver's own mid-dispatch runtime-error isolation (`handleConnection()`'s
-existing `catch` block) does too -- deliberately scoped out rather than
-chased into that block this slice, flagged as a scope simplification
-in `fireNetDeadIfLinkDead()`'s own comment rather than assumed
-equivalent to real semantics. Also corrected `ApplyTable.cpp`'s known-
-apply entry from the never-real `"disconnect"` to the real `"net_dead"`,
-with a comment recording why (that table itself is otherwise unused
-anywhere in this codebase -- confirmed by grep -- so this is a
-documentation-accuracy fix, not a functional one on its own).
-
-3 new regression tests, using the same `ObjectVarHarness` + `AF_UNIX
-socketpair` pattern the existing connect/input-protocol tests already
-use: `net_dead()` genuinely firing when the peer side of a real
-socketpair is closed and `pollLines()` picks up the resulting EOF, a
-no-op while the connection is still open, and a no-op after an explicit
-`close()` (standing in for `destruct()`'s own path) has already cleared
-the bound object. Full suite: 344 tests passing, up from 341, no
-regressions. Live-confirmed end to end on port 1129: added a minimal
-`net_dead()` to `mudlib_stub/obj/user.c` (broadcasts "X has gone
-link-dead." to the room, mirroring the existing `say` broadcast
-pattern -- not a real save/reconnect implementation, this stub mudlib
-deliberately has neither) and drove it with two connections, the
-second closed abruptly mid-session with no `quit` command (a raw
-socket close, the same shape as a real client crash or network drop);
-the first connection received the broadcast, and the driver's own
-console log stayed silent (no errors, no crash).
-
 ## Known stubs / scope limitations (intentional, not bugs)
 
 - Object-bound closures (`(: obj_expr, "funcname" :)`), bare string-
@@ -412,8 +418,19 @@ console log stayed silent (no errors, no crash).
   literal text between them is not implemented~~ -- fixed some sessions
   back (`%x`/`%f`/adjacent-specifier support), this bullet was simply
   never updated at the time; left as a stale doc gap until now.
-- Postfix/prefix `++`/`--` only support a bare variable name target, not
-  an index expression (`arr[i]++`).
+- ~~Postfix/prefix `++`/`--` only support a bare variable name target,
+  not an index expression (`arr[i]++`)~~ -- stale, this bullet was never
+  updated when indexed `++`/`--` was actually implemented (see "Further
+  gaps found and fixed while walking `std/user.c`'s full inherit chain"
+  in `STATUS-ARCHIVE.md`, real `std/living.c`'s own `healing["intox"]--`
+  shape, confirmed still passing via
+  `testPostfixIncDecOnIndexedTargetParsesToIndexedIncDecExpr` and
+  `testIndexedPostfixIncDecVmExecutionReturnsOldValueAndMutates`). Only
+  a range-index target (`arr[0..1]++`) still throws, matching real
+  `grammar.y`'s own restricted lvalue grammar -- not a gap, real LPC
+  does not allow that either. See the "Compound assignment on an
+  indexed target" bullet below for indexed `++`/`--`'s own real, still-
+  open double-evaluation caveat.
 - ~~`throw()` is not implemented (`catch()` is)~~ -- fixed, see the new
   dated entry at the top of this file: `throw()` is a real efun (matching
   `func_spec.c`'s own `void throw(mixed);`), hands the exact value it was
@@ -452,15 +469,22 @@ console log stayed silent (no errors, no crash).
   `interactive()` are backed by `InteractiveRegistry`, which only tracks
   *currently* live connections ... not real FluffOS's separate "has this
   object ever been interactive" (O_ONCE_INTERACTIVE) ... wrong for an
-  object that was once connected and has since disconnected~~ --
-  `userp()`/`query_once_interactive()` fixed, see the new dated entry at
-  the top of this file: a real, sticky `LpcObject::wasEverInteractive()`
-  flag, set once by `Connection::attach()` and never cleared.
-  `interactive()`/`find_player()`/`users()` are unchanged and still
-  correctly scoped to currently-connected objects only, matching real
-  FluffOS semantics for those three. Real living-name-table concepts
-  (`set_living_name()`'s own lookup, see its own bullet below) remain a
-  separate, still-open simplification.
+  object that was once connected and has since disconnected~~ -- both
+  `userp()`/`query_once_interactive()` (two slices ago) and
+  `find_player()` (see the new dated entry at the top of this file) now
+  use the same real, sticky `LpcObject::wasEverInteractive()` flag, set
+  once by `Connection::attach()` and never cleared. **Correction to this
+  bullet's own prior update:** it previously claimed `find_player()` was
+  "unchanged and still correctly scoped to currently-connected objects
+  only, matching real FluffOS semantics" -- checked directly against
+  `add_action.c` this slice and confirmed wrong: real `find_player()`
+  gates on `O_ONCE_INTERACTIVE`, not "currently connected" at all, and
+  this driver's own prior `find_player()` had not actually been updated
+  when `userp()` was fixed, only asserted to already be correct without
+  re-checking its own real mechanism. `interactive()`/`users()` remain
+  genuinely, correctly scoped to currently-connected objects only.
+  `set_living_name()`'s own lookup table is now real too -- see its own
+  bullet below.
 - ~~`message()` ignores its `type`/`targets`/`excludes` arguments and
   always writes straight to the connection currently driving the
   call~~ -- `targets` is now real (see "Real call_out()/heart_beat()
@@ -554,7 +578,11 @@ console log stayed silent (no errors, no crash).
   reads the interval back and fires `heart_beat()` on it, confirmed live
   (a real NPC's own heartbeat-driven dialogue, unprompted). This bullet
   is historical, kept for the git-blame trail rather than deleted.
-- `set_living_name()` stores the name on the object but wires up no
+- ~~`set_living_name()` stores the name on the object but wires up no
   lookup table for it, matching `find_player()`'s own pre-existing
   simplification (InteractiveRegistry + `query_name()`, not a real
-  living-name table).
+  living-name table)~~ -- fixed, see the new dated entry at the top of
+  this file: a real `LivingNameRegistry` now backs both `find_player()`
+  and the newly-implemented `find_living()`, matching real
+  `add_action.c`'s own `hashed_living[]`/`find_living_object()`
+  mechanism.

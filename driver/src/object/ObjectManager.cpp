@@ -1,4 +1,5 @@
 #include "lpcdriver/object/ObjectManager.hpp"
+#include "lpcdriver/object/LivingNameRegistry.hpp"
 #include "lpcdriver/config/Config.hpp"
 #include "lpcdriver/core/Errors.hpp"
 #include "lpcdriver/compiler/Lexer.hpp"
@@ -595,6 +596,17 @@ std::shared_ptr<LpcObject> ObjectManager::lookupLoadedObject(const std::string& 
 void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
     if (!obj) return;
     obj->setDestructed(true);
+
+    // real destruct_object() (simulate.c): "remove_living_name(ob);",
+    // right alongside its own environment-unlink step just below --
+    // without this, a destructed object with a still-live shared_ptr
+    // reference elsewhere (the exact case this driver's own O_DESTRUCTED
+    // guard was written for) would keep matching find_player()/
+    // find_living() lookups after being destructed, contradicting
+    // LivingNameRegistry::find()'s own isDestructed() check, which is a
+    // second, redundant layer of defense for a stale weak_ptr entry that
+    // is never cleaned up otherwise, not a substitute for this.
+    LivingNameRegistry::remove(obj);
 
     // real destruct_object() (simulate.c): "ob->super = 0; ob->next_inv
     // = 0; ob->contains = 0;" -- unlinks the object from its environment

@@ -5016,6 +5016,144 @@ static void testUserpReturnsFalseForObjectNeverBoundToAnyConnection() {
     std::cout << "testUserpReturnsFalseForObjectNeverBoundToAnyConnection OK\n";
 }
 
+// --- LivingNameRegistry: find_player()/find_living() -------------------
+// See LivingNameRegistry.hpp's own comment for the real
+// find_living_object(str, user) mechanism this mirrors: one shared
+// function backing both efuns, keyed by set_living_name()'s own name,
+// gated by O_ENABLE_COMMANDS always and O_ONCE_INTERACTIVE only for
+// find_player(). Previously this driver approximated find_player() via
+// InteractiveRegistry (currently-connected-only) and query_name(), and
+// had no find_living() efun registered at all.
+
+static void testFindPlayerFindsCurrentlyConnectedObjectByLivingName() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lnr_player1.c",
+        "void setup() { enable_commands(); set_living_name(\"alice\"); }\n"
+        "object check() { return find_player(\"alice\"); }\n");
+    auto probe = harness.objects.cloneObject("/lnr_player1");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(probe);
+
+    harness.vm.callFunction(probe, "setup", {});
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(result.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(result.data) == probe);
+
+    ::close(fds[1]);
+    std::cout << "testFindPlayerFindsCurrentlyConnectedObjectByLivingName OK\n";
+}
+
+static void testFindPlayerStillFindsObjectAfterDisconnectViaOnceInteractive() {
+    // The actual bug: real find_player() gates on O_ONCE_INTERACTIVE,
+    // not "currently connected" -- a link-dead-but-still-present player
+    // must still be findable.
+    ObjectVarHarness harness;
+    harness.writeFile("/lnr_player2.c",
+        "void setup() { enable_commands(); set_living_name(\"bob\"); }\n"
+        "object check() { return find_player(\"bob\"); }\n");
+    auto probe = harness.objects.cloneObject("/lnr_player2");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(probe);
+    harness.vm.callFunction(probe, "setup", {});
+    conn.close(); // real link death -- probe stays in the world
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(result.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(result.data) == probe);
+
+    ::close(fds[1]);
+    std::cout << "testFindPlayerStillFindsObjectAfterDisconnectViaOnceInteractive OK\n";
+}
+
+static void testFindPlayerDoesNotMatchAnObjectThatWasNeverInteractive() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lnr_npc1.c",
+        "void setup() { enable_commands(); set_living_name(\"goblin\"); }\n"
+        "object check() { return find_player(\"goblin\"); }\n");
+    auto probe = harness.objects.cloneObject("/lnr_npc1");
+    assert(probe != nullptr);
+
+    harness.vm.callFunction(probe, "setup", {}); // never bound to any connection
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(result.isVoid());
+
+    std::cout << "testFindPlayerDoesNotMatchAnObjectThatWasNeverInteractive OK\n";
+}
+
+static void testFindLivingMatchesAnNpcThatWasNeverInteractive() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lnr_npc2.c",
+        "void setup() { enable_commands(); set_living_name(\"goblin2\"); }\n"
+        "object check() { return find_living(\"goblin2\"); }\n");
+    auto probe = harness.objects.cloneObject("/lnr_npc2");
+    assert(probe != nullptr);
+
+    harness.vm.callFunction(probe, "setup", {});
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(result.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(result.data) == probe);
+
+    std::cout << "testFindLivingMatchesAnNpcThatWasNeverInteractive OK\n";
+}
+
+static void testFindLivingReturnsNullWithoutEnableCommands() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lnr_npc3.c",
+        "void setup() { set_living_name(\"hermit\"); }\n" // no enable_commands()
+        "object check() { return find_living(\"hermit\"); }\n");
+    auto probe = harness.objects.cloneObject("/lnr_npc3");
+    assert(probe != nullptr);
+
+    harness.vm.callFunction(probe, "setup", {});
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(result.isVoid());
+
+    std::cout << "testFindLivingReturnsNullWithoutEnableCommands OK\n";
+}
+
+static void testFindLivingReturnsNullForUnknownName() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lnr_probe4.c",
+        "object check() { return find_living(\"nobody_named_this\"); }\n");
+    auto probe = harness.objects.cloneObject("/lnr_probe4");
+    assert(probe != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check", {});
+    assert(result.isVoid());
+
+    std::cout << "testFindLivingReturnsNullForUnknownName OK\n";
+}
+
+static void testFindLivingDoesNotMatchADestructedObjectsFormerLivingName() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lnr_npc4.c",
+        "void setup() { enable_commands(); set_living_name(\"ghost\"); }\n");
+    harness.writeFile("/lnr_finder.c",
+        "object check() { return find_living(\"ghost\"); }\n");
+    auto npc = harness.objects.cloneObject("/lnr_npc4");
+    auto finder = harness.objects.cloneObject("/lnr_finder");
+    assert(npc != nullptr && finder != nullptr);
+
+    harness.vm.callFunction(npc, "setup", {});
+    harness.vm.destructObject(npc); // npc stays alive via this local
+
+    lpcdriver::Value result = harness.vm.callFunction(finder, "check", {});
+    assert(result.isVoid());
+
+    std::cout << "testFindLivingDoesNotMatchADestructedObjectsFormerLivingName OK\n";
+}
+
 // Real, confirmed-live bug (see EfunTable.cpp's own comment on
 // message()): this efun used to always write to whichever connection is
 // "currently active" (OutputContext::current()), completely ignoring its
@@ -9363,6 +9501,13 @@ int main() {
     testUserpAndInteractiveBothTrueWhileConnectionIsLive();
     testUserpStaysTrueAfterDisconnectWhileInteractiveGoesFalse();
     testUserpReturnsFalseForObjectNeverBoundToAnyConnection();
+    testFindPlayerFindsCurrentlyConnectedObjectByLivingName();
+    testFindPlayerStillFindsObjectAfterDisconnectViaOnceInteractive();
+    testFindPlayerDoesNotMatchAnObjectThatWasNeverInteractive();
+    testFindLivingMatchesAnNpcThatWasNeverInteractive();
+    testFindLivingReturnsNullWithoutEnableCommands();
+    testFindLivingReturnsNullForUnknownName();
+    testFindLivingDoesNotMatchADestructedObjectsFormerLivingName();
     testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne();
     testCallOutAcceptsRealArgumentShapeAndReturnsHandle();
     testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName();

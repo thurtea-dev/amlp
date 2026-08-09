@@ -1,6 +1,7 @@
 #include "lpcdriver/efun/EfunTable.hpp"
 #include "lpcdriver/core/Errors.hpp"
 #include "lpcdriver/vm/VM.hpp"
+#include "lpcdriver/object/LivingNameRegistry.hpp"
 #include "lpcdriver/object/LpcObject.hpp"
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Connection.hpp"
@@ -2165,20 +2166,21 @@ void registerCoreEfuns() {
 
     // void set_living_name(string) -- real add_action.c's own
     // f_set_living_name(), which calls the internal set_living_name(ob,
-    // str) that assigns object_t::living_name. This driver's own
-    // find_player() (see its own comment above) deliberately does not
-    // consult a living-name table -- it walks InteractiveRegistry and
-    // asks each object its own query_name() instead -- so this stores
-    // the name on the current object (see LpcObject.hpp's own comment)
-    // without wiring up a lookup table for it. Surfaced live:
-    // std/user.c's own setup() calling set_living_name(query_name())
-    // unconditionally.
+    // str) that assigns object_t::living_name and registers ob in the
+    // real hashed_living[] table. Now backed by a real
+    // LivingNameRegistry (see its own header comment for the full
+    // find_player()/find_living() design) instead of just storing the
+    // name with no lookup table -- surfaced live: std/user.c's own
+    // setup() calling set_living_name(query_name()) unconditionally, and
+    // std/monster.c's own create() doing the same for every NPC.
     t.registerEfun("set_living_name", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("set_living_name: expected a string argument");
         }
         if (auto ob = vm.currentObject()) {
-            ob->setLivingName(std::get<std::string>(args[0].data));
+            const std::string& name = std::get<std::string>(args[0].data);
+            ob->setLivingName(name);
+            LivingNameRegistry::set(ob, name);
         }
         return Value{};
     });
@@ -2469,38 +2471,45 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
-    // object find_player(string name) -- real semantics search a
-    // dedicated "living name" hash table populated by
-    // set_living_name()/enable_commands() (add_action.c's
-    // find_living_object()), not the interactive list directly. This
-    // driver implements neither of those, so this instead searches
-    // InteractiveRegistry (same set users() returns) and asks each
-    // object its own query_name() -- the convention every object this
-    // mudlib actually calls find_player() against already follows
-    // (secure/std/login.c's own query_name(), later std/user.c's own).
-    // An object with no query_name(), or whose query_name() throws or
-    // returns something other than a matching string, is silently
-    // skipped rather than treated as an error -- matching real
-    // find_player()'s own "just doesn't match" outcome for anything not
-    // in the living-name table.
-    t.registerEfun("find_player", [](VM& vm, std::vector<Value>& args) -> Value {
-        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
-            return Value{};
-        }
-        const std::string& name = std::get<std::string>(args[0].data);
-        for (auto& ob : InteractiveRegistry::all()) {
-            Value nameVal;
-            try {
-                nameVal = vm.callFunction(ob, "query_name", {});
-            } catch (const std::exception&) {
-                continue;
+    // object find_player(string name) / object find_living(string name)
+    // -- real add_action.c: both efuns are the exact same
+    // find_living_object(str, user) function, differing only in the
+    // "user" flag (find_player passes 1, find_living passes 0), which
+    // gates on real O_ONCE_INTERACTIVE -- not "currently connected".
+    // Previously this driver approximated find_player() by walking
+    // InteractiveRegistry (== users(), currently-connected-only) and
+    // asking each object its own query_name() -- silently wrong in two
+    // ways once actually checked against the real mechanism: (1) real
+    // O_ONCE_INTERACTIVE is sticky (LpcObject::wasEverInteractive(), the
+    // same flag userp()/query_once_interactive() already use), so a
+    // player who went link-dead but is still present in the world
+    // should still be findable, and was not; (2) it matched against
+    // query_name() rather than the real living_name set by
+    // set_living_name(), which happen to be the same string for a
+    // player in this mudlib but are not guaranteed to be, and are not
+    // the same at all for most NPCs. find_living() itself was not
+    // implemented as an efun at all -- confirmed real usage of 18+ call
+    // sites across cmds/mortal/_whisper.c, daemon/mail_d.c,
+    // cmds/mortal/_psi.c, several admin commands
+    // (_scan.c/_trans.c/_wizheal.c/_teleport.c), and several
+    // NPC-targeting object files under domains/Praxis/ -- every one of
+    // those previously threw "undefined function or efun: find_living".
+    // Both now backed by LivingNameRegistry (see its own header comment
+    // for the full design), matching real find_living_object() exactly:
+    // a name match that also has O_ENABLE_COMMANDS, plus
+    // O_ONCE_INTERACTIVE for find_player() specifically.
+    auto findLivingImpl = [](bool requireOnceInteractive) {
+        return [requireOnceInteractive](VM&, std::vector<Value>& args) -> Value {
+            if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+                return Value{};
             }
-            if (auto* s = std::get_if<std::string>(&nameVal.data)) {
-                if (*s == name) return Value(ob);
-            }
-        }
-        return Value{};
-    });
+            auto ob = LivingNameRegistry::find(std::get<std::string>(args[0].data), requireOnceInteractive);
+            if (!ob) return Value{};
+            return Value(ob);
+        };
+    };
+    t.registerEfun("find_player", findLivingImpl(true));
+    t.registerEfun("find_living", findLivingImpl(false));
 
     // int file_size(string file) -- file.c's real file_size(): -1 if the
     // path does not exist, -2 if it is a directory, else the byte size.
