@@ -15,6 +15,64 @@ content originally pointed at the Known Stubs section, which now lives
 in `STATUS.md` instead of this file -- left as-is (verbatim), not
 rewritten.
 
+**2026-08-09: `userp()`/`query_once_interactive()` now a real, sticky
+O_ONCE_INTERACTIVE-equivalent instead of an alias of `interactive()`.**
+Picked over the remaining Known Stubs candidates and the still-paused
+reconnect/take-over save-flag bug, same standard as the last several
+slices: weighed for silent-wrong-behavior risk on a real-world-reachable
+path, not narrow edge cases or stubs that already throw a clear error.
+This one was already flagged in Known Stubs ("wrong for an object that
+was once connected and has since disconnected") but checking real usage
+against the actual mudlib showed it is considerably more reachable than
+that description suggested: `userp()` is called 61 times and
+`interactive()` 87 times across combat, chat, mail, trading, psionics,
+and admin commands, heavily in the exact shape `userp(target) &&
+!interactive(target)` (`cmds/mortal/_psi.c`) or `ob->is_player() &&
+!interactive(ob)` (`cmds/skills/_backstab.c`/`_fireball.c`/`_bolt.c`/
+`_burn.c`/`_chilltouch.c`/`_pick.c`, `cmds/mortal/_whisper.c`) -- "is
+this a player object, currently offline". `secure/std/login.c` itself
+carries a comment documenting the real distinction directly
+(`count_connected_players()`: "userp(), which is driver
+query_once_interactive(), true for any object that was ever handed a
+connection ... not just for objects that stayed interactive"). This
+driver's old approximation made `userp()` identical to `interactive()`,
+so the instant any connected player went link-dead -- one of the most
+ordinary events in real play -- every one of those checks would have
+silently misclassified their still-present character as not a player,
+changing real gameplay logic with no error at all. Bigger, more
+constantly-hit blast radius than last slice's save-file-format gap.
+
+Fixed with a new `LpcObject::wasEverInteractive()` flag (real
+`O_ONCE_INTERACTIVE`, `object.h`): set once, by `Connection::attach()`,
+the first time an object is ever bound to a connection -- covering both
+the initial login-object bind and a later `exec()` rebind onto the real
+player object (matching `login.c`'s own comment above, "any object that
+was ever handed a connection"), never cleared again, not even once the
+connection later disconnects. `userp()`/`query_once_interactive()` now
+check this flag directly instead of scanning `InteractiveRegistry` (the
+same scan `interactive()` itself correctly still uses, since that efun's
+real semantics genuinely are "connected right now" -- left unchanged).
+`find_player()`/`users()` were also left unchanged: both are correctly
+scoped to currently-connected objects only in real FluffOS too, not
+`O_ONCE_INTERACTIVE`.
+
+3 new regression tests: `userp()`/`interactive()` both true while a
+connection is live, `userp()` staying true while `interactive()` goes
+false after the connection closes (the actual bug), and `userp()`
+returning false for a plain object that was never bound to any
+connection at all. Full suite: 353 tests passing, up from 350, no
+regressions. Live-confirmed end to end on port 1129: a temporary
+`cmd_userptest` on `mudlib_stub/obj/user.c` (removed after this check,
+same as this project's own prior throwaway probes) drove two real
+connections, Alice and Bob -- while Bob was still connected, Alice's
+check reported `userp=1 interactive=1`; after Bob's connection was
+closed abruptly (a raw socket close, no `quit`, the same shape as a
+real client crash), Bob's `net_dead()` broadcast fired as expected and
+Alice's check on the same still-present Bob object then reported
+`userp=1 interactive=0` -- exactly the real-semantics divergence this
+slice fixed. Driver console log stayed silent throughout (no errors, no
+crash).
+
 **2026-08-09: `restore_object()` now reads real FluffOS on-disk save
 files, not just this driver's own format.** Picked over the other
 remaining Known Stubs candidates named for this session (array `&`

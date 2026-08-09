@@ -9063,6 +9063,66 @@ static void testSprintfZeroPaddedStarFieldWidthThrows() {
 }
 
 // ---------------------------------------------------------------------
+// printf(string, ...): real efuns_main.c's own f_printf() -- formats
+// through the exact same machinery as sprintf() (confirmed against
+// string_print_formatted(), not a separate format engine) and writes
+// the result to command_giver. This driver reuses write()'s own already-
+// proven target resolution (OutputContext::current()) rather than a
+// second, separately-approximated one -- see EfunTable.cpp's own
+// comment on the "printf" registration.
+
+static void testPrintfWritesSprintfFormattedResultToCurrentConnection() {
+    // "%|9s" (centre-justify) rather than a bare "%s" deliberately --
+    // proves printf() really goes through the same sprintf() machinery
+    // (including this slice's own "|" work), not a separate, simpler
+    // format path that only happens to handle plain strings.
+    ObjectVarHarness harness;
+    harness.writeFile("/printf_probe1.c",
+        "void probe() { printf(\"[%|9s]\", \"abc\"); }\n");
+    auto probe = harness.objects.cloneObject("/printf_probe1");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(probe, "probe", {});
+    lpcdriver::OutputContext::set(nullptr);
+
+    char buf[256];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    std::string received(buf, static_cast<size_t>(n));
+    assert(received == "[   abc   ]");
+
+    ::close(fds[1]);
+    std::cout << "testPrintfWritesSprintfFormattedResultToCurrentConnection OK\n";
+}
+
+static void testPrintfThrowsOnNonStringFormatArgument() {
+    // Real f_printf() shares sprintf()'s own format-string validation
+    // (both go through string_print_formatted()) -- confirmed here by
+    // reusing sprintfImpl directly rather than duplicating its checks.
+    ObjectVarHarness harness;
+    harness.writeFile("/printf_probe2.c", "void probe() { printf(42); }\n");
+    auto probe = harness.objects.cloneObject("/printf_probe2");
+    assert(probe != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(probe, "probe", {});
+    } catch (const lpcdriver::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("sprintf") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testPrintfThrowsOnNonStringFormatArgument OK\n";
+}
+
+// ---------------------------------------------------------------------
 // Rifts combat math efuns (phase 1 of the game-logic-mechanics move,
 // 2026-08-08): each test below compiles the ORIGINAL LPC function body,
 // transcribed verbatim from daemon/rifts_combat.c as it stood before the
@@ -9897,6 +9957,8 @@ int main() {
     testSprintfStarFieldWidthPullsWidthFromLeadingArgument();
     testSprintfStarPrecisionPullsPrecisionFromLeadingArgument();
     testSprintfZeroPaddedStarFieldWidthThrows();
+    testPrintfWritesSprintfFormattedResultToCurrentConnection();
+    testPrintfThrowsOnNonStringFormatArgument();
     testPpCombatBonusEfunMatchesLpcAcrossBoundaries();
     testPsDamageBonusEfunMatchesLpcAcrossBoundariesAndSupernatural();
     testOccBaseApmEfunMatchesLpcAcrossAllCategoriesAndEdgeCases();

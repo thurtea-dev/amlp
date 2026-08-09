@@ -1051,7 +1051,7 @@ void registerCoreEfuns() {
     // and capital "%X" are all not implemented; throws rather than
     // silently mishandling anything else, matching this codebase's
     // existing convention for other partially-implemented efuns.
-    t.registerEfun("sprintf", [](VM&, std::vector<Value>& args) -> Value {
+    auto sprintfImpl = [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("sprintf: expected a string format argument");
         }
@@ -1260,6 +1260,33 @@ void registerCoreEfuns() {
             result += piece;
         }
         return Value(result);
+    };
+    t.registerEfun("sprintf", sprintfImpl);
+
+    // void printf(string, ...) -- real efuns_main.c's own f_printf():
+    // "if (command_giver) { ret = string_print_formatted(...); ...
+    // tell_object(command_giver, ret, ...); }" -- formats exactly like
+    // sprintf() (confirmed same underlying string_print_formatted() /
+    // sprintf.c machinery, not a separate format engine) and writes the
+    // result to command_giver, silently doing nothing when there is
+    // none. This driver's own write() efun (see its own registration
+    // above) already approximates real write()'s own "target is
+    // command_giver, falling back to current_object" semantics as
+    // "whichever connection is currently driving the call"
+    // (OutputContext::current()) -- real write()'s own do_write()
+    // (simulate.c) targets command_giver the same way printf() does, so
+    // printf() reuses write()'s own already-proven target resolution
+    // rather than introducing a second, separately-approximated one.
+    t.registerEfun("printf", [sprintfImpl](VM& vm, std::vector<Value>& args) -> Value {
+        Value formatted = sprintfImpl(vm, args);
+        if (auto* s = std::get_if<std::string>(&formatted.data)) {
+            if (Connection* conn = OutputContext::current()) {
+                conn->send(*s);
+            } else {
+                std::cout << *s;
+            }
+        }
+        return Value{};
     });
 
     // void message(mixed type, mixed msg, mixed targets, void|mixed
