@@ -7722,6 +7722,222 @@ static void testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy() {
     std::cout << "testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy OK\n";
 }
 
+// ---------------------------------------------------------------------
+// notify_fail(string | function): real add_action.c's own
+// f_notify_fail()/notify_no_command(). Sets a pending message on
+// command_giver's own connection that is only ever shown if the whole
+// rest of dispatch for that input line ends with nothing claiming the
+// command -- see Connection.hpp's own pendingNotifyFail_ comment and
+// Server::dispatchLine()'s own wiring for the exact real mechanism this
+// mirrors. These tests exercise Server::dispatchLine() directly (not
+// just VM::dispatchCommand()), since the actual "was the message shown"
+// behavior lives at that layer, matching the connect/input-protocol
+// tests' own AF_UNIX socketpair pattern just above.
+
+static void testNotifyFailMessageShownWhenNoHandlerClaimsCommand() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nf_player1.c",
+        "void setup() {\n"
+        "    enable_commands();\n"
+        "    add_action(\"cmd_go\", \"go\");\n"
+        "}\n"
+        "int cmd_go(string arg) {\n"
+        "    notify_fail(\"You can't go that way.\\n\");\n"
+        "    return 0;\n"
+        "}\n");
+    auto player = harness.objects.cloneObject("/nf_player1");
+    assert(player != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(player);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(player, "setup", {});
+    lpcdriver::Server::dispatchLine(harness.vm, conn, "go north");
+    lpcdriver::OutputContext::set(nullptr);
+
+    char buf[256];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    std::string received(buf, static_cast<size_t>(n));
+    assert(received == "You can't go that way.\n");
+
+    ::close(fds[1]);
+    std::cout << "testNotifyFailMessageShownWhenNoHandlerClaimsCommand OK\n";
+}
+
+static void testNotifyFailMessageSuppressedWhenLaterHandlerClaimsCommand() {
+    // The exact real add_action fallthrough shape: two handlers
+    // registered for the same verb. add_action() always prepends (real
+    // add_action.c: "adding to the top of the list doesn't harm
+    // anything"), so registering cmd_accept first and cmd_decline
+    // second puts cmd_decline at the front, checked first -- it calls
+    // notify_fail() and declines, dispatch falls through to cmd_accept,
+    // which claims the command without ever touching notify_fail()
+    // itself. Real user_parser(): a truthy return is an immediate
+    // "return 1", notify_no_command() is never reached, so whatever
+    // cmd_decline set must never surface.
+    ObjectVarHarness harness;
+    harness.writeFile("/nf_player2.c",
+        "void setup() {\n"
+        "    enable_commands();\n"
+        "    add_action(\"cmd_accept\", \"go\");\n"
+        "    add_action(\"cmd_decline\", \"go\");\n"
+        "}\n"
+        "int cmd_decline(string arg) {\n"
+        "    notify_fail(\"You can't go that way.\\n\");\n"
+        "    return 0;\n"
+        "}\n"
+        "int cmd_accept(string arg) {\n"
+        "    write(\"You go \" + arg + \".\\n\");\n"
+        "    return 1;\n"
+        "}\n");
+    auto player = harness.objects.cloneObject("/nf_player2");
+    assert(player != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(player);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(player, "setup", {});
+    lpcdriver::Server::dispatchLine(harness.vm, conn, "go north");
+    lpcdriver::OutputContext::set(nullptr);
+
+    char buf[256];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    std::string received(buf, static_cast<size_t>(n));
+    // Only cmd_accept's own write() must appear -- cmd_decline's
+    // notify_fail() message must never have been sent.
+    assert(received == "You go north.\n");
+
+    ::close(fds[1]);
+    std::cout << "testNotifyFailMessageSuppressedWhenLaterHandlerClaimsCommand OK\n";
+}
+
+static void testNotifyFailDoesNotLeakIntoALaterUnrelatedFailedDispatch() {
+    // Real clear_notify(): runs unconditionally at the start of every
+    // new input line's own dispatch. A message set (and shown) for one
+    // line must not reappear for a later, unrelated line that never
+    // calls notify_fail() itself -- and since this driver deliberately
+    // does not inject real notify_no_command()'s own hardcoded "What?\n"
+    // default (see Server::dispatchLine()'s own comment), the second
+    // dispatch must produce no output at all.
+    ObjectVarHarness harness;
+    harness.writeFile("/nf_player3.c",
+        "void setup() {\n"
+        "    enable_commands();\n"
+        "    add_action(\"cmd_go\", \"go\");\n"
+        "}\n"
+        "int cmd_go(string arg) {\n"
+        "    notify_fail(\"You can't go that way.\\n\");\n"
+        "    return 0;\n"
+        "}\n");
+    auto player = harness.objects.cloneObject("/nf_player3");
+    assert(player != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(player);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(player, "setup", {});
+    lpcdriver::Server::dispatchLine(harness.vm, conn, "go north");
+
+    char buf[256];
+    ssize_t n1 = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n1 > 0);
+    assert(std::string(buf, static_cast<size_t>(n1)) == "You can't go that way.\n");
+
+    // A completely different, unrecognized verb: no action matches at
+    // all, and cmd_go (the only thing that ever calls notify_fail()) is
+    // never reached this time.
+    lpcdriver::Server::dispatchLine(harness.vm, conn, "xyzzy");
+    lpcdriver::OutputContext::set(nullptr);
+
+    ssize_t n2 = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n2 <= 0); // nothing sent: no stale leak, no hardcoded default either
+
+    ::close(fds[1]);
+    std::cout << "testNotifyFailDoesNotLeakIntoALaterUnrelatedFailedDispatch OK\n";
+}
+
+static void testNotifyFailFunctionFormShowsOnlyAStringReturn() {
+    // Real spec: "void notify_fail(string | function);" -- confirmed
+    // against func_spec.c directly, not assumed to be string-only. Real
+    // notify_no_command(): calls the function with no arguments and
+    // shows its return value only if that return is itself a string; a
+    // non-string return (e.g. plain 0) shows nothing at all.
+    ObjectVarHarness harness;
+    harness.writeFile("/nf_player4.c",
+        "int mode;\n"
+        "void setup() {\n"
+        "    enable_commands();\n"
+        "    add_action(\"cmd_go\", \"go\");\n"
+        "}\n"
+        "void set_mode(int m) { mode = m; }\n"
+        "mixed fail_message() { return mode ? \"Dynamic failure.\\n\" : 0; }\n"
+        "int cmd_go(string arg) {\n"
+        "    notify_fail((: fail_message :));\n"
+        "    return 0;\n"
+        "}\n");
+    auto player = harness.objects.cloneObject("/nf_player4");
+    assert(player != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(player);
+
+    // mode=0: fail_message() returns plain 0, nothing should be shown.
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(player, "setup", {});
+    lpcdriver::Server::dispatchLine(harness.vm, conn, "go north");
+    lpcdriver::OutputContext::set(nullptr);
+
+    char buf[256];
+    ssize_t n1 = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n1 <= 0);
+
+    // mode=1: fail_message() returns a real string, must be shown.
+    harness.vm.callFunction(player, "set_mode", {lpcdriver::Value(static_cast<int64_t>(1))});
+    lpcdriver::OutputContext::set(&conn);
+    lpcdriver::Server::dispatchLine(harness.vm, conn, "go north");
+    lpcdriver::OutputContext::set(nullptr);
+
+    ssize_t n2 = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n2 > 0);
+    assert(std::string(buf, static_cast<size_t>(n2)) == "Dynamic failure.\n");
+
+    ::close(fds[1]);
+    std::cout << "testNotifyFailFunctionFormShowsOnlyAStringReturn OK\n";
+}
+
+static void testNotifyFailThrowsOnNonStringNonFunctionArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nf_probe5.c",
+        "void probe() { notify_fail(42); }\n");
+    auto probe = harness.objects.cloneObject("/nf_probe5");
+    assert(probe != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(probe, "probe", {});
+    } catch (const lpcdriver::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("notify_fail") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testNotifyFailThrowsOnNonStringNonFunctionArgument OK\n";
+}
+
 static void testThisPlayerReturnsCommandGiverDuringDispatch() {
     ObjectVarHarness harness;
     harness.writeFile("/tp_room.c",
@@ -9617,6 +9833,11 @@ int main() {
     testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord();
     testDispatchCommandPassesUndefinedNotEmptyStringForBareVerbWithNoArgument();
     testDispatchCommandTriesNextMatchWhenFirstHandlerReturnsFalsy();
+    testNotifyFailMessageShownWhenNoHandlerClaimsCommand();
+    testNotifyFailMessageSuppressedWhenLaterHandlerClaimsCommand();
+    testNotifyFailDoesNotLeakIntoALaterUnrelatedFailedDispatch();
+    testNotifyFailFunctionFormShowsOnlyAStringReturn();
+    testNotifyFailThrowsOnNonStringNonFunctionArgument();
     testThisPlayerReturnsCommandGiverDuringDispatch();
     testQueryVerbReturnsZeroOutsideOfDispatch();
     testQueryPrivsReturnsZeroWhenNeverSet();

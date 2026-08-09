@@ -172,6 +172,12 @@ void Server::acceptNewConnections() {
 // process_input() is skipped entirely for that line. Only when nothing
 // is pending does process_input() run instead.
 void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
+    // Real process_user_command() (comm.c): clear_notify(ip->ob) runs
+    // unconditionally at the very top, before even checking for a
+    // pending input_to() handler -- a notify_fail() message set during
+    // an earlier, unrelated dispatch must never leak into this one.
+    conn.clearPendingNotifyFail();
+
     if (conn.hasPendingInputTo()) {
         std::optional<PendingInputTo> pending = conn.takePendingInputTo();
         auto target = pending->object.lock();
@@ -217,15 +223,43 @@ void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
 
     // real parse_command(): matches against command_giver's own action
     // table (see VM::dispatchCommand()'s own comment for the exact
-    // add_action/enable_commands semantics this backs). A dispatched-but-
-    // unhandled line (no action matched, or every match declined) is not
-    // an error at this layer -- real notify_no_command()'s own "what?"
-    // style default failure message is a mudlib-level concern
-    // (std/living.c's own cmd_hook() already sends one via
-    // "if(query_client()) receive(\"<error>\");" plus its own SOUL_D/
-    // CHAT_D fallback chain), not something this driver needs to inject
-    // on its own.
-    vm.dispatchCommand(obj, toDispatch);
+    // add_action/enable_commands semantics this backs).
+    bool claimed = vm.dispatchCommand(obj, toDispatch);
+
+    // real notify_no_command() (add_action.c): fires only when the
+    // whole action-table walk ended with nothing claiming the command --
+    // dispatchCommand() returning false is exactly that condition (a
+    // truthy handler return makes it return true immediately, and real
+    // user_parser() skips notify_no_command() on that same path). A
+    // string is shown directly; a function is called with no arguments
+    // and, if *it* returns a string, that string is shown instead -- a
+    // non-string return from the function shows nothing at all, matching
+    // real semantics exactly (not "show the function itself" or "show
+    // nothing whenever a function was set"). If notify_fail() was never
+    // called during this dispatch, nothing further happens here,
+    // deliberately: real notify_no_command()'s own hardcoded "What?\n"
+    // default is left as a mudlib-level concern, matching this driver's
+    // pre-existing scoping decision for the "no action matched at all"
+    // case (std/living.c's own cmd_hook() already sends its own default
+    // via "if(query_client()) receive(\"<error>\");" plus its own SOUL_D/
+    // CHAT_D fallback chain) -- notify_fail() extends that same decision
+    // rather than overriding it: this driver shows a message *this
+    // mudlib's own code explicitly asked to be shown*, never one this
+    // driver invents on its own.
+    if (!claimed) {
+        if (auto pending = conn.takePendingNotifyFail()) {
+            if (auto* msg = std::get_if<std::string>(&pending->data)) {
+                conn.send(*msg);
+            } else if (auto* closure = std::get_if<std::shared_ptr<Closure>>(&pending->data)) {
+                if (*closure) {
+                    Value result = vm.callClosure(*closure, {});
+                    if (auto* resultMsg = std::get_if<std::string>(&result.data)) {
+                        conn.send(*resultMsg);
+                    }
+                }
+            }
+        }
+    }
 }
 
 void Server::fireNetDeadIfLinkDead(VM& vm, Connection& conn) {

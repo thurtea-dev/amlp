@@ -23,6 +23,16 @@ struct PendingInputTo {
     std::vector<Value> extraArgs;
 };
 
+// The per-connection "pending notify_fail message" slot -- real
+// FluffOS's interactive_t::default_err_message (a "union string_or_func",
+// comm.h), set by notify_fail(string|function) and consulted only if
+// command dispatch for the current input line ends with no add_action
+// handler ultimately claiming it (real notify_no_command(), add_action.c
+// -- see Server::dispatchLine()'s own wiring for exactly where this
+// driver mirrors that). A plain Value already covers both real forms (a
+// string, or a function/Closure) without needing a bespoke union the
+// way real FluffOS does.
+
 class Connection {
 public:
     explicit Connection(int fd);
@@ -62,12 +72,36 @@ public:
     // callers that same ordering for free.
     std::optional<PendingInputTo> takePendingInputTo();
 
+    // Real notify_fail()'s own "clear_notify() first, then store"
+    // (add_action.c): overwriting is sufficient here since a plain
+    // Value assignment already releases whatever was set before, no
+    // separate clear step needed the way real FluffOS's own manual
+    // ref-counting requires.
+    void setPendingNotifyFail(Value message) { pendingNotifyFail_ = std::move(message); }
+
+    // Real notify_no_command()'s own consult-and-clear -- one-shot, the
+    // same "return the optional and reset the slot" shape
+    // takePendingInputTo() already uses just above.
+    std::optional<Value> takePendingNotifyFail() {
+        std::optional<Value> result = std::move(pendingNotifyFail_);
+        pendingNotifyFail_.reset();
+        return result;
+    }
+
+    // Real clear_notify(): called unconditionally at the very start of
+    // every new input line's own dispatch (process_user_command(),
+    // comm.c), before even checking for a pending input_to() handler --
+    // a notify_fail() set during an earlier, unrelated dispatch must
+    // never leak into a later one.
+    void clearPendingNotifyFail() { pendingNotifyFail_.reset(); }
+
 private:
     int fd_;
     std::string inputBuffer_;
     std::shared_ptr<LpcObject> boundObject_;
     bool closed_ = false;
     std::optional<PendingInputTo> pendingInputTo_;
+    std::optional<Value> pendingNotifyFail_;
 };
 
 } // namespace lpcdriver

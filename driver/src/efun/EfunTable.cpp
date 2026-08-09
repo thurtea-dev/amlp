@@ -2097,6 +2097,45 @@ void registerCoreEfuns() {
         return Value(verb);
     });
 
+    // void notify_fail(string | function) -- real add_action.c's own
+    // f_notify_fail(): confirmed against the real spec directly
+    // (func_spec.c: "void notify_fail(string | function);") rather than
+    // assumed to be string-only. Sets a pending "command not understood"
+    // message on command_giver's own connection (real interactive_t::
+    // default_err_message, this driver's own Connection::
+    // pendingNotifyFail_) -- it does NOT print anything itself. The
+    // message is only ever shown if the *entire* rest of dispatch for
+    // this input line ends with no add_action handler claiming it (real
+    // notify_no_command(), fired from user_parser()'s own dispatch loop
+    // only after every matching sentence either declined or none
+    // matched at all -- see Server::dispatchLine()'s own wiring for
+    // exactly where this driver mirrors that). A handler tried *after*
+    // this one that DOES claim the command (returns truthy) leaves
+    // whatever was set here unconsulted and it is simply overwritten or
+    // discarded on the next line -- matching real semantics precisely,
+    // since notify_no_command() only ever runs on the "nothing claimed
+    // it" path, confirmed by reading user_parser()'s own dispatch loop
+    // directly (a truthy return is an immediate "return 1", skipping
+    // notify_no_command() entirely). No separate "clear first" step is
+    // needed the way real f_notify_fail() calling clear_notify() does --
+    // a plain Value assignment already releases whatever was set before.
+    // No-op (not an error) when there is no interactive command_giver,
+    // matching real f_notify_fail()'s own "if (command_giver &&
+    // command_giver->interactive)" guard.
+    t.registerEfun("notify_fail", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() ||
+            (!std::holds_alternative<std::string>(args[0].data) &&
+             !std::holds_alternative<std::shared_ptr<Closure>>(args[0].data))) {
+            throw LpcRuntimeError("notify_fail: expected a string or function argument");
+        }
+        auto giver = resolveCommandGiver(vm);
+        if (!giver) return Value{};
+        if (Connection* conn = InteractiveRegistry::find(giver)) {
+            conn->setPendingNotifyFail(args[0]);
+        }
+        return Value{};
+    });
+
     // int exec(object new_ob, object old_ob) -- real replace_interactive()
     // (efuns_main.c's f_exec(): "replace_interactive((sp-1)->u.ob,
     // sp->u.ob)"): rebinds the interactive connection currently driving

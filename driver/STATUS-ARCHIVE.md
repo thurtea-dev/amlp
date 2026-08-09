@@ -15,6 +15,101 @@ content originally pointed at the Known Stubs section, which now lives
 in `STATUS.md` instead of this file -- left as-is (verbatim), not
 rewritten.
 
+**2026-08-09: `restore_object()` now reads real FluffOS on-disk save
+files, not just this driver's own format.** Picked over the other
+remaining Known Stubs candidates named for this session (array `&`
+intersection ordering, `replace_string()`'s range args, `to_int()`'s
+buffer case, `implode()`'s function-per-element form, `query_ip_name()`'s
+no-DNS fallback) and the still-paused reconnect/take-over save-flag
+bug, on the same standard as the last two slices: weighed for silent-
+wrong-behavior risk on a real-world-reachable path, not narrow edge
+cases or stubs that already throw a clear error. Of the five named
+candidates, checked each against real usage before picking: `replace_string()`'s
+range args and `implode()`'s function-per-element form both already
+throw a clear error rather than misbehaving silently (confirmed by
+reading their own `EfunTable.cpp` bodies); `to_int()`'s buffer case is
+unreachable in principle, not just in practice -- this driver's `Value`
+variant has no buffer type anywhere in the codebase, so a real buffer
+value can never exist to pass to it; `query_ip_name()`'s no-DNS fallback
+is confirmed logging/display-only in the one real mudlib this project
+has (`nightmare3_fluffos_v2/lib/std/user.c`'s own `ip = query_ip_name(...)`,
+used only for a login-log line and an admin `_people.c` display, never
+a security or matching decision), and this driver's own always-numeric
+answer is what the doc already noted matches real FluffOS's own
+documented fallback behavior anyway; array `&` intersection order is
+not a real compatibility gap at all once checked against the actual
+reference source (`fluffos-2.9-ds2.08/array.c`'s own `alist_cmp()`
+sorts by raw `svalue_t` union bits -- pointer identity for strings/
+objects -- meaning real FluffOS's own "sorted" order is an
+implementation artifact no sane mudlib content could depend on either;
+only the *deduplication* half of that gap is a genuine, if narrow,
+behavioral difference, left as-is this slice).
+
+The actual pick, found by auditing the same "Known stubs" list with the
+same "what might be silently wrong, not loudly erroring" standard that
+picked `net_dead()` and the `destruct()` connection-close bug the last
+two slices: `save_object()`/`restore_object()`'s own bullet, which
+already documented the real risk precisely -- this driver only ever
+wrote and read its own recursive, tab-delimited format, so a genuine,
+pre-existing FluffOS save file (the exact shape any real mudlib's
+existing player/daemon data would already be in, directly touching this
+project's own stated end goal of eventually running real-world mudlibs)
+silently kept whatever defaults `create()` already set instead of
+loading, with no error at all. Confirmed still real and not
+theoretical: `nightmare3_fluffos_v2/lib/daemon/save/banish.o`, which
+ships with this project's own mudlib, is in the real format (`#/daemon/
+banish.c` comment header, then `varname value` lines in plain LPC
+literal syntax, space-delimited) -- confirmed against an untouched
+backup copy predating this driver ever touching it, since the copy
+inside `mudlib/nightmare3_fluffos_v2/` itself has since been silently
+overwritten in this driver's own format by an earlier session's own
+live testing, which is exactly the failure mode this bullet described.
+
+Implementation: a new read-only parser (`parseRealSaveValue()` and
+helpers, `EfunTable.cpp`), grounded directly in `fluffos-2.9-ds2.08/
+object.c`'s own `save_svalue()` (the writer) and `restore_string()`/
+`restore_array()`/`restore_mapping()`/`parse_numeric()` (the readers),
+not guessed: strings backslash-escape `"`/`\` and translate a raw `\r`
+byte back to `\n` (real `save_svalue()`'s own on-disk encoding of an
+embedded newline, so a literal newline in a saved string can't be
+mistaken for the end of the save-file line); numbers are plain digits
+for an int, a `.`-led fraction for a float (no exponent form -- real
+`save_svalue()`'s own writer, `sprintf(..., "%f", ...)`, never produces
+one, so a faithful reader for genuine on-disk data from this exact
+vendored driver doesn't need to parse one either); arrays/mappings
+recurse through the same parser, trailing-comma-tolerant to match the
+real writer's own "always write a comma after every element, including
+the last" convention. `restore_object()`'s per-line loop now auto-
+detects which format a line is in (a tab is this driver's own format's
+delimiter and never appears in the real one; a `#`-led line is a real-
+format comment, skipped in either format, matching real
+`restore_object_from_line()`'s own "ignore 'comments'" case) rather
+than assuming one globally, so a save file this driver itself already
+wrote continues round-tripping exactly as before -- `save_object()`
+itself is unchanged and still only ever writes this driver's own
+format, since nothing needs to read a file this driver wrote except
+this driver, and doing so is simpler and already fully covered. Real
+LPC "class" values (`(/ ... /)`) are not implemented -- this driver has
+no class/struct type anywhere else either -- and throw a clear error
+rather than being silently mishandled, matching this codebase's
+existing convention for other unimplemented shapes.
+
+3 new regression tests: scalars and nested array/mapping content in the
+real format (int, negative int, float, string, an array containing an
+int/string/mapping mix), the exact real `banish.o` shape (a `#`-led
+comment header line, empty arrays, an empty mapping), and string
+escaping (`\"`, `\\`, and the raw-`\r`-to-`\n` translation) -- all
+grounded in the real writer's own grammar, not just this driver's own
+format's own already-covered round trip. Full suite: 350 tests passing,
+up from 347, no regressions. Live-confirmed end to end on port 1129: a
+throwaway probe object and command (`/banish_probe.c`,
+`cmd_restoretest` on `mudlib_stub/obj/user.c`, both removed after this
+check, same as this project's own prior throwaway probes) loaded a
+byte-for-byte copy of the real, untouched `banish.o` backup and
+correctly reported every one of its real variables (`__Names` through
+`__TmpBanish`) as present and empty, with the driver's own console log
+staying silent throughout.
+
 **2026-08-08: `destruct()` now closes the destructed object's OWN
 connection, not whichever connection happens to be `current()`.** This
 was the bug flagged, but deliberately left unfixed, at the end of the

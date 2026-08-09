@@ -3,6 +3,93 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-09: `notify_fail()` implemented, its own single focused task
+per this session's own instructions.** Picked directly from the
+efun-coverage survey the previous session produced: `notify_fail` had
+1129 real call sites in the target mudlib, next-highest gap 34 --
+dramatically higher than anything else surveyed, and not a simul_efun
+here (unlike `tell_object`/`say`/`tell_room`/`shout`, which the survey
+also flagged but are already covered by this mudlib's own
+`secure/SimulEfun/communications.c`). Every one of those 1129 call
+sites is the standard `add_action` "command didn't match, set this
+failure message" idiom (`if (!condition) return notify_fail("...\n");`),
+used throughout essentially every `cmd_*` file -- previously undefined,
+so any mistyped or unmet-precondition command argument anywhere in the
+mudlib would throw "undefined function or efun: notify_fail" the
+instant it was reached. Likely never surfaced in prior live testing
+because it only fires on a command's *failure* branch, and testing so
+far has mostly walked happy paths.
+
+Grounded directly in `fluffos-2.9-ds2.08/add_action.c` before
+implementing, not assumed: confirmed the real spec is `void
+notify_fail(string | function);` (`func_spec.c`) -- both forms real,
+not string-only. `f_notify_fail()` itself just stores the value on
+`command_giver->interactive->default_err_message` (a `clear_notify()`
+call first, then store) and does not print anything. The actual
+"only shown if nothing else claims the command" mechanism lives in
+`user_parser()`'s own dispatch loop: it walks `command_giver->sent` in
+order, and a handler returning truthy is an immediate `return 1` --
+`notify_no_command()` (the function that actually consults and shows
+the pending message) is only ever reached after the *entire* loop
+exhausts with nothing claiming the command. `notify_no_command()`
+itself: a string is shown directly; a function is called with no
+arguments and only *its* string return is shown (a non-string return
+shows nothing, not the function itself); if nothing was ever set, real
+FluffOS shows a hardcoded default `"What?\n"`. `clear_notify()` runs
+unconditionally at the very start of every new input line's own
+dispatch (`process_user_command()`, comm.c), before even checking for a
+pending `input_to()` handler -- confirmed so a message set for one line
+can never leak into a later, unrelated one.
+
+Implementation follows that mechanism directly. New per-connection
+state (`Connection::pendingNotifyFail_`, a plain `std::optional<Value>`
+-- already covers both the string and function/`Closure` forms via
+`Value`'s own variant, no bespoke union needed the way real FluffOS's
+manual ref-counting requires). New `notify_fail(string | function)`
+efun (`EfunTable.cpp`): resolves `command_giver` the same way other
+command-dispatch efuns already do, looks up its `Connection` via
+`InteractiveRegistry::find()`, and stores the value -- a plain
+assignment already replaces whatever was set before, no separate
+"clear first" step needed. `Server::dispatchLine()` (the one real
+per-line entry point this driver has, matching real
+`process_user_command()`'s own scope exactly) now calls
+`conn.clearPendingNotifyFail()` unconditionally at the top, before the
+existing pending-`input_to()` check, and -- after `dispatchCommand()`
+returns -- consults and shows the pending message only when
+`dispatchCommand()` returned `false` (real `user_parser()`'s own
+"nothing claimed it" condition, exactly), same string-vs-function
+branching as real `notify_no_command()`. Deliberately not implemented:
+the hardcoded `"What?\n"` default for the "nothing was ever set" case
+-- this driver already has a standing, pre-existing decision (this same
+comment, from the original `add_action`/`enable_commands` slice) that a
+default failure message for a fully-unmatched command is a mudlib-level
+concern (`std/living.c`'s own `cmd_hook()` already sends one), not
+something this driver injects on its own; `notify_fail()` extends that
+same decision rather than overriding it, showing only a message the
+mudlib's own code explicitly asked to be shown.
+
+5 new regression tests, run through `Server::dispatchLine()` directly
+(not just `VM::dispatchCommand()`) since the actual "was the message
+shown" behavior lives at that layer: the message shown when nothing
+claims the command; the exact real add_action fallthrough shape
+requested -- two handlers registered for one verb, the checked-first one
+calls `notify_fail()` and declines, the second claims the command
+without ever touching `notify_fail()`, and the pending message must
+never surface; no leak into a later, unrelated failed dispatch that
+never calls `notify_fail()` itself (and confirms no hardcoded default
+appears either); the function form showing only a genuine string
+return, not a non-string one; and a non-string/non-function argument
+throwing a clear error. Full suite: 372 tests passing, up from 367, no
+regressions. Live-confirmed end to end on port 1129 using
+`mudlib_stub`'s own pre-existing "You can't go that way.\n" failure
+shape in `go()`/`cmd_north()`/`cmd_south()` (temporarily swapped to
+`notify_fail()` plus real truthy/falsy returns, reverted after the
+check, per this project's own convention) -- rather than inventing new
+scope: from the starting room (only a `north` exit), typing `south`
+showed exactly `"You can't go that way.\n"`, and a following `north`
+moved successfully with no leftover or spurious message. Driver
+console log stayed silent throughout (no errors, no crash).
+
 **2026-08-09: `sprintf()`'s `"|"` centre-justify field modifier
 implemented; two stale Known Stubs claims corrected, one investigated
 and disproven.** Per this session's own added instruction, re-verified
@@ -306,101 +393,6 @@ Alice's check on the same still-present Bob object then reported
 `userp=1 interactive=0` -- exactly the real-semantics divergence this
 slice fixed. Driver console log stayed silent throughout (no errors, no
 crash).
-
-**2026-08-09: `restore_object()` now reads real FluffOS on-disk save
-files, not just this driver's own format.** Picked over the other
-remaining Known Stubs candidates named for this session (array `&`
-intersection ordering, `replace_string()`'s range args, `to_int()`'s
-buffer case, `implode()`'s function-per-element form, `query_ip_name()`'s
-no-DNS fallback) and the still-paused reconnect/take-over save-flag
-bug, on the same standard as the last two slices: weighed for silent-
-wrong-behavior risk on a real-world-reachable path, not narrow edge
-cases or stubs that already throw a clear error. Of the five named
-candidates, checked each against real usage before picking: `replace_string()`'s
-range args and `implode()`'s function-per-element form both already
-throw a clear error rather than misbehaving silently (confirmed by
-reading their own `EfunTable.cpp` bodies); `to_int()`'s buffer case is
-unreachable in principle, not just in practice -- this driver's `Value`
-variant has no buffer type anywhere in the codebase, so a real buffer
-value can never exist to pass to it; `query_ip_name()`'s no-DNS fallback
-is confirmed logging/display-only in the one real mudlib this project
-has (`nightmare3_fluffos_v2/lib/std/user.c`'s own `ip = query_ip_name(...)`,
-used only for a login-log line and an admin `_people.c` display, never
-a security or matching decision), and this driver's own always-numeric
-answer is what the doc already noted matches real FluffOS's own
-documented fallback behavior anyway; array `&` intersection order is
-not a real compatibility gap at all once checked against the actual
-reference source (`fluffos-2.9-ds2.08/array.c`'s own `alist_cmp()`
-sorts by raw `svalue_t` union bits -- pointer identity for strings/
-objects -- meaning real FluffOS's own "sorted" order is an
-implementation artifact no sane mudlib content could depend on either;
-only the *deduplication* half of that gap is a genuine, if narrow,
-behavioral difference, left as-is this slice).
-
-The actual pick, found by auditing the same "Known stubs" list with the
-same "what might be silently wrong, not loudly erroring" standard that
-picked `net_dead()` and the `destruct()` connection-close bug the last
-two slices: `save_object()`/`restore_object()`'s own bullet, which
-already documented the real risk precisely -- this driver only ever
-wrote and read its own recursive, tab-delimited format, so a genuine,
-pre-existing FluffOS save file (the exact shape any real mudlib's
-existing player/daemon data would already be in, directly touching this
-project's own stated end goal of eventually running real-world mudlibs)
-silently kept whatever defaults `create()` already set instead of
-loading, with no error at all. Confirmed still real and not
-theoretical: `nightmare3_fluffos_v2/lib/daemon/save/banish.o`, which
-ships with this project's own mudlib, is in the real format (`#/daemon/
-banish.c` comment header, then `varname value` lines in plain LPC
-literal syntax, space-delimited) -- confirmed against an untouched
-backup copy predating this driver ever touching it, since the copy
-inside `mudlib/nightmare3_fluffos_v2/` itself has since been silently
-overwritten in this driver's own format by an earlier session's own
-live testing, which is exactly the failure mode this bullet described.
-
-Implementation: a new read-only parser (`parseRealSaveValue()` and
-helpers, `EfunTable.cpp`), grounded directly in `fluffos-2.9-ds2.08/
-object.c`'s own `save_svalue()` (the writer) and `restore_string()`/
-`restore_array()`/`restore_mapping()`/`parse_numeric()` (the readers),
-not guessed: strings backslash-escape `"`/`\` and translate a raw `\r`
-byte back to `\n` (real `save_svalue()`'s own on-disk encoding of an
-embedded newline, so a literal newline in a saved string can't be
-mistaken for the end of the save-file line); numbers are plain digits
-for an int, a `.`-led fraction for a float (no exponent form -- real
-`save_svalue()`'s own writer, `sprintf(..., "%f", ...)`, never produces
-one, so a faithful reader for genuine on-disk data from this exact
-vendored driver doesn't need to parse one either); arrays/mappings
-recurse through the same parser, trailing-comma-tolerant to match the
-real writer's own "always write a comma after every element, including
-the last" convention. `restore_object()`'s per-line loop now auto-
-detects which format a line is in (a tab is this driver's own format's
-delimiter and never appears in the real one; a `#`-led line is a real-
-format comment, skipped in either format, matching real
-`restore_object_from_line()`'s own "ignore 'comments'" case) rather
-than assuming one globally, so a save file this driver itself already
-wrote continues round-tripping exactly as before -- `save_object()`
-itself is unchanged and still only ever writes this driver's own
-format, since nothing needs to read a file this driver wrote except
-this driver, and doing so is simpler and already fully covered. Real
-LPC "class" values (`(/ ... /)`) are not implemented -- this driver has
-no class/struct type anywhere else either -- and throw a clear error
-rather than being silently mishandled, matching this codebase's
-existing convention for other unimplemented shapes.
-
-3 new regression tests: scalars and nested array/mapping content in the
-real format (int, negative int, float, string, an array containing an
-int/string/mapping mix), the exact real `banish.o` shape (a `#`-led
-comment header line, empty arrays, an empty mapping), and string
-escaping (`\"`, `\\`, and the raw-`\r`-to-`\n` translation) -- all
-grounded in the real writer's own grammar, not just this driver's own
-format's own already-covered round trip. Full suite: 350 tests passing,
-up from 347, no regressions. Live-confirmed end to end on port 1129: a
-throwaway probe object and command (`/banish_probe.c`,
-`cmd_restoretest` on `mudlib_stub/obj/user.c`, both removed after this
-check, same as this project's own prior throwaway probes) loaded a
-byte-for-byte copy of the real, untouched `banish.o` backup and
-correctly reported every one of its real variables (`__Names` through
-`__TmpBanish`) as present and empty, with the driver's own console log
-staying silent throughout.
 
 
 ## Known stubs / scope limitations (intentional, not bugs)
