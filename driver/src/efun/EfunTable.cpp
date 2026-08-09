@@ -2262,25 +2262,33 @@ void registerCoreEfuns() {
     // query_once_interactive userp(object);") for "has ob ever been
     // interactive" (O_ONCE_INTERACTIVE, set once and never cleared,
     // unlike interactive()'s own "is it interactive *right now*"
-    // O_ONLINE-style check). This driver has no O_ONCE_INTERACTIVE
-    // equivalent (InteractiveRegistry only tracks *currently* live
-    // connections, cleared on disconnect -- see its own comment), so
-    // this is approximated as "is it interactive right now", correct
-    // for every object this driver's own login/account-creation path
-    // actually calls userp() against (a connection's own login/player
-    // object, always still connected at the point it is checked) but
-    // not for an object that was once connected and has since
-    // disconnected.
+    // O_ONLINE-style check). This driver previously had no
+    // O_ONCE_INTERACTIVE equivalent and approximated it as "is it
+    // interactive right now" (an InteractiveRegistry scan, identical to
+    // interactive()'s own check) -- confirmed live-reachable and wrong,
+    // not just theoretical: real mudlib content calls userp() 61 times
+    // across combat, chat, mail, trading, and admin commands, heavily in
+    // the exact "userp(target) && !interactive(target)" or
+    // "ob->is_player() && !interactive(ob)" shape (e.g.
+    // cmds/mortal/_psi.c, cmds/skills/_backstab.c/_fireball.c/_bolt.c) --
+    // "is this a player object, currently offline" -- which the old
+    // approximation could never satisfy at all, since it made userp()
+    // and interactive() identical. The instant any connected player goes
+    // link-dead (an entirely ordinary event), every one of those checks
+    // would have silently misclassified their still-present character as
+    // not a player. Fixed via LpcObject::wasEverInteractive() (see its
+    // own comment): a real sticky flag, set once by Connection::attach()
+    // the first time an object is ever bound to a connection (covering
+    // both a login shell and a later exec() rebind onto the real player
+    // object, matching secure/std/login.c's own documented understanding
+    // of this exact efun), never cleared on disconnect.
     auto userpImpl = [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
             return Value(int64_t{0});
         }
         auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
         if (!ob) return Value(int64_t{0});
-        for (auto& live : InteractiveRegistry::all()) {
-            if (live == ob) return Value(int64_t{1});
-        }
-        return Value(int64_t{0});
+        return Value(static_cast<int64_t>(ob->wasEverInteractive() ? 1 : 0));
     };
     t.registerEfun("userp", userpImpl);
     t.registerEfun("query_once_interactive", userpImpl);

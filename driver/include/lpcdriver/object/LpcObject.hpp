@@ -94,6 +94,20 @@ public:
     bool isDestructed() const { return destructed_; }
     void setDestructed(bool d) { destructed_ = d; }
 
+    // real object_t's O_ONCE_INTERACTIVE flag (object.h): set once, the
+    // first time this object is ever bound to a connection
+    // (Connection::attach(), which covers both the initial login-object
+    // bind and a later exec() rebind onto the real player object), and
+    // never cleared again -- not even once the connection later
+    // disconnects. This is the flag userp()/query_once_interactive()
+    // actually check (func_spec.c real aliases of the same efun),
+    // distinct from interactive()'s own "is it interactive *right now*"
+    // check (InteractiveRegistry membership, which does clear on
+    // disconnect). See EfunTable.cpp's "userp" registration for why this
+    // driver previously conflated the two.
+    bool wasEverInteractive() const { return everInteractive_; }
+    void setWasEverInteractive(bool v) { everInteractive_ = v; }
+
     // real object_t::privs (set_privs()/query_privs()) -- an arbitrary
     // per-object "privilege string" the mudlib sets and later checks for
     // permission gating (secure/daemon/master.c's own valid_write()-
@@ -153,6 +167,7 @@ private:
     std::vector<std::shared_ptr<LpcObject>> inventory_;
     bool commandsEnabled_ = false;
     bool destructed_ = false;
+    bool everInteractive_ = false;
     std::vector<ActionEntry> actions_;
     std::optional<std::string> privs_;
     std::string livingName_;

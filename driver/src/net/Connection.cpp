@@ -1,5 +1,6 @@
 #include "lpcdriver/net/Connection.hpp"
 #include "lpcdriver/net/InteractiveRegistry.hpp"
+#include "lpcdriver/object/LpcObject.hpp"
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>
@@ -15,7 +16,14 @@ Connection::~Connection() {
 void Connection::attach(std::shared_ptr<LpcObject> obj) {
     if (boundObject_) InteractiveRegistry::remove(boundObject_);
     boundObject_ = std::move(obj);
-    if (boundObject_) InteractiveRegistry::add(boundObject_, this);
+    if (boundObject_) {
+        InteractiveRegistry::add(boundObject_, this);
+        // Real O_ONCE_INTERACTIVE (object.h): set the first time an
+        // object is ever bound to a connection, never cleared again --
+        // see LpcObject::wasEverInteractive()'s own comment for why this
+        // is a separate, sticky flag from InteractiveRegistry membership.
+        boundObject_->setWasEverInteractive(true);
+    }
 }
 
 void Connection::close() {

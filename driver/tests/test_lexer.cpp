@@ -4946,6 +4946,76 @@ static void testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection() {
     std::cout << "testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection OK\n";
 }
 
+// Regression coverage for userp()/query_once_interactive() now being a
+// real, sticky O_ONCE_INTERACTIVE-equivalent (LpcObject::wasEverInteractive(),
+// set by Connection::attach()) instead of an alias of interactive()'s own
+// "currently connected" check -- see EfunTable.cpp's own comment on the
+// "userp" registration for the real mudlib call sites this was silently
+// wrong for (any "userp(target) && !interactive(target)" or
+// "is_player() && !interactive()" check, both extremely common real
+// patterns, the moment a connected player goes link-dead).
+
+static void testUserpAndInteractiveBothTrueWhileConnectionIsLive() {
+    ObjectVarHarness harness;
+    harness.writeFile("/userp_probe1.c",
+        "int check_userp(object ob) { return userp(ob); }\n"
+        "int check_interactive(object ob) { return interactive(ob); }\n");
+    auto probe = harness.objects.cloneObject("/userp_probe1");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(probe);
+
+    lpcdriver::Value userpResult = harness.vm.callFunction(probe, "check_userp", {lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(userpResult.data) == 1);
+    lpcdriver::Value interactiveResult = harness.vm.callFunction(probe, "check_interactive", {lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(interactiveResult.data) == 1);
+
+    ::close(fds[1]);
+    std::cout << "testUserpAndInteractiveBothTrueWhileConnectionIsLive OK\n";
+}
+
+static void testUserpStaysTrueAfterDisconnectWhileInteractiveGoesFalse() {
+    ObjectVarHarness harness;
+    harness.writeFile("/userp_probe2.c",
+        "int check_userp(object ob) { return userp(ob); }\n"
+        "int check_interactive(object ob) { return interactive(ob); }\n");
+    auto probe = harness.objects.cloneObject("/userp_probe2");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(probe);
+    conn.close(); // real link death / quit -- probe stays in the world
+
+    lpcdriver::Value userpResult = harness.vm.callFunction(probe, "check_userp", {lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(userpResult.data) == 1);
+    lpcdriver::Value interactiveResult = harness.vm.callFunction(probe, "check_interactive", {lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(interactiveResult.data) == 0);
+
+    ::close(fds[1]);
+    std::cout << "testUserpStaysTrueAfterDisconnectWhileInteractiveGoesFalse OK\n";
+}
+
+static void testUserpReturnsFalseForObjectNeverBoundToAnyConnection() {
+    ObjectVarHarness harness;
+    harness.writeFile("/userp_probe3.c",
+        "int check_userp(object ob) { return userp(ob); }\n");
+    auto probe = harness.objects.cloneObject("/userp_probe3");
+    assert(probe != nullptr);
+    harness.writeFile("/plain_item2.c", "void create() {}\n");
+    auto item = harness.objects.cloneObject("/plain_item2");
+    assert(item != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check_userp", {lpcdriver::Value(item)});
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testUserpReturnsFalseForObjectNeverBoundToAnyConnection OK\n";
+}
+
 // Real, confirmed-live bug (see EfunTable.cpp's own comment on
 // message()): this efun used to always write to whichever connection is
 // "currently active" (OutputContext::current()), completely ignoring its
@@ -9159,6 +9229,9 @@ int main() {
     testDestructEfunClosesTargetObjectsOwnConnectionNotCallersConnection();
     testDestructEfunStillClosesOwnConnectionWhenSelfDestructing();
     testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection();
+    testUserpAndInteractiveBothTrueWhileConnectionIsLive();
+    testUserpStaysTrueAfterDisconnectWhileInteractiveGoesFalse();
+    testUserpReturnsFalseForObjectNeverBoundToAnyConnection();
     testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne();
     testCallOutAcceptsRealArgumentShapeAndReturnsHandle();
     testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName();
