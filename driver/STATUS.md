@@ -1,5 +1,66 @@
 # STATUS
 
+**2026-08-08: `destruct()` now closes the destructed object's OWN
+connection, not whichever connection happens to be `current()`.** This
+was the bug flagged, but deliberately left unfixed, at the end of the
+previous slice's own report. Weighed against the remaining Known Stubs
+list (array `&` intersection ordering, `replace_string()`'s range
+args, `to_int()`'s missing buffer case, `implode()`'s function-per-
+element form, `query_ip_name()`'s no-DNS fallback -- all either narrow
+edge cases nothing live has ever hit, or cases that already throw a
+clear error rather than misbehaving silently) and the reconnect/take-
+over save-flag bug (stays paused, mudlib-specific): this was the clear
+pick, both because it directly follows from last slice's own `net_dead()`
+work and because it is real-world reachable in the exact way that has
+driven every recent pick -- any mudlib with a wizard `boot`/kick command
+hits it, and the previous slice's own `O_DESTRUCTED` guard had
+inadvertently made the failure mode worse, not just unfixed: a
+"kicked" player's connection used to at least keep functioning
+normally (the bug predates that guard); now their commands went
+silently inert instead (`VM::callFunction()`/`dispatchCommand()` both
+already refuse a destructed target) while their socket stayed open --
+no error, no disconnect, nothing dispatched, forever, until they closed
+the client themselves.
+
+Root cause (`EfunTable.cpp`'s `destruct` efun): it looked up
+`OutputContext::current()` -- the connection driving *this call* -- and
+only closed it if that connection's own bound object happened to match
+the object being destructed. Real `destruct_object()`'s own actual rule
+(`simulate.c`: `if (ob->interactive) remove_interactive(ob, 1);`) has
+nothing to do with which connection is currently active; it is always
+the destructed object's *own* interactive. Fixed by looking the
+connection up via `InteractiveRegistry::find(ob)` (the same object-to-
+`Connection*` lookup `message()`/`tell_object()` already use to reach an
+arbitrary target) and closing that instead. `Connection::close()`
+itself already does the `InteractiveRegistry` removal (see its own
+comment), so this also let the previous slice's separate, unconditional
+`InteractiveRegistry::remove(ob)` call be deleted entirely -- redundant
+once `close()` runs, and correctly a no-op via `find()` returning null
+when `ob` was never interactive at all, matching real `if
+(ob->interactive)` exactly rather than approximating it.
+
+3 new regression tests: the actual bug (an "actor" object destructs a
+*different*, still-connected object while its own connection is
+`current()` -- confirms the target's connection actually closes and the
+actor's own is untouched), the pre-existing case this fix must not
+break (`secure/std/login.c`'s own `internal_remove()` pattern,
+`destruct(this_object())` on the object bound to the *currently active*
+connection -- still closes correctly), and destructing a plain, never-
+interactive object (confirms `InteractiveRegistry::find()` returning
+null is a clean no-op, no crash, real `if (ob->interactive)` semantics).
+Full suite: 347 tests passing, up from 344, no regressions. Live-
+confirmed end to end on port 1129: added a minimal `cmd_boot(string)`
+to `mudlib_stub/obj/user.c` (destructs another named player's object in
+the same room -- a stand-in for a real mudlib's admin boot command,
+existing purely to exercise this fix live, same rationale as last
+slice's `net_dead()` addition to the same file) and drove two
+connections, Alice booting Bob. Bob's own socket received a genuine
+EOF immediately (confirmed by a real `recv()` on Bob's own side, not
+just inferred from Alice's output), a post-boot command attempt from
+Bob's side produced nothing further (socket already gone), and Alice's
+own connection was completely unaffected throughout. Driver console log
+stayed silent (no errors, no crash).
+
 **2026-08-08: real `net_dead()` link-death apply implemented; port
 inconsistency fixed first.** Two logical pieces this slice.
 

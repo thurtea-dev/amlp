@@ -13,6 +13,7 @@
 #include "lpcdriver/net/Connection.hpp"
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Server.hpp"
+#include "lpcdriver/net/InteractiveRegistry.hpp"
 #include "lpcdriver/scheduler/Scheduler.hpp"
 #include <cassert>
 #include <iostream>
@@ -4830,6 +4831,121 @@ static void testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose() {
     std::cout << "testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose OK\n";
 }
 
+// ---------------------------------------------------------------------
+// destruct() efun: closes the destructed object's OWN connection, not
+// whichever connection happens to be OutputContext::current()
+// ---------------------------------------------------------------------
+//
+// Real, confirmed-live bug (see EfunTable.cpp's own comment on
+// destruct()): destructing some other, still-connected object's player
+// (an admin "boot"/kick command, one player's own code destructing a
+// different player's object) used to remove it from InteractiveRegistry
+// but leave its actual socket open, still bound to the now-destructed
+// object -- the O_DESTRUCTED guard then made every further command on
+// that connection a silent no-op rather than the connection ever
+// actually closing.
+
+static void testDestructEfunClosesTargetObjectsOwnConnectionNotCallersConnection() {
+    ObjectVarHarness harness;
+    harness.writeFile("/boot_actor.c",
+        "void boot(object victim) { destruct(victim); }\n");
+    auto actor = harness.objects.cloneObject("/boot_actor");
+    assert(actor != nullptr);
+
+    harness.writeFile("/boot_target.c", "void create() {}\n");
+    auto target = harness.objects.cloneObject("/boot_target");
+    assert(target != nullptr);
+
+    int fdsActor[2];
+    int fdsTarget[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsActor) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsTarget) == 0);
+    lpcdriver::Connection connActor(fdsActor[0]);
+    lpcdriver::Connection connTarget(fdsTarget[0]);
+    connActor.attach(actor);
+    connTarget.attach(target);
+
+    // The admin's own connection is "current" -- not the target's, the
+    // exact condition that broke this live (an admin "boot" command
+    // driving the call from their own, still-open connection).
+    lpcdriver::OutputContext::set(&connActor);
+    harness.vm.callFunction(actor, "boot", {lpcdriver::Value(target)});
+    lpcdriver::OutputContext::set(nullptr);
+
+    // Target's own connection is genuinely closed now, not just removed
+    // from InteractiveRegistry.
+    assert(!connTarget.isOpen());
+    assert(connTarget.boundObject() == nullptr);
+    assert(lpcdriver::InteractiveRegistry::find(target) == nullptr);
+
+    // The admin's own connection (the caller, "current" throughout) is
+    // completely untouched.
+    assert(connActor.isOpen());
+    assert(connActor.boundObject() == actor);
+
+    ::close(fdsActor[1]);
+    ::close(fdsTarget[1]);
+    std::cout << "testDestructEfunClosesTargetObjectsOwnConnectionNotCallersConnection OK\n";
+}
+
+// Regression coverage for the pre-existing, still-correct case this fix
+// must not break: secure/std/login.c's own internal_remove() pattern,
+// "destruct(this_object())" on the very object bound to the connection
+// actually driving the call.
+static void testDestructEfunStillClosesOwnConnectionWhenSelfDestructing() {
+    ObjectVarHarness harness;
+    harness.writeFile("/self_destruct.c",
+        "void quit() { destruct(this_object()); }\n");
+    auto self = harness.objects.cloneObject("/self_destruct");
+    assert(self != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(self);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(self, "quit", {});
+    lpcdriver::OutputContext::set(nullptr);
+
+    assert(!conn.isOpen());
+    assert(conn.boundObject() == nullptr);
+    assert(lpcdriver::InteractiveRegistry::find(self) == nullptr);
+
+    ::close(fds[1]);
+    std::cout << "testDestructEfunStillClosesOwnConnectionWhenSelfDestructing OK\n";
+}
+
+// destruct() on a plain, never-interactive object must not crash looking
+// for a connection that was never there (InteractiveRegistry::find()
+// correctly returns null, matching real "if (ob->interactive)").
+static void testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection() {
+    ObjectVarHarness harness;
+    harness.writeFile("/boot_actor2.c",
+        "void boot(object victim) { destruct(victim); }\n");
+    auto actor = harness.objects.cloneObject("/boot_actor2");
+    assert(actor != nullptr);
+
+    harness.writeFile("/plain_item.c", "void create() {}\n");
+    auto item = harness.objects.cloneObject("/plain_item");
+    assert(item != nullptr);
+
+    int fdsActor[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsActor) == 0);
+    lpcdriver::Connection connActor(fdsActor[0]);
+    connActor.attach(actor);
+
+    lpcdriver::OutputContext::set(&connActor);
+    harness.vm.callFunction(actor, "boot", {lpcdriver::Value(item)});
+    lpcdriver::OutputContext::set(nullptr);
+
+    assert(connActor.isOpen());
+    assert(connActor.boundObject() == actor);
+
+    ::close(fdsActor[1]);
+    std::cout << "testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection OK\n";
+}
+
 // Real, confirmed-live bug (see EfunTable.cpp's own comment on
 // message()): this efun used to always write to whichever connection is
 // "currently active" (OutputContext::current()), completely ignoring its
@@ -8914,6 +9030,9 @@ int main() {
     testFireNetDeadIfLinkDeadCallsApplyWhenPeerClosesConnection();
     testFireNetDeadIfLinkDeadIsNoOpWhileConnectionStillOpen();
     testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose();
+    testDestructEfunClosesTargetObjectsOwnConnectionNotCallersConnection();
+    testDestructEfunStillClosesOwnConnectionWhenSelfDestructing();
+    testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection();
     testMessageRoutesToTargetObjectsOwnConnectionNotCurrentOne();
     testCallOutAcceptsRealArgumentShapeAndReturnsHandle();
     testRemoveCallOutReturnsMinusOneWhenNothingPendingUnderThatName();

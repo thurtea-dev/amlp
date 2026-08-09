@@ -35,6 +35,7 @@ void setup() {
     add_action("cmd_north", "north");
     add_action("cmd_south", "south");
     add_action("cmd_say", "say");
+    add_action("cmd_boot", "boot");
     move_object("/rooms/start_room");
     write("Welcome, " + name + ".\n");
     cmd_look("");
@@ -113,6 +114,35 @@ void net_dead() {
             message("say", name + " has gone link-dead.\n", inv[i]);
         }
     }
+}
+
+// Minimal stand-in for a real mudlib's admin "boot"/kick command --
+// destructs another player's object by name from a room. Exists in this
+// stub purely to exercise destruct()'s own connection-closing fix live
+// (EfunTable.cpp): the target's connection must actually close, not just
+// the caller's.
+void cmd_boot(string arg) {
+    object room;
+    object *inv;
+    int i;
+
+    if (!arg || arg == "") {
+        write("Boot whom?\n");
+        return;
+    }
+
+    room = environment(this_object());
+    if (!room) return;
+
+    inv = all_inventory(room);
+    for (i = 0; i < sizeof(inv); i++) {
+        if (inv[i] != this_object() && inv[i]->query_name() == arg) {
+            write("You boot " + arg + ".\n");
+            destruct(inv[i]);
+            return;
+        }
+    }
+    write("No one named " + arg + " here.\n");
 }
 
 void cmd_say(string arg) {

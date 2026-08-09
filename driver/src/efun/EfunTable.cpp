@@ -1579,14 +1579,10 @@ void registerCoreEfuns() {
     // method that already existed for this). Confirmed live:
     // secure/std/login.c's own internal_remove() ends a failed login
     // attempt with "destruct(this_object())" on the login shell itself
-    // -- when that happens to be the object bound to the connection
-    // actually driving the current call (OutputContext::current()'s own
-    // boundObject(), the same connection-lookup approach this driver's
-    // other connection-scoped efuns use), this also closes that
-    // connection, matching real remove_interactive()'s own end result
-    // for a destructed interactive object (nothing left to route
-    // further input to). Destructing some other, non-connection-bound
-    // object just removes it from the object table, same as real
+    // -- matching real remove_interactive()'s own end result for a
+    // destructed interactive object (nothing left to route further
+    // input to). Destructing some other, non-connection-bound object
+    // just removes it from the object table, same as real
     // destruct_object() does before backend.c gets around to actually
     // freeing it.
     t.registerEfun("destruct", [](VM& vm, std::vector<Value>& args) -> Value {
@@ -1598,23 +1594,35 @@ void registerCoreEfuns() {
 
         vm.destructObject(ob);
 
-        // Previously only closed the connection when it happened to be
-        // the one currently driving this call -- a destructed object
-        // reached some other way (e.g. one player's own object
-        // destructing a different player's, an admin "boot" command)
-        // left a stale InteractiveRegistry entry behind, still findable
-        // via users()/find_player() and still a valid message() target,
-        // until that other connection eventually closed on its own for
-        // an unrelated reason. Unconditional now, matching real
-        // destruct_object()'s own "if (ob->interactive)
-        // remove_interactive(ob, 1);" -- always run, not gated on which
-        // object happens to be currently active.
-        InteractiveRegistry::remove(ob);
-
-        if (Connection* conn = OutputContext::current()) {
-            if (conn->boundObject() == ob) {
-                conn->close();
-            }
+        // Real destruct_object(): "if (ob->interactive)
+        // remove_interactive(ob, 1);" -- always the destructed object's
+        // OWN interactive connection, never necessarily the one driving
+        // this call. Previously this looked up OutputContext::current()
+        // (the caller's own connection) instead of the destructed
+        // object's own, and only closed it when the two happened to be
+        // the same connection -- so destructing some OTHER, still-
+        // connected object's player (an admin "boot"/kick command, one
+        // player's own code destructing a different player's object)
+        // removed it from InteractiveRegistry (users()/find_player()
+        // correctly stopped listing it) but left its actual socket open
+        // and still bound to the now-destructed object. Found live-
+        // reachable, not theoretical: the O_DESTRUCTED guard added the
+        // previous slice then made every one of that connection's own
+        // further commands a silent no-op (VM::callFunction()/
+        // dispatchCommand() both already refuse a destructed target), so
+        // a "kicked" player's own session went inert instead of actually
+        // closing -- no disconnect message, no error, nothing dispatched,
+        // forever, until they closed the client themselves. Looking the
+        // connection up via InteractiveRegistry::find(ob) (the same
+        // object-to-Connection* lookup message()/tell_object() already
+        // use to reach an arbitrary target) and closing that fixes it;
+        // Connection::close() itself does the InteractiveRegistry removal
+        // (see its own comment), so this replaces the previous separate,
+        // unconditional InteractiveRegistry::remove(ob) call entirely --
+        // there is nothing left to remove once close() has run, and
+        // nothing to remove at all when ob was never interactive.
+        if (Connection* conn = InteractiveRegistry::find(ob)) {
+            conn->close();
         }
         return Value{};
     });
