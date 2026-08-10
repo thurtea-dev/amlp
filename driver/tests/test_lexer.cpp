@@ -5440,6 +5440,58 @@ static void testConvertNameMudlibFunctionWorksWithNewLowerCaseAndReplaceStringEf
     std::cout << "testConvertNameMudlibFunctionWorksWithNewLowerCaseAndReplaceStringEfuns OK\n";
 }
 
+// upper_case(string) -- real packages/contrib.c's own f_upper_case(),
+// lower_case()'s exact mirror. See EfunTable.cpp's own comment on the
+// "upper_case" registration for the real call sites this closes
+// (cmds/mortal/_guild.c's guild create/join/leave/list commands,
+// cmds/mortal/_setenv.c, cmds/adm/_repairchar.c, daemon/guild_d.c).
+
+static void testUpperCaseFoldsLowercaseLettersAndLeavesEverythingElseUnchanged() {
+    lpcdriver::Value result = runProbe("return upper_case(\"Hello, World! 123\");");
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "HELLO, WORLD! 123");
+    std::cout << "testUpperCaseFoldsLowercaseLettersAndLeavesEverythingElseUnchanged OK\n";
+}
+
+static void testUpperCaseMatchesRealGuildTagUppercasingShape() {
+    // daemon/guild_d.c's own real shape: "tag = upper_case(tag);" --
+    // confirms the exact real call site's own input works, not just a
+    // synthetic string.
+    ObjectVarHarness harness;
+    harness.writeFile("/guild_tag_probe.c",
+        "string probe() {\n"
+        "    string tag;\n"
+        "    tag = \"thief\";\n"
+        "    tag = upper_case(tag);\n"
+        "    return tag;\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/guild_tag_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "THIEF");
+    std::cout << "testUpperCaseMatchesRealGuildTagUppercasingShape OK\n";
+}
+
+static void testUpperCaseThrowsOnNonStringArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/uc_probe1.c", "mixed probe() { return upper_case(42); }\n");
+    auto ob = harness.objects.cloneObject("/uc_probe1");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe", {});
+    } catch (const lpcdriver::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("upper_case") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testUpperCaseThrowsOnNonStringArgument OK\n";
+}
+
 // ---------------------------------------------------------------------
 // "::name(...)" / "qualifier::name(...)" -- explicit inherited-function
 // calls (grammar.y's function_name production; found live compiling
@@ -10004,6 +10056,9 @@ int main() {
     testCallOtherWithStringTargetAutoCompilesAndLoadsOnFirstUse();
     testCallOtherWithStringTargetToNonexistentFileThrows();
     testConvertNameMudlibFunctionWorksWithNewLowerCaseAndReplaceStringEfuns();
+    testUpperCaseFoldsLowercaseLettersAndLeavesEverythingElseUnchanged();
+    testUpperCaseMatchesRealGuildTagUppercasingShape();
+    testUpperCaseThrowsOnNonStringArgument();
     testBareParentCallInvokesInheritedFunctionNotLocalOverride();
     testQualifiedParentCallMatchesInheritPathBasename();
     testParentCallOnFileWithNoInheritThrows();

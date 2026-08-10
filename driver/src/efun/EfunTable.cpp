@@ -1378,6 +1378,28 @@ void registerCoreEfuns() {
         return Value(s);
     });
 
+    // string upper_case(string) -- real packages/contrib.c's own
+    // f_upper_case(): exactly lower_case()'s own mirror (uislower/toupper
+    // instead of uisupper/tolower in the real source; every ASCII
+    // lowercase letter folded to uppercase, everything else unchanged).
+    // Confirmed real and active in this vendored build (efun_defs.c's own
+    // F_UPPER_CASE entry), not just declared -- and real-reachable here:
+    // cmds/mortal/_guild.c's own guild create/join/leave/list commands
+    // (7 call sites), cmds/mortal/_setenv.c, cmds/adm/_repairchar.c, and
+    // daemon/guild_d.c all call it unconditionally, previously throwing
+    // "undefined function or efun: upper_case" the instant any of those
+    // ran.
+    t.registerEfun("upper_case", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("upper_case: expected a string argument");
+        }
+        std::string s = std::get<std::string>(args[0].data);
+        for (char& c : s) {
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        }
+        return Value(s);
+    });
+
     // string replace_string(string str, string pattern, string
     // replacement) -- efuns_main.c's f_replace_string(): every
     // non-overlapping occurrence of pattern replaced left to right (the
