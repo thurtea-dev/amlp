@@ -1,4 +1,5 @@
 #pragma once
+#include <ctime>
 #include <memory>
 #include <optional>
 #include <string>
@@ -95,6 +96,16 @@ public:
     // never leak into a later one.
     void clearPendingNotifyFail() { pendingNotifyFail_.reset(); }
 
+    // Real comm.c's own "ip->last_time = current_time" -- set once when
+    // the interactive struct is first set up (new_user(), the same
+    // moment this driver constructs a Connection) and then re-set every
+    // time a full command line is pulled off the buffer
+    // (get_user_command(), before process_user_command() even runs --
+    // see Server::dispatchLine()'s own call to this). query_idle()
+    // (EfunTable.cpp) reads it back as "current_time - last_time".
+    void touchActivity() { lastActivityTime_ = std::time(nullptr); }
+    std::time_t lastActivityTime() const { return lastActivityTime_; }
+
 private:
     int fd_;
     std::string inputBuffer_;
@@ -102,6 +113,7 @@ private:
     bool closed_ = false;
     std::optional<PendingInputTo> pendingInputTo_;
     std::optional<Value> pendingNotifyFail_;
+    std::time_t lastActivityTime_ = 0;
 };
 
 } // namespace lpcdriver

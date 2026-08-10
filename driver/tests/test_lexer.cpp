@@ -24,6 +24,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sstream>
+#include <chrono>
+#include <thread>
 
 static void testBasicTokenize() {
     std::string src =
@@ -5016,6 +5018,91 @@ static void testUserpReturnsFalseForObjectNeverBoundToAnyConnection() {
     std::cout << "testUserpReturnsFalseForObjectNeverBoundToAnyConnection OK\n";
 }
 
+// Regression coverage for query_idle(object), a real efun for the first
+// time -- see EfunTable.cpp's own comment on the "query_idle"
+// registration for the real mechanism (comm.c's f_query_idle()) and the
+// real mudlib call sites this closes (cmds/mortal/_who.c/_idle.c, and
+// std/user.c's own heart_beat() auto-idle-logout, reachable every tick).
+
+static void testQueryIdleIsZeroImmediatelyAfterConnectionEstablished() {
+    // Real new_user() sets last_time to current_time at setup, before
+    // any input has ever arrived -- Connection's constructor mirrors
+    // that, so idle must read 0 the instant a connection is attached.
+    ObjectVarHarness harness;
+    harness.writeFile("/qi_probe1.c",
+        "int check_idle(object ob) { return query_idle(ob); }\n");
+    auto probe = harness.objects.cloneObject("/qi_probe1");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(probe);
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "check_idle", {lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(result.data) == 0);
+
+    ::close(fds[1]);
+    std::cout << "testQueryIdleIsZeroImmediatelyAfterConnectionEstablished OK\n";
+}
+
+static void testQueryIdleReflectsMostRecentDispatchedLineNotJustConnectionTime() {
+    // Proves query_idle() tracks Server::dispatchLine()'s own
+    // touchActivity() call (get_user_command()'s real "ip->last_time =
+    // current_time", re-set on every line, not just once at connect) --
+    // a real, elapsed-wall-clock gap before the dispatch, then a reset
+    // back to ~0 right after it.
+    ObjectVarHarness harness;
+    harness.writeFile("/qi_probe2.c",
+        "int check_idle(object ob) { return query_idle(ob); }\n");
+    auto probe = harness.objects.cloneObject("/qi_probe2");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(probe);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+    lpcdriver::Value beforeDispatch = harness.vm.callFunction(probe, "check_idle", {lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(beforeDispatch.data) >= 1);
+
+    lpcdriver::Server::dispatchLine(harness.vm, conn, "anything");
+
+    lpcdriver::Value afterDispatch = harness.vm.callFunction(probe, "check_idle", {lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(afterDispatch.data) == 0);
+
+    ::close(fds[1]);
+    std::cout << "testQueryIdleReflectsMostRecentDispatchedLineNotJustConnectionTime OK\n";
+}
+
+static void testQueryIdleThrowsForObjectNeverBoundToAnyConnection() {
+    // Real f_query_idle(): "if (!ob->interactive) error(...)" -- unlike
+    // userp()/interactive(), which both quietly return 0 for a
+    // non-interactive argument, this efun throws.
+    ObjectVarHarness harness;
+    harness.writeFile("/qi_probe3.c",
+        "int check_idle(object ob) { return query_idle(ob); }\n");
+    auto probe = harness.objects.cloneObject("/qi_probe3");
+    assert(probe != nullptr);
+    harness.writeFile("/plain_item3.c", "void create() {}\n");
+    auto item = harness.objects.cloneObject("/plain_item3");
+    assert(item != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(probe, "check_idle", {lpcdriver::Value(item)});
+    } catch (const lpcdriver::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("query_idle") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testQueryIdleThrowsForObjectNeverBoundToAnyConnection OK\n";
+}
+
 // --- LivingNameRegistry: find_player()/find_living() -------------------
 // See LivingNameRegistry.hpp's own comment for the real
 // find_living_object(str, user) mechanism this mirrors: one shared
@@ -9900,6 +9987,9 @@ int main() {
     testUserpAndInteractiveBothTrueWhileConnectionIsLive();
     testUserpStaysTrueAfterDisconnectWhileInteractiveGoesFalse();
     testUserpReturnsFalseForObjectNeverBoundToAnyConnection();
+    testQueryIdleIsZeroImmediatelyAfterConnectionEstablished();
+    testQueryIdleReflectsMostRecentDispatchedLineNotJustConnectionTime();
+    testQueryIdleThrowsForObjectNeverBoundToAnyConnection();
     testFindPlayerFindsCurrentlyConnectedObjectByLivingName();
     testFindPlayerStillFindsObjectAfterDisconnectViaOnceInteractive();
     testFindPlayerDoesNotMatchAnObjectThatWasNeverInteractive();

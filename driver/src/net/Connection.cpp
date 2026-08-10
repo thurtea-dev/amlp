@@ -7,7 +7,11 @@
 
 namespace lpcdriver {
 
-Connection::Connection(int fd) : fd_(fd) {}
+// Real new_user() (comm.c): the freshly allocated interactive_t's own
+// last_time is set to current_time right at setup, before any object is
+// even bound to it -- matched here at Connection construction, the
+// closest equivalent this driver has.
+Connection::Connection(int fd) : fd_(fd), lastActivityTime_(std::time(nullptr)) {}
 
 Connection::~Connection() {
     close();

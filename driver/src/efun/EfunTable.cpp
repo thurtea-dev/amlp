@@ -2543,6 +2543,36 @@ void registerCoreEfuns() {
         return Value(int64_t{0});
     });
 
+    // int query_idle(object ob) -- real func_spec.c's own "int
+    // query_idle(object);". Real comm.c's own f_query_idle():
+    // "if (!ob->interactive) error(...); return current_time -
+    // ob->interactive->last_time;" -- an interactive-only efun, unlike
+    // userp()/interactive() which both quietly return 0 for a
+    // non-interactive argument. Confirmed real and required (not
+    // approximated as "always 0" for non-interactive) by this mudlib's
+    // own real call sites: cmds/mortal/_who.c and _idle.c both call it
+    // unguarded on this_player(), and std/user.c's own heart_beat() gates
+    // its auto-idle-logout on it every heartbeat cycle for every
+    // connected player -- reachable on every single tick now that
+    // heart_beat() is real (see "Real call_out()/heart_beat() scheduler"
+    // in STATUS.md), not just a rarely-hit command.
+    t.registerEfun("query_idle", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("query_idle: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob) {
+            throw LpcRuntimeError("query_idle: ob is not interactive");
+        }
+        Connection* conn = InteractiveRegistry::find(ob);
+        if (!conn) {
+            throw LpcRuntimeError("query_idle: ob is not interactive");
+        }
+        int64_t idle = static_cast<int64_t>(std::time(nullptr)) -
+                        static_cast<int64_t>(conn->lastActivityTime());
+        return Value(idle);
+    });
+
     // string query_ip_number(void|object ob) -- comm.c's real
     // query_ip_number(): "inet_ntoa(ob->interactive->addr.sin_addr)",
     // defaulting to command_giver when ob is omitted. This driver has

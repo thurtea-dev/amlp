@@ -172,6 +172,13 @@ void Server::acceptNewConnections() {
 // process_input() is skipped entirely for that line. Only when nothing
 // is pending does process_input() run instead.
 void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
+    // Real get_user_command() (comm.c): "ip->last_time = current_time"
+    // runs the moment a full command line is pulled off the buffer, for
+    // every line -- including one a pending input_to() handler is about
+    // to consume -- and before process_user_command() itself even runs.
+    // query_idle() (EfunTable.cpp) reads this back.
+    conn.touchActivity();
+
     // Real process_user_command() (comm.c): clear_notify(ip->ob) runs
     // unconditionally at the very top, before even checking for a
     // pending input_to() handler -- a notify_fail() message set during
