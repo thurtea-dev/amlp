@@ -137,7 +137,10 @@ constexpr PredefinedMacro kFluffosRuntimePredefinedMacros[] = {
     // NotImplementedError.
 };
 
-std::string buildPredefinedMacroFlags(const Config& config) {
+// compiledFilename is the object being compiled's own normalized LPC
+// path (leading '/', no ".c" -- ObjectManager::compile()'s own
+// "filename", not the real on-disk path).
+std::string buildPredefinedMacroFlags(const Config& config, const std::string& compiledFilename) {
     std::ostringstream flags;
     for (const auto& macro : kFluffosPredefinedMacros) {
         flags << " -D" << macro.name << "=" << macro.value;
@@ -147,6 +150,33 @@ std::string buildPredefinedMacroFlags(const Config& config) {
     }
     flags << " -D__PORT__=" << config.port();
     flags << " -DMUD_NAME=\\\"" << config.mudName() << "\\\"";
+
+    // __FILE__/__DIR__: real lex.c's own start_new_file() (confirmed
+    // directly, not guessed): "__FILE__" is "/" + current_file (the
+    // compiled object's own mudlib-relative path, WITH its ".c"
+    // extension -- confirmed against lil_0.3's own reference testsuite,
+    // single/tests/efuns/file_name.c's own "ASSERT(file_name() + \".c\"
+    // == __FILE__)"), and "__DIR__" is that same string truncated right
+    // after its own last '/', trailing slash kept. Explicitly defined
+    // here (a "-D" always overrides a same-named compiler built-in) since
+    // gcc's own cpp already predefines __FILE__ itself, to a value that
+    // is real but wrong for LPC purposes: this driver's own "# 1
+    // \"originalPath\"" line-marker rewrite (stageSourceForPreprocessing,
+    // needed so compile-error messages point at the real file) makes
+    // gcc's built-in __FILE__ resolve to that same real *host filesystem*
+    // absolute path, not the LPC-visible mudlib path any real mudlib
+    // code actually expects. gcc's cpp has no built-in __DIR__ at all (it
+    // is not a standard C macro), so without this it stays a bare,
+    // undefined identifier -- confirmed real and hard-failing, not
+    // theoretical: lil_0.3's own single/tests/efuns/shadow.c "new(__DIR__
+    // \"badshad\", 1)" could not compile at all (an undefined identifier
+    // directly followed by a string literal, with no operator between
+    // them for this driver's own already-working adjacent-string-literal
+    // concatenation, Parser.cpp's own parsePrimary(), to ever reach).
+    std::string lpcFile = compiledFilename + ".c";
+    std::string lpcDir = lpcFile.substr(0, lpcFile.find_last_of('/') + 1);
+    flags << " -D__FILE__=\\\"" << lpcFile << "\\\"";
+    flags << " -D__DIR__=\\\"" << lpcDir << "\\\"";
     return flags.str();
 }
 
@@ -285,7 +315,8 @@ std::vector<std::string> splitIncludeDirs(const std::string& raw, const std::str
 }
 
 PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vector<std::string>& includeDirs,
-                                  const std::string& originalSourceDir, const Config& config) {
+                                  const std::string& originalSourceDir, const Config& config,
+                                  const std::string& compiledFilename) {
     PreprocessResult result;
 
     char errPathTemplate[] = "/tmp/lpcdriver_cpp_stderr_XXXXXX";
@@ -307,7 +338,7 @@ PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vecto
     for (const auto& dir : includeDirs) {
         cmd += " -I '" + dir + "'";
     }
-    cmd += buildPredefinedMacroFlags(config) +
+    cmd += buildPredefinedMacroFlags(config, compiledFilename) +
            " -x c '" + sourcePath + "' 2>'" + errPath + "'";
 
     FILE* pipe = popen(cmd.c_str(), "r");
@@ -386,7 +417,8 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
         return nullptr;
     }
     std::string originalSourceDir = path.substr(0, path.find_last_of('/'));
-    PreprocessResult preprocessed = runPreprocessor(staged.tempPath, includeDirs, originalSourceDir, config_);
+    PreprocessResult preprocessed =
+        runPreprocessor(staged.tempPath, includeDirs, originalSourceDir, config_, filename);
     std::remove(staged.tempPath.c_str());
     if (!preprocessed.ok) {
         std::cerr << "[object] preprocessing failed for " << path << ":\n"

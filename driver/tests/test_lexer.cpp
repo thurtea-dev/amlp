@@ -4092,6 +4092,89 @@ static void testIncludeDirSingleEntryWithNoColonStillWorks() {
     std::cout << "testIncludeDirSingleEntryWithNoColonStillWorks OK\n";
 }
 
+// --- __FILE__ / __DIR__ predefines ---------------------------------------
+// Real lex.c's own start_new_file(): __FILE__ is "/" + the compiled
+// object's own mudlib-relative path *with* its ".c" extension, __DIR__ is
+// that same string truncated right after its own last '/'. See
+// ObjectManager.cpp's own buildPredefinedMacroFlags() comment for the
+// real citation and the two distinct symptoms this closed: __DIR__ was a
+// bare undefined identifier before this (a hard compile failure wherever
+// used unguarded -- lil_0.3's own single/tests/efuns/shadow.c "new(__DIR__
+// \"badshad\", 1)"), and __FILE__ silently resolved to gcc's own built-in
+// value (this driver's real host filesystem source path) instead of the
+// LPC-visible one, compiling but wrong -- confirmed live against 15 other
+// lil_0.3 test files that reference __FILE__.
+
+static void testFileDunderPredefineResolvesToRealLpcPathNotHostFilesystemPath() {
+    ObjectVarHarness harness;
+    harness.writeFile("/filedunder_probe.c", "mixed probe() { return __FILE__; }\n");
+    auto obj = harness.objects.cloneObject("/filedunder_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    // Not an absolute host path (no leading tempDir, no leftover
+    // /tmp/lpcdriver_src_XXXXXX staging path) -- exactly the real LPC
+    // in-mudlib path, "/" + filename + ".c".
+    assert(std::get<std::string>(result.data) == "/filedunder_probe.c");
+    std::cout << "testFileDunderPredefineResolvesToRealLpcPathNotHostFilesystemPath OK\n";
+}
+
+static void testDirDunderPredefineTruncatesAfterLastSlashWithMultipleSegments() {
+    // A nested directory (not just "/") to actually exercise the
+    // truncate-after-last-slash logic, matching the real shape
+    // ("/single/tests/efuns/") rather than the degenerate root case.
+    char dirTemplate[] = "/tmp/lpcdriver_dirdunder_test_XXXXXX";
+    char* created = mkdtemp(dirTemplate);
+    assert(created != nullptr);
+    std::string tempDir = created;
+    assert(::mkdir((tempDir + "/sub").c_str(), 0755) == 0);
+
+    std::ofstream probeFile(tempDir + "/sub/dirdunder_probe.c");
+    probeFile << "mixed probe() { return __DIR__; }\n";
+    probeFile.close();
+
+    std::string cfgPath = tempDir + "/driver.cfg";
+    std::ofstream cfg(cfgPath);
+    cfg << "mudlib_root: " << tempDir << "\n";
+    cfg << "master_file: /unused\n";
+    cfg << "include_dir: " << tempDir << "\n";
+    cfg << "port: 0\n";
+    cfg.close();
+
+    lpcdriver::Config config;
+    assert(config.loadFromFile(cfgPath));
+    lpcdriver::ObjectManager objects(config);
+    lpcdriver::VM vm(objects, config);
+    objects.setVM(&vm);
+
+    auto obj = objects.loadObject("/sub/dirdunder_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "/sub/");
+    std::cout << "testDirDunderPredefineTruncatesAfterLastSlashWithMultipleSegments OK\n";
+}
+
+static void testDirDunderAdjacentToStringLiteralMatchesRealShadowTestShape() {
+    // The exact real failing shape: "__DIR__ \"badshad\"" -- an
+    // undefined-until-now predefine directly adjacent to a hand-written
+    // string literal, relying on this driver's own already-working
+    // adjacent-string-literal concatenation (Parser.cpp's parsePrimary())
+    // to combine the two. Before this fix __DIR__ was a bare identifier,
+    // so this driver's parser never even reached the concatenation logic
+    // -- it choked immediately on the unexpected string literal
+    // following it.
+    ObjectVarHarness harness;
+    harness.writeFile("/dirstr_probe.c",
+        "mixed probe() { return __DIR__ \"badshad\"; }\n");
+    auto obj = harness.objects.cloneObject("/dirstr_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "/badshad");
+    std::cout << "testDirDunderAdjacentToStringLiteralMatchesRealShadowTestShape OK\n";
+}
+
 // --- Unnamed function parameters ("string foo(string, int) { ... }") ----
 // Real grammar.y's own "new_arg: arg_type optional_star" alternative
 // (confirmed by direct reading): a parameter may declare just its type,
@@ -10246,6 +10329,9 @@ int main() {
     testCppWarningsDoNotFailPreprocessing();
     testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg();
     testIncludeDirSingleEntryWithNoColonStillWorks();
+    testFileDunderPredefineResolvesToRealLpcPathNotHostFilesystemPath();
+    testDirDunderPredefineTruncatesAfterLastSlashWithMultipleSegments();
+    testDirDunderAdjacentToStringLiteralMatchesRealShadowTestShape();
     testUnnamedFunctionParameterParsesAndDoesNotBreakOtherLocals();
     testMultipleUnnamedParametersInOneFunctionDoNotCollide();
     testUnnamedParameterMixedWithNamedOnesStaysPositionallyCorrect();
