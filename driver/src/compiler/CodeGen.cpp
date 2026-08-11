@@ -32,6 +32,27 @@ CodeGen::ResolvedVar CodeGen::resolveVariable(const std::string& name) const {
 }
 
 int CodeGen::declareLocal(const std::string& name) {
+    // An empty name is real LPC's own unnamed function parameter (e.g.
+    // "string crash(string, object, object)" -- confirmed against
+    // grammar.y's own "new_arg: arg_type optional_star { ...
+    // add_local_name(\"\", $1 | $2); ... }", the case where a parameter
+    // has a type but no identifier at all: real FluffOS still allocates
+    // it a real slot in the local-variable table, it is just never
+    // reachable by name afterwards). Reserves the slot (so the calling
+    // convention's positional args[i] -> locals[i] copy still lines up
+    // for every later named parameter) without registering it in
+    // locals_ at all: unlike real FluffOS's own local-variable table (a
+    // plain list, so several entries can share the empty name ""
+    // simultaneously), this driver's locals_ is a name-keyed map, and
+    // Parser.cpp's own "function parameter type" loop can and does parse
+    // more than one unnamed parameter in the same function (that same
+    // "string, object, object" needs three, not one) -- the ordinary
+    // "already declared in this scope" collision check below would
+    // wrongly reject the second one on nothing but a shared, meaningless
+    // empty key.
+    if (name.empty()) {
+        return nextLocalSlot_++;
+    }
     if (locals_.count(name)) {
         throw LpcRuntimeError("codegen: variable \"" + name + "\" already declared in this scope");
     }

@@ -1394,8 +1394,24 @@ std::vector<Param> Parser::parseParamList() {
             isArray = true;
         }
 
-        Token nameTok = expect(TokenType::Ident, "function parameter name");
-        params.push_back(Param{typeTok.text, nameTok.text, isArray});
+        // The name itself is optional -- real LPC allows a parameter to
+        // be declared with just its type, no identifier at all (real
+        // grammar.y's own "new_arg: arg_type optional_star" alternative,
+        // confirmed live: this reference testsuite mudlib's own
+        // single/master.c "staticf void crash(string, object, object)"
+        // and single/simul_efun.c's "string domain_file(string) { ... }",
+        // neither ever referencing its own unnamed argument in the
+        // body). Only consumed when an identifier is actually next, so a
+        // bare "," or ")" here still just closes this parameter the same
+        // way an explicitly-named one would. See CodeGen.cpp's own
+        // declareLocal() for how an empty name is handled downstream --
+        // still a real, positionally-filled slot, just never reachable
+        // by name.
+        std::string paramName;
+        if (check(TokenType::Ident)) {
+            paramName = advance().text;
+        }
+        params.push_back(Param{typeTok.text, paramName, isArray});
         if (checkText(",")) { advance(); continue; }
         break;
     }

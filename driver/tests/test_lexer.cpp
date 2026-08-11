@@ -4092,6 +4092,87 @@ static void testIncludeDirSingleEntryWithNoColonStillWorks() {
     std::cout << "testIncludeDirSingleEntryWithNoColonStillWorks OK\n";
 }
 
+// --- Unnamed function parameters ("string foo(string, int) { ... }") ----
+// Real grammar.y's own "new_arg: arg_type optional_star" alternative
+// (confirmed by direct reading): a parameter may declare just its type,
+// with no identifier at all, if the function body never needs to refer
+// to it -- add_local_name("", type) in the real driver, still a real
+// argument slot, just permanently unreachable by name. Found live
+// sweeping the lil_0.3 reference testsuite mudlib standalone against
+// this driver: its own single/master.c ("staticf void crash(string,
+// object, object)") and single/simul_efun.c ("string domain_file(string)
+// { return ROOT_UID; }") both use this shape, and neither the master nor
+// the simul_efun object -- i.e. nothing in that entire mudlib -- could
+// compile at all without it. inherit/master/valid.c (part of the real
+// master object's own inherit chain) uses the same shape six more times
+// (valid_seteuid, valid_socket, valid_write, valid_read, etc).
+
+static void testUnnamedFunctionParameterParsesAndDoesNotBreakOtherLocals() {
+    // A single unnamed parameter, matching single/simul_efun.c's own
+    // "domain_file(string)" shape exactly, plus a real named local
+    // declared afterward -- proves the unnamed slot doesn't leave the
+    // local-slot counter out of sync with a normal declared local
+    // sharing the same function.
+    ObjectVarHarness harness;
+    harness.writeFile("/unnamed_single_probe.c",
+        "string domain_file(string) {\n"
+        "    int x;\n"
+        "    x = 42;\n"
+        "    return \"root\";\n"
+        "}\n"
+        "mixed probe() { return domain_file(\"ignored\"); }\n");
+    auto obj = harness.objects.cloneObject("/unnamed_single_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "root");
+    std::cout << "testUnnamedFunctionParameterParsesAndDoesNotBreakOtherLocals OK\n";
+}
+
+static void testMultipleUnnamedParametersInOneFunctionDoNotCollide() {
+    // The exact real single/master.c shape: three unnamed parameters in
+    // one function. Before this fix, CodeGen's declareLocal() would have
+    // thrown "variable \"\" already declared in this scope" on the
+    // second one even if the parser accepted the syntax at all, since
+    // every unnamed parameter would otherwise share the same empty-string
+    // key in the name-keyed locals_ map.
+    ObjectVarHarness harness;
+    harness.writeFile("/unnamed_multi_probe.c",
+        "void crash(string, object, object) {\n"
+        "}\n"
+        "int probe() {\n"
+        "    crash(\"x\", this_object(), this_object());\n"
+        "    return 1;\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/unnamed_multi_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    std::cout << "testMultipleUnnamedParametersInOneFunctionDoNotCollide OK\n";
+}
+
+static void testUnnamedParameterMixedWithNamedOnesStaysPositionallyCorrect() {
+    // A named parameter declared *after* an unnamed one must still land
+    // in the right slot and read back the right call-time argument --
+    // not just "doesn't crash", the actual value has to be correct, the
+    // same standard this project already holds compiler-level fixes to.
+    ObjectVarHarness harness;
+    harness.writeFile("/unnamed_mixed_probe.c",
+        "int helper(string, int keep) {\n"
+        "    return keep;\n"
+        "}\n"
+        "int probe() {\n"
+        "    return helper(\"ignored\", 99);\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/unnamed_mixed_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 99);
+    std::cout << "testUnnamedParameterMixedWithNamedOnesStaysPositionallyCorrect OK\n";
+}
+
 // --- simul_efun resolution tier ------------------------------------------
 // Fourth fallback for a bare call: local -> inherited -> simul_efun object
 // -> core efun table, matching real FluffOS's own compile-time resolution
@@ -10165,6 +10246,9 @@ int main() {
     testCppWarningsDoNotFailPreprocessing();
     testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg();
     testIncludeDirSingleEntryWithNoColonStillWorks();
+    testUnnamedFunctionParameterParsesAndDoesNotBreakOtherLocals();
+    testMultipleUnnamedParametersInOneFunctionDoNotCollide();
+    testUnnamedParameterMixedWithNamedOnesStaysPositionallyCorrect();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();
