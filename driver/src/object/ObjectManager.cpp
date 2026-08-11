@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <algorithm>
+#include <vector>
 
 namespace lpcdriver {
 
@@ -247,7 +248,43 @@ std::string stripLineMarkers(const std::string& text) {
     return out.str();
 }
 
-PreprocessResult runPreprocessor(const std::string& sourcePath, const std::string& includeDir,
+// Real FluffOS's own "include directories" mudos.cfg setting is a
+// colon-separated *list*, not a single path (confirmed directly against
+// rc.c's own "CONFIG_STR(__INCLUDE_DIRS__)"/set_inc_list(), and against
+// this actual mudlib's own historical config, bin/mudos.cfg: "include
+// directories : /secure/include:/include") -- lex.c consults every
+// entry in order for a "#include <...>" (angle-bracket) lookup, not just
+// the first. This driver's own Config previously modeled includeDir()
+// as one single path, silently dropping every entry after the first --
+// confirmed real and reachable, not theoretical: this mudlib's own
+// "/include" (holding chat.h and vehicle.h, distinct from the ~50
+// headers under "/secure/include") is never searched at all, so any
+// file "#include <vehicle.h>"-ing (std/rifts_vehicle.c, real: driven by
+// cmds/mortal/_drive.c, and inherited by two real domain vehicle
+// objects) fails outright with "No such file or directory" the instant
+// it is loaded. Splitting on ':' here, one -I per entry (each resolved
+// against the mudlib root the same way the prior single-path code
+// already did), matches that real list semantics exactly rather than
+// hardcoding a second fixed path -- an operator listing three or more
+// directories in a future driver.cfg is handled the same way with no
+// further code change.
+std::vector<std::string> splitIncludeDirs(const std::string& raw, const std::string& mudlibRoot) {
+    std::vector<std::string> dirs;
+    size_t start = 0;
+    while (start <= raw.size()) {
+        size_t colon = raw.find(':', start);
+        std::string entry = raw.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
+        if (!entry.empty()) {
+            if (entry[0] != '/') entry = mudlibRoot + "/" + entry;
+            dirs.push_back(entry);
+        }
+        if (colon == std::string::npos) break;
+        start = colon + 1;
+    }
+    return dirs;
+}
+
+PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vector<std::string>& includeDirs,
                                   const std::string& originalSourceDir, const Config& config) {
     PreprocessResult result;
 
@@ -266,9 +303,12 @@ PreprocessResult runPreprocessor(const std::string& sourcePath, const std::strin
     // \"SimulEfun.h\"") would otherwise resolve against /tmp instead of
     // where the real file lives. Passing the original directory as an
     // extra -I restores that lookup.
-    std::string cmd = "cpp -I '" + originalSourceDir + "' -I '" + includeDir + "'" +
-                       buildPredefinedMacroFlags(config) +
-                       " -x c '" + sourcePath + "' 2>'" + errPath + "'";
+    std::string cmd = "cpp -I '" + originalSourceDir + "'";
+    for (const auto& dir : includeDirs) {
+        cmd += " -I '" + dir + "'";
+    }
+    cmd += buildPredefinedMacroFlags(config) +
+           " -x c '" + sourcePath + "' 2>'" + errPath + "'";
 
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
@@ -338,10 +378,7 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
     }
     f.close();
 
-    std::string includeDir = config_.includeDir();
-    if (includeDir.empty() || includeDir[0] != '/') {
-        includeDir = config_.mudlibRoot() + "/" + includeDir;
-    }
+    std::vector<std::string> includeDirs = splitIncludeDirs(config_.includeDir(), config_.mudlibRoot());
 
     StagedSource staged = stageSourceForPreprocessing(path, config_.mudlibRoot());
     if (!staged.ok) {
@@ -349,7 +386,7 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
         return nullptr;
     }
     std::string originalSourceDir = path.substr(0, path.find_last_of('/'));
-    PreprocessResult preprocessed = runPreprocessor(staged.tempPath, includeDir, originalSourceDir, config_);
+    PreprocessResult preprocessed = runPreprocessor(staged.tempPath, includeDirs, originalSourceDir, config_);
     std::remove(staged.tempPath.c_str());
     if (!preprocessed.ok) {
         std::cerr << "[object] preprocessing failed for " << path << ":\n"

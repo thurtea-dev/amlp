@@ -4010,6 +4010,88 @@ static void testCppWarningsDoNotFailPreprocessing() {
     std::cout << "testCppWarningsDoNotFailPreprocessing OK\n";
 }
 
+static void testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg() {
+    // Real FluffOS's own "include directories" mudos.cfg setting is a
+    // colon-separated *list*, confirmed directly against
+    // fluffos-2.9-ds2.08's own rc.c ("CONFIG_STR(__INCLUDE_DIRS__)") and
+    // main.c's own "set_inc_list(INCLUDE_DIRS)", and against this actual
+    // target mudlib's own historical bin/mudos.cfg: "include directories
+    // : /secure/include:/include" -- a "#include <...>" lookup searches
+    // every listed directory, not just the first. See ObjectManager.cpp's
+    // own splitIncludeDirs() comment for the real call site this closes:
+    // this mudlib's own std/rifts_vehicle.c "#include <vehicle.h>"
+    // previously failed outright ("No such file or directory") since
+    // this driver's Config only ever passed a single -I to cpp.
+    //
+    // Built by hand rather than via ObjectVarHarness (whose own
+    // constructor hardcodes a single include_dir) specifically to prove
+    // two *separate* directories, each holding one of the two headers
+    // needed, are both actually searched -- not just that some include
+    // path works at all.
+    char dirTemplate[] = "/tmp/lpcdriver_incdir_test_XXXXXX";
+    char* created = mkdtemp(dirTemplate);
+    assert(created != nullptr);
+    std::string tempDir = created;
+
+    assert(::mkdir((tempDir + "/hdrs_a").c_str(), 0755) == 0);
+    assert(::mkdir((tempDir + "/hdrs_b").c_str(), 0755) == 0);
+
+    std::ofstream headerA(tempDir + "/hdrs_a/a.h");
+    headerA << "#define FROM_A 1\n";
+    headerA.close();
+    std::ofstream headerB(tempDir + "/hdrs_b/b.h");
+    headerB << "#define FROM_B 2\n";
+    headerB.close();
+
+    std::ofstream probeFile(tempDir + "/probe.c");
+    probeFile << "#include <a.h>\n#include <b.h>\n"
+                 "int probe() { return FROM_A + FROM_B; }\n";
+    probeFile.close();
+
+    std::string cfgPath = tempDir + "/driver.cfg";
+    std::ofstream cfg(cfgPath);
+    cfg << "mudlib_root: " << tempDir << "\n";
+    cfg << "master_file: /unused\n";
+    cfg << "include_dir: " << tempDir << "/hdrs_a:" << tempDir << "/hdrs_b\n";
+    cfg << "port: 0\n";
+    cfg.close();
+
+    lpcdriver::Config config;
+    assert(config.loadFromFile(cfgPath));
+    lpcdriver::ObjectManager objects(config);
+    lpcdriver::VM vm(objects, config);
+    objects.setVM(&vm);
+
+    auto obj = objects.loadObject("/probe");
+    assert(obj != nullptr);
+
+    lpcdriver::Value result = vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 3);
+
+    std::cout << "testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg OK\n";
+}
+
+static void testIncludeDirSingleEntryWithNoColonStillWorks() {
+    // Backward-compatibility check: every existing driver.cfg (this
+    // project's own driver/config/driver.cfg among them) sets
+    // "include_dir" to one plain path with no ':' at all -- confirms
+    // splitIncludeDirs() still resolves a real "#include <...>" against
+    // that one entry, not zero entries and not a spurious empty second
+    // one from over-eager splitting.
+    ObjectVarHarness harness;
+    harness.writeFile("/single_incdir.h", "#define SINGLE_INCDIR_VALUE 9\n");
+    harness.writeFile("/single_incdir_probe.c",
+        "#include <single_incdir.h>\n"
+        "int probe() { return SINGLE_INCDIR_VALUE; }\n");
+    auto obj = harness.objects.cloneObject("/single_incdir_probe");
+    assert(obj != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 9);
+    std::cout << "testIncludeDirSingleEntryWithNoColonStillWorks OK\n";
+}
+
 // --- simul_efun resolution tier ------------------------------------------
 // Fourth fallback for a bare call: local -> inherited -> simul_efun object
 // -> core efun table, matching real FluffOS's own compile-time resolution
@@ -10081,6 +10163,8 @@ int main() {
     testCreateRuntimeErrorFailsLoadInsteadOfCrashing();
     testAbsoluteIncludePathResolvesAgainstMudlibRoot();
     testCppWarningsDoNotFailPreprocessing();
+    testIncludeDirConfigSupportsColonSeparatedListLikeRealMudosCfg();
+    testIncludeDirSingleEntryWithNoColonStillWorks();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();
