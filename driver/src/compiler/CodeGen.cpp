@@ -379,6 +379,16 @@ void CodeGen::emitExpr(const AstNode& expr) {
             Instruction{OpCode::PushClosure, nameIdx, static_cast<int32_t>(closure->boundArgs.size())});
         return;
     }
+    if (auto* param = dynamic_cast<const LambdaParamExpr*>(&expr)) {
+        // "$N" reads as a plain local: emitPendingLambdas() reserves
+        // slots 0..paramCount-1 for the closure's own call-time
+        // arguments up front (see its own comment), the same slots an
+        // ordinary function's declared params would occupy -- so this is
+        // exactly the same instruction shape emitVarExpr's own
+        // VarKind::Local case uses, just without needing a name lookup.
+        out_->code.push_back(Instruction{OpCode::PushLocal, param->index, 0});
+        return;
+    }
     if (auto* lambda = dynamic_cast<const InlineLambdaExpr*>(&expr)) {
         // See CodeGen.hpp's PendingLambda comment: the body is compiled
         // later, at the enclosing function's own boundary, not here.
@@ -1169,7 +1179,14 @@ void CodeGen::emitPendingLambdas() {
         ++i;
 
         locals_.clear();
-        nextLocalSlot_ = 0;
+        // Reserves slots 0..paramCount-1 up front for "$1".."$N" (see
+        // LambdaParamExpr's own PushLocal emission just above) -- real
+        // LPC comma-expr lambda bodies are expression-only, so there is
+        // no "int x;" declaration inside one that could otherwise want
+        // slot 0 for itself; any locals a nested lambda declares get its
+        // own separate slot space in its own later iteration of this
+        // same loop instead.
+        nextLocalSlot_ = pending.expr->paramCount;
         localScopeStack_.clear();
         loopStack_.clear();
         foreachCounter_ = 0;
@@ -1179,7 +1196,7 @@ void CodeGen::emitPendingLambdas() {
         FunctionEntry entry;
         entry.name = pending.name;
         entry.entryPoint = static_cast<uint32_t>(out_->code.size());
-        entry.numArgs = 0;
+        entry.numArgs = static_cast<uint8_t>(pending.expr->paramCount);
 
         const auto& bodyExprs = pending.expr->bodyExprs;
         for (size_t j = 0; j < bodyExprs.size(); ++j) {

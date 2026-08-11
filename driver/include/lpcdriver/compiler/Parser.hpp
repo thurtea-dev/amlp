@@ -89,6 +89,15 @@ private:
 
     std::vector<Token> tokens_;
     size_t pos_ = 0;
+
+    // One entry per "(: ... :)" general-lambda body currently being
+    // parsed (nested lambdas push their own), each tracking the highest
+    // "$N" seen so far within that lambda specifically -- real lex.c's
+    // own "current_function_context" (a stack there too, pushed/popped
+    // per nested function-pointer context). Empty means "not currently
+    // inside a lambda body", the real "$var illegal outside of function
+    // pointer" condition -- see parsePrimary()'s own "$N" handling.
+    std::vector<int> lambdaParamMaxStack_;
 };
 
 } // namespace lpcdriver

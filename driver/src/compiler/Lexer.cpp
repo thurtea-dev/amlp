@@ -114,6 +114,38 @@ Token Lexer::lexNumber() {
     return Token{TokenType::Number, text, startLine};
 }
 
+// "$N" (e.g. "$1") -- real lex.c's own '$' case: a digit must follow
+// immediately (a bare "$" or "$(expr)" is real LPC too, but nothing
+// reachable in this mudlib uses either form -- see Ast.hpp's
+// LambdaParamExpr comment for the full citation -- so this throws a
+// clear error instead of silently mishandling them, matching this
+// codebase's existing convention for other partially-implemented
+// syntax). Emitted as an ordinary Ident token whose text is "$" plus
+// the digits: real identifiers can never start with '$' (confirmed by
+// CodeGen.cpp's own "$lambda#N" synthetic-name comment), so this can
+// never collide with a real variable/function name, and Parser.cpp
+// tells the two apart with one cheap check rather than needing a whole
+// new TokenType threaded through every place that already matches on
+// TokenType::Ident. Whether "$N" is actually legal at this point in the
+// source (real lex.c: "$var illegal outside of function pointer") is a
+// parse-time concern, not a lexical one -- see Parser.cpp's own
+// lambdaParamMaxStack_.
+Token Lexer::lexLambdaParam() {
+    int startLine = line_;
+    advance(); // '$'
+    if (!std::isdigit(static_cast<unsigned char>(peek()))) {
+        throw LpcRuntimeError(
+            "lexer: '$' must be followed by a digit (\"$N\") at line " +
+            std::to_string(startLine) +
+            " -- the \"$(expr)\" bound-variable form is not implemented");
+    }
+    std::string text = "$";
+    while (!atEnd() && std::isdigit(static_cast<unsigned char>(peek()))) {
+        text += advance();
+    }
+    return Token{TokenType::Ident, text, startLine};
+}
+
 Token Lexer::lexString() {
     int startLine = line_;
     advance();
@@ -329,6 +361,8 @@ std::vector<Token> Lexer::tokenize() {
             tokens.push_back(lexChar());
         } else if (c == '@') {
             tokens.push_back(lexHeredoc());
+        } else if (c == '$') {
+            tokens.push_back(lexLambdaParam());
         } else if (c == '(' || c == ')' || c == '{' || c == '}' ||
                    c == '[' || c == ']' || c == ':' ||
                    c == ';' || c == ',' || c == '-' || c == '=' ||

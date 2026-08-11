@@ -6979,6 +6979,86 @@ static void testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTim
     std::cout << "testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTime OK\n";
 }
 
+// "$N" inside a "(: ... :)" lambda body -- real lex.c's own L_PARAMETER
+// token, an implicit reference to the closure's own Nth call-time
+// argument. See Ast.hpp's LambdaParamExpr comment for the full citation:
+// real, previously-unparseable (a bare "$" threw "lexer: unrecognized
+// character"), and load-bearing -- secure/daemon/events.c's own
+// unguarded "filter(users(), (: $1 && environment($1) :))" meant the
+// whole EVENTS_D daemon could never compile at all, breaking every
+// simul_efun in secure/SimulEfun/time.c and light.c that depends on it.
+
+static void testDollarLambdaParamBindsClosuresOwnFirstCallTimeArgument() {
+    lpcdriver::Value result = runProbe("return funcall((: $1 + 1 :), 41);");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+    std::cout << "testDollarLambdaParamBindsClosuresOwnFirstCallTimeArgument OK\n";
+}
+
+static void testDollarLambdaParamMultipleParametersBindPositionally() {
+    // "$2" alone (with no "$1" at all) still forces a 2-parameter
+    // closure -- real lex.c: num_parameters tracks the *highest* digit
+    // seen, not a count of distinct ones used -- confirmed by also
+    // exercising $1 out of order (referenced second) in the same body.
+    lpcdriver::Value result = runProbe("return funcall((: $2 * 10 + $1 :), 2, 4);");
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+    std::cout << "testDollarLambdaParamMultipleParametersBindPositionally OK\n";
+}
+
+static void testDollarLambdaParamFilterMatchesRealEventsDShape() {
+    // The exact real call site's own shape, secure/daemon/events.c's
+    // "filter(users(), (: $1 && environment($1) :))" -- filtering a list
+    // of objects down to only the ones currently somewhere (a
+    // non-null environment()), mirrored here with move_object()/
+    // environment() instead of users() (this driver has no live
+    // connections in a unit test, but the mechanism under test -- $1
+    // binding to each filtered element -- is identical either way).
+    ObjectVarHarness harness;
+    harness.writeFile("/dlp_room.c", "void init() {}\n");
+    harness.writeFile("/dlp_thing.c", "void create() {}\n");
+    harness.writeFile("/dlp_probe.c",
+        "mixed *probe(object a, object b) {\n"
+        "    return filter(({ a, b }), (: $1 && environment($1) :));\n"
+        "}\n");
+
+    auto room = harness.objects.cloneObject("/dlp_room");
+    auto placed = harness.objects.cloneObject("/dlp_thing");
+    auto homeless = harness.objects.cloneObject("/dlp_thing");
+    auto probe = harness.objects.cloneObject("/dlp_probe");
+    assert(room != nullptr && placed != nullptr && homeless != nullptr && probe != nullptr);
+    harness.vm.moveObject(placed, room);
+
+    lpcdriver::Value result = harness.vm.callFunction(
+        probe, "probe", {lpcdriver::Value(placed), lpcdriver::Value(homeless)});
+    auto* arrPtr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arrPtr != nullptr && *arrPtr != nullptr);
+    assert((*arrPtr)->items.size() == 1);
+    auto* keptPtr = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&(*arrPtr)->items[0].data);
+    assert(keptPtr != nullptr && *keptPtr == placed);
+
+    std::cout << "testDollarLambdaParamFilterMatchesRealEventsDShape OK\n";
+}
+
+static void testDollarParamOutsideLambdaBodyThrowsParseError() {
+    // Real lex.c: "$var illegal outside of function pointer." -- a bare
+    // "$1" in ordinary code (never inside a "(: ... :)") must not
+    // silently parse as if it meant something.
+    std::string src = "int probe() {\n    return $1;\n}\n";
+    bool threw = false;
+    try {
+        lpcdriver::Lexer lexer(src);
+        lpcdriver::Parser parser(lexer.tokenize());
+        parser.parseProgram();
+    } catch (const lpcdriver::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("illegal outside of function pointer") != std::string::npos);
+    }
+    assert(threw);
+    std::cout << "testDollarParamOutsideLambdaBodyThrowsParseError OK\n";
+}
+
 // ---------------------------------------------------------------------
 // "(*fp)(args...)" call-through-a-function-pointer-value syntax --
 // desugars to the "evaluate" efun (see grammar.y's own "'(' '*'
@@ -10114,6 +10194,10 @@ int main() {
     testInlineLambdaWithCallExpressionFirstOperandParsesAsInlineLambdaExpr();
     testInlineLambdaBareStringConstantParsesAsInlineLambdaExpr();
     testInlineLambdaVmExecutionEvaluatesBodyAtCallTimeNotConstructionTime();
+    testDollarLambdaParamBindsClosuresOwnFirstCallTimeArgument();
+    testDollarLambdaParamMultipleParametersBindPositionally();
+    testDollarLambdaParamFilterMatchesRealEventsDShape();
+    testDollarParamOutsideLambdaBodyThrowsParseError();
     testFunctionPointerCallThroughParsesToForcedEvaluateCall();
     testFunctionPointerCallThroughOnIndexedTargetParses();
     testFunctionPointerCallThroughVmExecutionCallsClosure();

@@ -29,6 +29,7 @@ private:
     Token lexChar();
     Token lexSymbol();
     Token lexHeredoc();
+    Token lexLambdaParam();
 
     std::string src_;
     size_t pos_ = 0;

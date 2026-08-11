@@ -176,6 +176,44 @@ struct ClosureLiteralExpr : AstNode {
 // note.
 struct InlineLambdaExpr : AstNode {
     std::vector<AstPtr> bodyExprs;
+    // The lambda's own implicit parameter count, i.e. the highest "$N"
+    // referenced anywhere in bodyExprs (0 if none) -- see LambdaParamExpr
+    // just below and Lexer.cpp's own "$" handling for the real source
+    // this mirrors (lex.c's "$var": "current_function_context->
+    // num_parameters = yylval.number + 1" on the highest digit seen).
+    // Set by Parser::parsePrimary() while this lambda's body is being
+    // parsed (Parser::lambdaParamMaxStack_), consumed by CodeGen's
+    // emitPendingLambdas() to size the compiled function's own
+    // numArgs/numLocals so a caller's arguments land in the right slots.
+    int paramCount = 0;
+};
+
+// "$N" (e.g. "$1", "$2") inside a "(: ... :)" body -- real lex.c's own
+// L_PARAMETER token: an implicit reference to the *closure's own* Nth
+// call-time argument (1-indexed in source, matching real LPC), not a
+// declared local variable. Confirmed real and load-bearing, not
+// theoretical: secure/daemon/events.c's own real, unguarded
+// "filter(users(), (: $1 && environment($1) :))" (EVENTS_D's day/night
+// cycle advancement) -- EVENTS_D backs secure/SimulEfun/time.c's
+// night()/day()/hour()/etc and secure/SimulEfun/light.c's day/night
+// lighting, so failing to parse this one file at all (this driver's
+// lexer previously treated a bare "$" as an unrecognized character and
+// threw) broke every one of those simul_efuns' own real call sites the
+// instant EVENTS_D was ever loaded. Only the bare "$N" form is
+// implemented, not real LPC's "$(expr)" bound-variable-capture form --
+// confirmed by a full mudlib sweep that the only other real files using
+// either form (daemon/intermud.c, daemon/services/who.c,
+// daemon/services/auth.c) are unreachable, gated behind
+// "#ifndef __PACKAGE_SOCKETS__ #error ..." (this driver implements no
+// raw-socket package), and secure/daemon/chat.c's own "$(ch)" site was
+// already confirmed unreachable in an earlier session (not wired to
+// CHAT_D, only reachable through the same dead __PACKAGE_SOCKETS__-gated
+// path via daemon/services/channel.c).
+struct LambdaParamExpr : AstNode {
+    // 0-indexed local slot ("$1" -> 0, "$2" -> 1, ...), already converted
+    // from the 1-indexed source form by the time this node exists (see
+    // Parser.cpp's own "$N" handling).
+    int index = 0;
 };
 
 struct ExprStmt : AstNode {

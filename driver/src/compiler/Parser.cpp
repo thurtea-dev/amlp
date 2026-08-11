@@ -177,7 +177,15 @@ AstPtr Parser::parsePrimary() {
     // literal, a parenthesized expression, etc -- falls through to the
     // general comma_expr form below.
     if (checkText("(") && peekAt(1).text == ":") {
+        // A "$N" token is also TokenType::Ident (see Lexer::lexLambdaParam()'s
+        // own comment), but can never be a legitimate bare closure-literal
+        // function name -- "(: $1 :)" is the general InlineLambdaExpr form
+        // (a one-argument identity-ish lambda), not a closure literal
+        // naming a function called "$1". Excluded here rather than left to
+        // fall through, since a lone "$1" immediately followed by ":"
+        // would otherwise satisfy the same shape isBareName checks for.
         bool isBareName = peekAt(2).type == TokenType::Ident &&
+            !peekAt(2).text.empty() && peekAt(2).text[0] != '$' &&
             peekAt(3).type == TokenType::Symbol &&
             (peekAt(3).text == "," || peekAt(3).text == ":");
 
@@ -206,6 +214,10 @@ AstPtr Parser::parsePrimary() {
         advance(); // (
         advance(); // :
         auto lambda = std::make_unique<InlineLambdaExpr>();
+        // Pushed/popped around this lambda's own body only -- a "$N"
+        // inside it belongs to *this* lambda, not an outer one it might
+        // be nested inside (see lambdaParamMaxStack_'s own comment).
+        lambdaParamMaxStack_.push_back(0);
         for (;;) {
             lambda->bodyExprs.push_back(parseExpr());
             if (checkText(",")) {
@@ -214,6 +226,8 @@ AstPtr Parser::parsePrimary() {
             }
             break;
         }
+        lambda->paramCount = lambdaParamMaxStack_.back();
+        lambdaParamMaxStack_.pop_back();
         expectText(":", "closure literal");
         expectText(")", "closure literal");
         return lambda;
@@ -308,6 +322,27 @@ AstPtr Parser::parsePrimary() {
 
     if (check(TokenType::Ident)) {
         std::string name = advance().text;
+
+        // "$N" -- see Lexer::lexLambdaParam()'s own comment for why this
+        // is lexed as an Ident rather than its own TokenType, and Ast.hpp's
+        // LambdaParamExpr for the real citation. Checked first, before any
+        // of the other special-cased identifier forms below, since "$N" is
+        // never a legal function/variable name to begin with.
+        if (!name.empty() && name[0] == '$') {
+            if (lambdaParamMaxStack_.empty()) {
+                throw LpcRuntimeError(
+                    "$var illegal outside of function pointer (\"" + name +
+                    "\" used outside a \"(: ... :)\" lambda body)");
+            }
+            int oneIndexed = std::stoi(name.substr(1));
+            if (oneIndexed < 1) {
+                throw LpcRuntimeError("In function parameter " + name + ", num must be >= 1");
+            }
+            lambdaParamMaxStack_.back() = std::max(lambdaParamMaxStack_.back(), oneIndexed);
+            auto param = std::make_unique<LambdaParamExpr>();
+            param->index = oneIndexed - 1;
+            return param;
+        }
 
         // "efun::name(...)" -- real LPC's explicit escape hatch straight
         // to the core efun table (see CallExpr::forceEfun's own
