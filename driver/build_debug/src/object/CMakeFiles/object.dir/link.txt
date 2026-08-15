@@ -1,0 +1,2 @@
+/usr/bin/ar qc libobject.a CMakeFiles/object.dir/LivingNameRegistry.cpp.o CMakeFiles/object.dir/LpcObject.cpp.o CMakeFiles/object.dir/ObjectManager.cpp.o
+/usr/bin/ranlib libobject.a

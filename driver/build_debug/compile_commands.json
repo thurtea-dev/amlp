@@ -1,0 +1,116 @@
+[
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/lpcdriver.dir/src/main.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/main.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/main.cpp",
+  "output": "CMakeFiles/lpcdriver.dir/src/main.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/core",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/core.dir/Errors.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/core/Errors.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/core/Errors.cpp",
+  "output": "src/core/CMakeFiles/core.dir/Errors.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/config",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/config.dir/Config.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/config/Config.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/config/Config.cpp",
+  "output": "src/config/CMakeFiles/config.dir/Config.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/compiler",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/compiler.dir/Lexer.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/compiler/Lexer.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/compiler/Lexer.cpp",
+  "output": "src/compiler/CMakeFiles/compiler.dir/Lexer.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/compiler",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/compiler.dir/Parser.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/compiler/Parser.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/compiler/Parser.cpp",
+  "output": "src/compiler/CMakeFiles/compiler.dir/Parser.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/compiler",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/compiler.dir/CodeGen.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/compiler/CodeGen.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/compiler/CodeGen.cpp",
+  "output": "src/compiler/CMakeFiles/compiler.dir/CodeGen.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/vm",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/vm.dir/VM.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/vm/VM.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/vm/VM.cpp",
+  "output": "src/vm/CMakeFiles/vm.dir/VM.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/vm",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/vm.dir/Value.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/vm/Value.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/vm/Value.cpp",
+  "output": "src/vm/CMakeFiles/vm.dir/Value.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/object",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/object.dir/LivingNameRegistry.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/object/LivingNameRegistry.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/object/LivingNameRegistry.cpp",
+  "output": "src/object/CMakeFiles/object.dir/LivingNameRegistry.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/object",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/object.dir/LpcObject.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/object/LpcObject.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/object/LpcObject.cpp",
+  "output": "src/object/CMakeFiles/object.dir/LpcObject.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/object",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/object.dir/ObjectManager.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/object/ObjectManager.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/object/ObjectManager.cpp",
+  "output": "src/object/CMakeFiles/object.dir/ObjectManager.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/net",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/net.dir/Connection.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/net/Connection.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/net/Connection.cpp",
+  "output": "src/net/CMakeFiles/net.dir/Connection.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/net",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/net.dir/Server.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/net/Server.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/net/Server.cpp",
+  "output": "src/net/CMakeFiles/net.dir/Server.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/net",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/net.dir/OutputContext.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/net/OutputContext.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/net/OutputContext.cpp",
+  "output": "src/net/CMakeFiles/net.dir/OutputContext.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/net",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/net.dir/InteractiveRegistry.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/net/InteractiveRegistry.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/net/InteractiveRegistry.cpp",
+  "output": "src/net/CMakeFiles/net.dir/InteractiveRegistry.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/scheduler",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/scheduler.dir/Scheduler.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/scheduler/Scheduler.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/scheduler/Scheduler.cpp",
+  "output": "src/scheduler/CMakeFiles/scheduler.dir/Scheduler.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/efun",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/efun.dir/EfunTable.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/efun/EfunTable.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/efun/EfunTable.cpp",
+  "output": "src/efun/CMakeFiles/efun.dir/EfunTable.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/src/apply",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/apply.dir/ApplyTable.cpp.o -c /home/runner/work/aethermud/aethermud/driver/src/apply/ApplyTable.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/src/apply/ApplyTable.cpp",
+  "output": "src/apply/CMakeFiles/apply.dir/ApplyTable.cpp.o"
+},
+{
+  "directory": "/home/runner/work/aethermud/aethermud/driver/build_debug/tests",
+  "command": "/usr/bin/c++  -I/home/runner/work/aethermud/aethermud/driver/include -g -std=gnu++20 -o CMakeFiles/lpcdriver_tests.dir/test_lexer.cpp.o -c /home/runner/work/aethermud/aethermud/driver/tests/test_lexer.cpp",
+  "file": "/home/runner/work/aethermud/aethermud/driver/tests/test_lexer.cpp",
+  "output": "tests/CMakeFiles/lpcdriver_tests.dir/test_lexer.cpp.o"
+}
+]

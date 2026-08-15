@@ -1,0 +1,2 @@
+/usr/bin/ar qc libapply.a CMakeFiles/apply.dir/ApplyTable.cpp.o
+/usr/bin/ranlib libapply.a

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libefun.a CMakeFiles/efun.dir/EfunTable.cpp.o
+/usr/bin/ranlib libefun.a

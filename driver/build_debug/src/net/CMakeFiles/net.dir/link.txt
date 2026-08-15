@@ -1,0 +1,2 @@
+/usr/bin/ar qc libnet.a CMakeFiles/net.dir/Connection.cpp.o CMakeFiles/net.dir/Server.cpp.o CMakeFiles/net.dir/OutputContext.cpp.o CMakeFiles/net.dir/InteractiveRegistry.cpp.o
+/usr/bin/ranlib libnet.a
