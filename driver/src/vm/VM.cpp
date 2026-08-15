@@ -455,7 +455,12 @@ SscanfOutcome runSscanf(const std::string& in0, const std::string& fmt0, size_t 
 } // namespace
 
 VM::VM(ObjectManager& objects, Config& config)
-    : objects_(objects), config_(config) {}
+    : objects_(objects), config_(config),
+      maxEvalCost_(config.maxEvalCost()) {}
+
+void VM::setMaxEvalCost(int64_t limit) {
+    maxEvalCost_ = (limit < 0) ? config_.maxEvalCost() : limit;
+}
 
 Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
                         const std::string& functionName,
@@ -818,7 +823,11 @@ bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::str
 
 Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
               std::vector<Value> args, const std::shared_ptr<LpcObject>& obj) {
-    evalCost_ = 0;
+    // Do NOT reset evalCost_ here. Real FluffOS accumulates instruction
+    // cost across all nested run()/apply() calls within one top-level
+    // dispatch; only Server::dispatchLine() and Scheduler::tick*() reset
+    // it, matching process_user_command()/call_heart_beat()/call_call_out()
+    // in the reference driver (interpret.c, backend.c, call_out.c).
 
     // Tracks real FluffOS's current_object for the duration of this one
     // LPC function activation (see VM.hpp's currentObject() comment).
@@ -888,7 +897,7 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
       try {
         const Instruction& instr = program.code[ip];
         ++evalCost_;
-        if (evalCost_ > 1000000) {
+        if (evalCost_ > maxEvalCost_) {
             // Not LpcRuntimeError on purpose -- see EvalCostError's own
             // comment, this must not be catchable by catch().
             throw EvalCostError("eval cost exceeded");

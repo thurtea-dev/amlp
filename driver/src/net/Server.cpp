@@ -185,6 +185,13 @@ void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
     // an earlier, unrelated dispatch must never leak into this one.
     conn.clearPendingNotifyFail();
 
+    // Real interpret.c/backend.c: eval_cost is reset to 0 once at the
+    // start of each top-level dispatch (process_user_command /
+    // call_heart_beat / call_call_out) and then accumulates across all
+    // nested apply/call_other/callClosure calls. Matches the single
+    // global reset in the reference driver, not per-run() reset.
+    vm.resetEvalCost();
+
     if (conn.hasPendingInputTo()) {
         std::optional<PendingInputTo> pending = conn.takePendingInputTo();
         auto target = pending->object.lock();

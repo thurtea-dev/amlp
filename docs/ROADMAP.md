@@ -1,0 +1,148 @@
+# AetherMUD — World-Class LPC Driver Roadmap
+
+Goal: transform AetherMUD from a single-mudlib FluffOS-targeting driver into
+the best LPC runtime available — meeting or exceeding FluffOS, LDMud, and DGD
+on their own terms and surpassing all three on the dimensions none of them
+addressed.
+
+Each source directory carries an `instruct.md` that owns the detailed task
+list for that subsystem. This file is the master sequencing reference.
+
+---
+
+## Phase 0 — Stabilize the current base
+
+**Prerequisite for everything else. Do not start Phase 1 until Phase 0 is
+complete and the full test suite is passing with no regressions.**
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 0.1 | `throw()` efun — carry a Value to the nearest `catch()` | `src/efun` | [x] |
+| 0.2 | `sscanf` full format set: `%f`, `%x`, `%(regexp)`, adjacent `%s` | `src/efun` | [x] (partial: `%(regexp)` pending 0.11) |
+| 0.3 | `sprintf` `%*` dynamic field width | `src/efun` | [x] |
+| 0.4 | `set_eval_limit` as a real accumulated-cost model (not no-op) | `src/vm` | [x] |
+| 0.5 | Full `O_DESTRUCTED` apply guards on every cross-object call | `src/object` | [x] |
+| 0.6 | Shadow support: `shadow(ob, flag)` efun + shadow chain traversal | `src/object` | [ ] |
+| 0.7 | `save_object`/`restore_object` in FluffOS `.o` text format | `src/efun` | [x] |
+| 0.8 | Full telnet IAC negotiation, echo suppression, NAWS | `src/net` | [ ] |
+| 0.9 | `map`/`filter`/`sort_array` as real closure consumers | `src/efun` | [x] (partial: all mudlib shapes covered) |
+| 0.10 | `socket_*` family basics (create/connect/write/read/close) | `src/net` + `src/efun` | [ ] |
+| 0.11 | `regexp`/`regexplode`/`reg_assoc` PCRE efuns | `src/efun` | [ ] |
+| 0.12 | Every efun has at least one regression test | `tests` | [ ] (ongoing) |
+| 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: ~131 registered) |
+
+---
+
+## Phase 1 — Dialect universality
+
+**Goal: one binary, three dialects — FluffOS/MudOS, LDMud, DGD.**
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 1.1 | `LpcDialect` enum + config key `dialect` | `src/config` + `src/dialect` | [ ] |
+| 1.2 | Dialect-aware Lexer: `#'`, `lambda`, `atomic`, `rlimits`, `nil` tokens | `src/compiler` + `src/dialect` | [ ] |
+| 1.3 | Dialect-aware Parser: LDMud symbol/lambda syntax, DGD `atomic`/`rlimits` | `src/compiler` + `src/dialect` | [ ] |
+| 1.4 | Pluggable boot API: FluffOS master/simul_efun, LDMud master, DGD driver+auto | `src/apply` + `src/dialect` | [ ] |
+| 1.5 | LDMud shadows: `shadow(ob,1)`, shadow-chain `call_other`, `query_shadowing` | `src/object` | [ ] |
+| 1.6 | LDMud `replaces` directive in `inherit` | `src/compiler` + `src/object` | [ ] |
+| 1.7 | LDMud `lambda()` / `unbound_lambda()` / `bind()` closure kinds | `src/vm` + `src/compiler` | [ ] |
+| 1.8 | LDMud `#'symbol` references baked at construction | `src/compiler` + `src/vm` | [ ] |
+| 1.9 | LDMud mapping width > 1: `m_allocate`, `m_indices`, `m_values` | `src/vm` + `src/efun` | [ ] |
+| 1.10 | DGD `nil` as distinct type in `Value` variant | `src/vm` | [ ] |
+| 1.11 | DGD `rlimits` statement: per-task tick + stack depth limits | `src/vm` + `src/compiler` | [ ] |
+| 1.12 | DGD `atomic` function modifier: VM-level checkpoint/rollback | `src/vm` | [ ] |
+| 1.13 | DGD `parse_string` kfun | `src/efun` | [ ] |
+| 1.14 | DGD lightweight objects (LWOs): value-semantics object kind | `src/vm` + `src/object` | [ ] |
+| 1.15 | DGD driver+auto object boot path | `src/apply` + `src/dialect` | [ ] |
+| 1.16 | LDMud master apply name table | `src/apply` + `src/dialect` | [ ] |
+
+---
+
+## Phase 2 — Architecture differentiation
+
+**Goal: surpass all three drivers on the dimensions none of them addressed.**
+
+### 2a — Persistence
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 2.1 | World-level statedump: serialize full heap to compact binary snapshot | `src/persist` | [ ] |
+| 2.2 | Object swapout: page inactive objects to disk; demand-page on access | `src/persist` + `src/object` | [ ] |
+| 2.3 | Hotboot: fd-passing exec into new binary without dropping connections | `src/persist` + `src/net` | [ ] |
+| 2.4 | Dual persistence: per-object `save_object` AND world snapshot coexist | `src/persist` + `src/efun` | [ ] |
+
+### 2b — Concurrency
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 2.5 | C++20 coroutine scheduler: cooperative suspend/resume of LPC tasks | `src/scheduler` | [ ] |
+| 2.6 | LPC `async`/`await` keyword pair backed by coroutine scheduler | `src/compiler` + `src/vm` + `src/scheduler` | [ ] |
+| 2.7 | `call_out_future(delay)` — awaitable call_out | `src/efun` + `src/scheduler` | [ ] |
+| 2.8 | Open Hydra: speculative parallel tasks on disjoint object graphs | `src/scheduler` | [ ] |
+
+### 2c — Apply cache + JIT
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 2.9 | Apply cache: hash (object × function-name) → FunctionEntry; invalidate on recompile | `src/apply` + `src/vm` | [ ] |
+| 2.10 | Closure bake-at-construction: resolve `FP_*` kind + index at bind time | `src/vm` + `src/compiler` | [ ] |
+| 2.11 | LLVM JIT backend: compile hot bytecode functions to native via LLVM IR | `src/jit` | [ ] |
+
+### 2d — Efun breadth beyond FluffOS
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 2.12 | Full PCRE regexp suite (already started in Phase 0 — extend) | `src/efun` | [ ] |
+| 2.13 | TLS support (OpenSSL/BoringSSL) for game + MXP/WebSocket | `src/net` | [ ] |
+| 2.14 | WebSocket framing on top of TLS | `src/net` | [ ] |
+| 2.15 | SQLite built-in: `db_connect`/`db_exec`/`db_fetch`/`db_close` efuns | `src/efun` | [ ] |
+| 2.16 | Hash efuns: SHA-256/SHA-512/MD5/bcrypt/BLAKE2 | `src/efun` | [ ] |
+| 2.17 | `json_encode`/`json_decode` efun pair | `src/efun` | [ ] |
+| 2.18 | `http_get`/`http_post` async efuns (non-blocking, via async scheduler) | `src/efun` + `src/scheduler` | [ ] |
+
+### 2e — Developer experience
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 2.19 | LSP server for LPC (`--lsp` flag): hover, go-to-def, diagnostics | `src/lsp` | [ ] |
+| 2.20 | Structured error objects: JSON-serializable source/line/column/message | `src/core` | [ ] |
+| 2.21 | Hot-reload: recompile + migrate one `.c` file while server is live | `src/object` + `src/vm` | [ ] |
+| 2.22 | LPC-native test runner: `assert_equal`/`assert_throws` efun suite | `src/efun` + mudlib `std/test.c` | [ ] |
+
+---
+
+## Phase 3 — Production hardening
+
+| # | Task | Directory | Status |
+|---|------|-----------|--------|
+| 3.1 | Full `privs_file` / uid/gid object trust hierarchy | `src/security` | [ ] |
+| 3.2 | Filesystem jail per object domain; capability grants for `call_other` | `src/security` | [ ] |
+| 3.3 | Generational GC replacing `shared_ptr`-everywhere | `src/gc` | [ ] |
+| 3.4 | Full telnet option negotiation + GMCP, MSDP, MSSP, MTTS, MXP | `src/proto` + `src/net` | [ ] |
+| 3.5 | Conformance test suite (any driver can certify FluffOS/LDMud/DGD dialect) | `tests` | [ ] |
+| 3.6 | LPC language specification document | `docs` | [ ] |
+| 3.7 | Driver API reference + mudlib porting guide for each dialect | `docs` | [ ] |
+
+---
+
+## Build and test
+
+```bash
+cmake -B driver/build -S driver
+cmake --build driver/build
+ctest --test-dir driver/build --output-on-failure
+```
+
+Current baseline: **413 tests passing** (as of 2026-08-15). Every new slice
+must pass the full suite before merging.
+
+---
+
+## Sequencing principle
+
+- **Never break the 374-test baseline.** All work is incremental slices.
+- **Phase 0 before Phase 1.** A buggy foundation makes dialect work meaningless.
+- **Phase 1 before Phase 2.** Dialect abstraction unlocks concurrent dialect work.
+- **Read the instruct.md in the target directory first.** Each one lists exact
+  files to read, exact reference sources, and the precise scope of its tasks.
+- **One slice = one PR.** Keep changes small, reviewable, and revertable.

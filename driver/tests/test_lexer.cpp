@@ -4256,6 +4256,262 @@ static void testUnnamedParameterMixedWithNamedOnesStaysPositionallyCorrect() {
     std::cout << "testUnnamedParameterMixedWithNamedOnesStaysPositionallyCorrect OK\n";
 }
 
+// --- Phase 0.13 efun growth: to_float, typeof, rename, rmdir, math --------
+
+static void testToFloatIntArgConvertsToDouble() {
+    // to_float(int) → the same value as a float, confirmed against real
+    // f__to_float()'s "(double) sp->u.number" cast.
+    ObjectVarHarness harness;
+    harness.writeFile("/tf.c",
+        "float probe_int() { return to_float(42); }\n"
+        "float probe_neg() { return to_float(-3); }\n"
+        "float probe_zero() { return to_float(0); }\n");
+    auto obj = harness.objects.cloneObject("/tf");
+    assert(obj != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(obj, "probe_int", {});
+    assert(std::holds_alternative<double>(r1.data));
+    assert(std::get<double>(r1.data) == 42.0);
+
+    lpcdriver::Value r2 = harness.vm.callFunction(obj, "probe_neg", {});
+    assert(std::holds_alternative<double>(r2.data));
+    assert(std::get<double>(r2.data) == -3.0);
+
+    lpcdriver::Value r3 = harness.vm.callFunction(obj, "probe_zero", {});
+    assert(std::holds_alternative<double>(r3.data));
+    assert(std::get<double>(r3.data) == 0.0);
+
+    std::cout << "testToFloatIntArgConvertsToDouble OK\n";
+}
+
+static void testToFloatStringArgParsesLeadingFloat() {
+    // to_float(string) → sscanf "%lf" result; unparseable → 0.0.
+    ObjectVarHarness harness;
+    harness.writeFile("/tf2.c",
+        "float probe_str() { return to_float(\"3.14\"); }\n"
+        "float probe_bad() { return to_float(\"hello\"); }\n");
+    auto obj = harness.objects.cloneObject("/tf2");
+    assert(obj != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(obj, "probe_str", {});
+    assert(std::holds_alternative<double>(r1.data));
+    // Allow small floating-point epsilon
+    assert(std::get<double>(r1.data) > 3.13 && std::get<double>(r1.data) < 3.15);
+
+    lpcdriver::Value r2 = harness.vm.callFunction(obj, "probe_bad", {});
+    assert(std::holds_alternative<double>(r2.data));
+    assert(std::get<double>(r2.data) == 0.0);
+
+    std::cout << "testToFloatStringArgParsesLeadingFloat OK\n";
+}
+
+static void testToFloatFloatArgPassesThrough() {
+    // to_float(float) → same float unchanged.
+    ObjectVarHarness harness;
+    harness.writeFile("/tf3.c",
+        "float probe() { return to_float(2.5); }\n");
+    auto obj = harness.objects.cloneObject("/tf3");
+    assert(obj != nullptr);
+
+    lpcdriver::Value r = harness.vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<double>(r.data));
+    assert(std::get<double>(r.data) == 2.5);
+    std::cout << "testToFloatFloatArgPassesThrough OK\n";
+}
+
+static void testTypeofReturnsCorrectTypeStringForEachKind() {
+    // typeof(x) → confirmed type names from interpret.c type_names[].
+    ObjectVarHarness harness;
+    harness.writeFile("/tyof.c",
+        "string probe_int()    { return typeof(42); }\n"
+        "string probe_float()  { return typeof(1.5); }\n"
+        "string probe_str()    { return typeof(\"hi\"); }\n"
+        "string probe_arr()    { return typeof(({1,2})); }\n"
+        "string probe_map()    { return typeof(([\"a\":1])); }\n");
+    auto obj = harness.objects.cloneObject("/tyof");
+    assert(obj != nullptr);
+
+    auto checkStr = [&](const std::string& fn, const std::string& expected) {
+        lpcdriver::Value r = harness.vm.callFunction(obj, fn, {});
+        assert(std::holds_alternative<std::string>(r.data));
+        assert(std::get<std::string>(r.data) == expected);
+    };
+    checkStr("probe_int",   "int");
+    checkStr("probe_float", "float");
+    checkStr("probe_str",   "string");
+    checkStr("probe_arr",   "array");
+    checkStr("probe_map",   "mapping");
+    std::cout << "testTypeofReturnsCorrectTypeStringForEachKind OK\n";
+}
+
+static void testRenameFileAndVerifyViaReadFile() {
+    // rename(from, to) → 0 on success (real do_rename() return value);
+    // the renamed file can then be read at its new path.
+    ObjectVarHarness harness;
+    harness.writeFile("/src_for_rename.txt", "rename me\n");
+    harness.writeFile("/renamer.c",
+        "int do_rename() {\n"
+        "    return rename(\"/src_for_rename.txt\", \"/dst_renamed.txt\");\n"
+        "}\n"
+        "string read_dst() { return read_file(\"/dst_renamed.txt\"); }\n");
+    auto obj = harness.objects.cloneObject("/renamer");
+    assert(obj != nullptr);
+
+    lpcdriver::Value rv = harness.vm.callFunction(obj, "do_rename", {});
+    assert(std::holds_alternative<int64_t>(rv.data));
+    assert(std::get<int64_t>(rv.data) == 0); // 0 = success
+
+    lpcdriver::Value content = harness.vm.callFunction(obj, "read_dst", {});
+    assert(std::holds_alternative<std::string>(content.data));
+    assert(std::get<std::string>(content.data) == "rename me\n");
+    std::cout << "testRenameFileAndVerifyViaReadFile OK\n";
+}
+
+static void testRmdirRemovesEmptyDirectoryAndFailsOnNonEmpty() {
+    // rmdir() → 1 on success, 0 on failure (non-empty dir or missing).
+    ObjectVarHarness harness;
+    // Create an empty subdir to remove.
+    ::mkdir((harness.tempDir + "/emptydir").c_str(), 0755);
+    // Create a non-empty subdir.
+    ::mkdir((harness.tempDir + "/nonempty").c_str(), 0755);
+    harness.writeFile("/nonempty/file.txt", "x");
+
+    harness.writeFile("/rmdirer.c",
+        "int rm_empty()    { return rmdir(\"/emptydir\"); }\n"
+        "int rm_nonempty() { return rmdir(\"/nonempty\"); }\n"
+        "int rm_missing()  { return rmdir(\"/does_not_exist_dir\"); }\n");
+    auto obj = harness.objects.cloneObject("/rmdirer");
+    assert(obj != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(obj, "rm_empty", {});
+    assert(std::holds_alternative<int64_t>(r1.data));
+    assert(std::get<int64_t>(r1.data) == 1); // success
+
+    lpcdriver::Value r2 = harness.vm.callFunction(obj, "rm_nonempty", {});
+    assert(std::holds_alternative<int64_t>(r2.data));
+    assert(std::get<int64_t>(r2.data) == 0); // non-empty: fail
+
+    lpcdriver::Value r3 = harness.vm.callFunction(obj, "rm_missing", {});
+    assert(std::holds_alternative<int64_t>(r3.data));
+    assert(std::get<int64_t>(r3.data) == 0); // missing: fail
+    std::cout << "testRmdirRemovesEmptyDirectoryAndFailsOnNonEmpty OK\n";
+}
+
+static void testAbsReturnsPositiveForNegativeIntAndFloat() {
+    // abs(int|float) → same type, positive. Confirmed against contrib.c
+    // f_abs(): negates negative value in-place, keeps positive unchanged.
+    ObjectVarHarness harness;
+    harness.writeFile("/abstest.c",
+        "int probe_neg_int()    { return abs(-7); }\n"
+        "int probe_pos_int()    { return abs(5); }\n"
+        "float probe_neg_float() { return abs(-2.5); }\n"
+        "float probe_pos_float() { return abs(3.0); }\n");
+    auto obj = harness.objects.cloneObject("/abstest");
+    assert(obj != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(obj, "probe_neg_int", {});
+    assert(std::holds_alternative<int64_t>(r1.data));
+    assert(std::get<int64_t>(r1.data) == 7);
+
+    lpcdriver::Value r2 = harness.vm.callFunction(obj, "probe_pos_int", {});
+    assert(std::holds_alternative<int64_t>(r2.data));
+    assert(std::get<int64_t>(r2.data) == 5);
+
+    lpcdriver::Value r3 = harness.vm.callFunction(obj, "probe_neg_float", {});
+    assert(std::holds_alternative<double>(r3.data));
+    assert(std::get<double>(r3.data) == 2.5);
+
+    lpcdriver::Value r4 = harness.vm.callFunction(obj, "probe_pos_float", {});
+    assert(std::holds_alternative<double>(r4.data));
+    assert(std::get<double>(r4.data) == 3.0);
+    std::cout << "testAbsReturnsPositiveForNegativeIntAndFloat OK\n";
+}
+
+static void testMaxAndMinReturnCorrectElementFromIntArray() {
+    // max({arr}) → largest; min({arr}) → smallest.
+    // Second arg != 0 → index rather than value.
+    ObjectVarHarness harness;
+    harness.writeFile("/minmaxtest.c",
+        "int probe_max()       { return max(({3,1,4,1,5,9,2,6})); }\n"
+        "int probe_min()       { return min(({3,1,4,1,5,9,2,6})); }\n"
+        "int probe_max_idx()   { return max(({3,1,4,1,5,9,2,6}), 1); }\n"
+        "int probe_min_idx()   { return min(({3,1,4,1,5,9,2,6}), 1); }\n");
+    auto obj = harness.objects.cloneObject("/minmaxtest");
+    assert(obj != nullptr);
+
+    lpcdriver::Value maxVal = harness.vm.callFunction(obj, "probe_max", {});
+    assert(std::holds_alternative<int64_t>(maxVal.data));
+    assert(std::get<int64_t>(maxVal.data) == 9);
+
+    lpcdriver::Value minVal = harness.vm.callFunction(obj, "probe_min", {});
+    assert(std::holds_alternative<int64_t>(minVal.data));
+    assert(std::get<int64_t>(minVal.data) == 1);
+
+    lpcdriver::Value maxIdx = harness.vm.callFunction(obj, "probe_max_idx", {});
+    assert(std::holds_alternative<int64_t>(maxIdx.data));
+    assert(std::get<int64_t>(maxIdx.data) == 5); // index of 9
+
+    lpcdriver::Value minIdx = harness.vm.callFunction(obj, "probe_min_idx", {});
+    assert(std::holds_alternative<int64_t>(minIdx.data));
+    assert(std::get<int64_t>(minIdx.data) == 1); // first occurrence of 1
+    std::cout << "testMaxAndMinReturnCorrectElementFromIntArray OK\n";
+}
+
+static void testMathEfunsSqrtFloorCeilCosExpLog() {
+    // One test exercising the real math package shapes this mudlib uses:
+    // sqrt(4.0) == 2.0, floor(2.9) == 2.0, ceil(2.1) == 3.0,
+    // cos(0.0) == 1.0, exp(0.0) == 1.0, log(1.0) == 0.0.
+    // All confirmed against packages/math.c directly.
+    ObjectVarHarness harness;
+    harness.writeFile("/mathtest.c",
+        "float probe_sqrt()  { return sqrt(4.0); }\n"
+        "float probe_floor() { return floor(2.9); }\n"
+        "float probe_ceil()  { return ceil(2.1); }\n"
+        "float probe_cos()   { return cos(0.0); }\n"
+        "float probe_exp()   { return exp(0.0); }\n"
+        "float probe_log()   { return log(1.0); }\n"
+        "float probe_pow()   { return pow(2.0, 10.0); }\n"
+        // int arg auto-promoted: sqrt of perfect square via int arg
+        "float probe_sqrt_int() { return sqrt(9); }\n");
+    auto obj = harness.objects.cloneObject("/mathtest");
+    assert(obj != nullptr);
+
+    auto checkApprox = [&](const std::string& fn, double expected) {
+        lpcdriver::Value r = harness.vm.callFunction(obj, fn, {});
+        assert(std::holds_alternative<double>(r.data));
+        double got = std::get<double>(r.data);
+        assert(got > expected - 1e-9 && got < expected + 1e-9);
+    };
+
+    checkApprox("probe_sqrt",  2.0);
+    checkApprox("probe_floor", 2.0);
+    checkApprox("probe_ceil",  3.0);
+    checkApprox("probe_cos",   1.0);
+    checkApprox("probe_exp",   1.0);
+    checkApprox("probe_log",   0.0);
+    checkApprox("probe_pow",   1024.0);
+    checkApprox("probe_sqrt_int", 3.0);
+    std::cout << "testMathEfunsSqrtFloorCeilCosExpLog OK\n";
+}
+
+static void testSqrtNegativeArgThrows() {
+    // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
+    ObjectVarHarness harness;
+    harness.writeFile("/sqrterr.c",
+        "float probe() { return sqrt(-1.0); }\n");
+    auto obj = harness.objects.cloneObject("/sqrterr");
+    assert(obj != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(obj, "probe", {});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testSqrtNegativeArgThrows OK\n";
+}
+
 // --- simul_efun resolution tier ------------------------------------------
 // Fourth fallback for a bare call: local -> inherited -> simul_efun object
 // -> core efun table, matching real FluffOS's own compile-time resolution
@@ -10635,6 +10891,16 @@ int main() {
     testUnnamedFunctionParameterParsesAndDoesNotBreakOtherLocals();
     testMultipleUnnamedParametersInOneFunctionDoNotCollide();
     testUnnamedParameterMixedWithNamedOnesStaysPositionallyCorrect();
+    testToFloatIntArgConvertsToDouble();
+    testToFloatStringArgParsesLeadingFloat();
+    testToFloatFloatArgPassesThrough();
+    testTypeofReturnsCorrectTypeStringForEachKind();
+    testRenameFileAndVerifyViaReadFile();
+    testRmdirRemovesEmptyDirectoryAndFailsOnNonEmpty();
+    testAbsReturnsPositiveForNegativeIntAndFloat();
+    testMaxAndMinReturnCorrectElementFromIntArray();
+    testMathEfunsSqrtFloorCeilCosExpLog();
+    testSqrtNegativeArgThrows();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();
