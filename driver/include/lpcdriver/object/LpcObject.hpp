@@ -108,6 +108,21 @@ public:
     bool wasEverInteractive() const { return everInteractive_; }
     void setWasEverInteractive(bool v) { everInteractive_ = v; }
 
+    // real object_t's O_HIDDEN flag (set_hide()/query_hidden()). Real
+    // f_set_hide() (efuns_main.c) also maintains two global counters,
+    // num_hidden and num_hidden_users, used elsewhere by real FluffOS's
+    // own users()/heart_beat() bookkeeping for reporting how many
+    // connected users are currently hidden -- not replicated here, since
+    // this driver's users()/interactive() have no privileged-vs-
+    // unprivileged visibility filtering of any kind yet (a hidden flag
+    // with nothing reading it back is still a real improvement over
+    // "undefined efun", matching this session's own explicitly narrow
+    // scope: only the flag itself, not the users()-filtering feature it
+    // would eventually gate). See EfunTable.cpp's "set_hide" registration
+    // for the real valid_hide() master-apply gate this flag is set behind.
+    bool isHidden() const { return hidden_; }
+    void setHidden(bool h) { hidden_ = h; }
+
     // real object_t::privs (set_privs()/query_privs()) -- an arbitrary
     // per-object "privilege string" the mudlib sets and later checks for
     // permission gating (secure/daemon/master.c's own valid_write()-
@@ -168,6 +183,7 @@ private:
     bool commandsEnabled_ = false;
     bool destructed_ = false;
     bool everInteractive_ = false;
+    bool hidden_ = false;
     std::vector<ActionEntry> actions_;
     std::optional<std::string> privs_;
     std::string livingName_;

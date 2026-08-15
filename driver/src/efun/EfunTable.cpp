@@ -1510,6 +1510,24 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(isInt ? 1 : 0));
     });
 
+    // int floatp(mixed) -- func_spec.c: "int floatp(mixed);". Confirmed
+    // directly against fluffos-2.9-ds2.08/efuns_main.c's own f_floatp():
+    // "if (sp->type == T_REAL) { ... 1 } else { ... 0 }" -- a plain
+    // type-tag check, same shape as intp/stringp/mapp above, no
+    // conversion or coercion involved. This driver's Value variant
+    // already has a real `double` alternative (Value.hpp), so this is
+    // the identical std::holds_alternative pattern the other type
+    // predicates already use. Picked from the efun-coverage audit's
+    // Tier 1 quick-win list (docs/source-audits/efun-coverage.md):
+    // real, reachable call sites include secure/SimulEfun/percent.c's
+    // own shared simul_efun helper (called from several other files),
+    // so an undefined-efun error here was reachable from any of
+    // percent()'s own callers, not just floatp()'s own 6 direct sites.
+    t.registerEfun("floatp", [](VM&, std::vector<Value>& args) -> Value {
+        bool isFloat = !args.empty() && std::holds_alternative<double>(args[0].data);
+        return Value(static_cast<int64_t>(isFloat ? 1 : 0));
+    });
+
     // int undefinedp(mixed) / int nullp(mixed) -- real f__undefinedp():
     // true only for real FluffOS's distinct "T_UNDEFINED" zero subtype
     // (a failed lookup/uninitialized value), never for a plain literal
@@ -2074,6 +2092,37 @@ void registerCoreEfuns() {
     });
     t.registerEfun("disable_commands", [](VM& vm, std::vector<Value>&) -> Value {
         if (auto ob = vm.currentObject()) ob->setCommandsEnabled(false);
+        return Value{};
+    });
+
+    // void set_hide(int) -- func_spec.c: "void set_hide(int);". Confirmed
+    // directly against fluffos-2.9-ds2.08/efuns_main.c's own f_set_hide():
+    // "if (!valid_hide(current_object)) { sp--; return; }" gates the
+    // whole call on a master apply first -- this is a real permission
+    // check, not a bare flag setter. Uses VM::masterObject() +
+    // VM::callFunction() (not VM::applyMaster(), which throws if no
+    // master is loaded at all) so a master that simply does not define
+    // valid_hide() -- callFunction() already returns a falsy Value{} for
+    // an apply the target has no function for, matching real FluffOS's
+    // own apply_master_ob() "not defined" == failure convention -- or no
+    // master loaded at all (a boot-time-only scenario in a real driver)
+    // both correctly decline rather than throw, same as real FluffOS
+    // silently doing nothing when valid_hide() rejects the request. Real
+    // f_set_hide() also updates two global counters (num_hidden,
+    // num_hidden_users) nothing in this driver reads yet -- not
+    // replicated, see LpcObject::setHidden()'s own comment for why.
+    // Picked from the efun-coverage audit's Tier 1 quick-win list
+    // (docs/source-audits/efun-coverage.md): real call sites include
+    // std/Object.c's own hide(x) wrapper (never shadowed locally, unlike
+    // the set_light false-positive from a prior session) and two direct
+    // calls in std/user.c.
+    t.registerEfun("set_hide", [](VM& vm, std::vector<Value>& args) -> Value {
+        auto ob = vm.currentObject();
+        if (!ob) return Value{};
+        auto master = vm.masterObject();
+        bool permitted = master && isTruthy(vm.callFunction(master, "valid_hide", {Value(ob)}));
+        if (!permitted) return Value{};
+        ob->setHidden(!args.empty() && isTruthy(args[0]));
         return Value{};
     });
 

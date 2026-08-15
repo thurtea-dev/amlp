@@ -7897,6 +7897,31 @@ static void testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable() {
     std::cout << "testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable OK\n";
 }
 
+// floatp(mixed) -- func_spec.c: "int floatp(mixed);". Confirmed against
+// fluffos-2.9-ds2.08/efuns_main.c's own f_floatp(): a plain T_REAL
+// type-tag check, same shape as intp()/stringp() above. Picked from the
+// efun-coverage audit's Tier 1 quick-win list.
+static void testFloatpTrueOnlyForFloatNotIntOrString() {
+    ObjectVarHarness harness;
+    harness.writeFile("/floatp_probe.c",
+        "int probe_float() { return floatp(1.5); }\n"
+        "int probe_int() { return floatp(5); }\n"
+        "int probe_string() { return floatp(\"5.0\"); }\n");
+    auto ob = harness.objects.cloneObject("/floatp_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value isFloat = harness.vm.callFunction(ob, "probe_float", {});
+    assert(std::get<int64_t>(isFloat.data) == 1);
+
+    lpcdriver::Value isInt = harness.vm.callFunction(ob, "probe_int", {});
+    assert(std::get<int64_t>(isInt.data) == 0);
+
+    lpcdriver::Value isStr = harness.vm.callFunction(ob, "probe_string", {});
+    assert(std::get<int64_t>(isStr.data) == 0);
+
+    std::cout << "testFloatpTrueOnlyForFloatNotIntOrString OK\n";
+}
+
 // string repeat_string(string, int) -- real fluffos-2.9-ds2.08's own
 // f_repeat_string() (packages/contrib.c): concatenate the string with
 // itself "repeat" times, "" for repeat <= 0. Found live needing this:
@@ -8007,6 +8032,67 @@ static void testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject() {
     assert(std::get<int64_t>(disabled.data) == 0);
 
     std::cout << "testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject OK\n";
+}
+
+// set_hide(int) -- func_spec.c: "void set_hide(int);". Confirmed against
+// fluffos-2.9-ds2.08/efuns_main.c's own f_set_hide(): gated on
+// master()->valid_hide(current_object) returning truthy before touching
+// the flag at all. Picked from the efun-coverage audit's Tier 1
+// quick-win list.
+static void testSetHideTogglesHiddenFlagWhenMasterValidHidePermits() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_hide(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sethide_probe1.c",
+        "void go_hidden() { set_hide(1); }\n"
+        "void go_unhidden() { set_hide(0); }\n");
+    auto ob = harness.objects.cloneObject("/sethide_probe1");
+    assert(ob != nullptr);
+
+    assert(!ob->isHidden());
+    harness.vm.callFunction(ob, "go_hidden", {});
+    assert(ob->isHidden());
+
+    // Real f_set_hide() reads the argument fresh each call, not just
+    // "set once" -- calling it again with a falsy argument must clear
+    // the flag back off.
+    harness.vm.callFunction(ob, "go_unhidden", {});
+    assert(!ob->isHidden());
+
+    std::cout << "testSetHideTogglesHiddenFlagWhenMasterValidHidePermits OK\n";
+}
+
+// Real f_set_hide()'s own "if (!valid_hide(current_object)) { sp--;
+// return; }" -- a rejecting master must leave the flag untouched, not
+// just skip the driver-side bookkeeping. Also covers the no-master-
+// loaded case (VM::masterObject() returning null), which must decline
+// the same way, not throw -- confirmed by using the same
+// ObjectVarHarness default (master_file: /unused, loadMasterObject()
+// never called) every other harness-only test in this file already
+// relies on.
+static void testSetHideDeclinesWhenValidHideRejectsOrNoMasterLoaded() {
+    ObjectVarHarness rejecting;
+    rejecting.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_hide(object ob) { return 0; }\n");
+    assert(rejecting.objects.loadMasterObject());
+    rejecting.writeFile("/sethide_probe2.c", "void go_hidden() { set_hide(1); }\n");
+    auto rejectedOb = rejecting.objects.cloneObject("/sethide_probe2");
+    assert(rejectedOb != nullptr);
+    rejecting.vm.callFunction(rejectedOb, "go_hidden", {});
+    assert(!rejectedOb->isHidden());
+
+    ObjectVarHarness noMaster;
+    noMaster.writeFile("/sethide_probe3.c", "void go_hidden() { set_hide(1); }\n");
+    auto noMasterOb = noMaster.objects.cloneObject("/sethide_probe3");
+    assert(noMasterOb != nullptr);
+    noMaster.vm.callFunction(noMasterOb, "go_hidden", {}); // must not throw
+    assert(!noMasterOb->isHidden());
+
+    std::cout << "testSetHideDeclinesWhenValidHideRejectsOrNoMasterLoaded OK\n";
 }
 
 static void testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs() {
@@ -10472,9 +10558,12 @@ int main() {
     testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension();
     testGetDirMatchesGlobPatternInFinalPathComponentOnly();
     testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable();
+    testFloatpTrueOnlyForFloatNotIntOrString();
     testRepeatStringConcatenatesNTimesAndEmptyForZeroOrNegative();
     testPresentFindsInventoryItemByIdApplyNotByOtherFunctions();
     testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject();
+    testSetHideTogglesHiddenFlagWhenMasterValidHidePermits();
+    testSetHideDeclinesWhenValidHideRejectsOrNoMasterLoaded();
     testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs();
     testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord();
     testDispatchCommandPassesUndefinedNotEmptyStringForBareVerbWithNoArgument();
