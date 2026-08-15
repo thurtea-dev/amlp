@@ -1838,10 +1838,17 @@ void registerCoreEfuns() {
     // "ceiling" state here to actually raise or lower yet -- this efun
     // is accepted (so callers do not throw "undefined efun") and
     // otherwise a no-op, not wired to change that ceiling.
-    t.registerEfun("set_eval_limit", [](VM&, std::vector<Value>& args) -> Value {
+    t.registerEfun("set_eval_limit", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
             throw LpcRuntimeError("set_eval_limit: expected an int argument");
         }
+        // Real FluffOS's set_eval_limit(x): x > 0 raises the ceiling for
+        // the remainder of the current dispatch; x == -1 restores the
+        // default (Config::maxEvalCost()). Guarded by the simul_efun
+        // wrapper in real mudlibs so only master() can call it. This
+        // driver applies the limit change immediately and trusts the
+        // mudlib's own guard.
+        vm.setMaxEvalCost(std::get<int64_t>(args[0].data));
         return Value{};
     });
 

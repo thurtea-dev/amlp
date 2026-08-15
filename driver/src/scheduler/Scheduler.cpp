@@ -199,6 +199,7 @@ void Scheduler::tickHeartbeats() {
 
     for (auto& obj : due) {
         try {
+            vm_.resetEvalCost();
             vm_.callFunction(obj, "heart_beat", {});
         } catch (const std::exception& e) {
             std::cerr << "[heart_beat] " << obj->filename() << ": " << e.what() << "\n";
@@ -231,6 +232,7 @@ void Scheduler::tickCallOuts() {
             // fails the call, not a silent skip -- but that failure is
             // still just one call_out's own error, isolated the same way.
             try {
+                vm_.resetEvalCost();
                 vm_.callClosure(entry.closure, entry.args);
             } catch (const std::exception& e) {
                 std::cerr << "[call_out] (closure): " << e.what() << "\n";
@@ -240,6 +242,7 @@ void Scheduler::tickCallOuts() {
         auto obj = entry.target.lock();
         if (!obj) continue; // real: "if (!ob || (ob->flags & O_DESTRUCTED)) { free_call(cop); }" -- silently dropped, not an error.
         try {
+            vm_.resetEvalCost();
             vm_.callFunction(obj, entry.function, entry.args);
         } catch (const std::exception& e) {
             std::cerr << "[call_out] " << obj->filename() << "::" << entry.function << "(): " << e.what() << "\n";

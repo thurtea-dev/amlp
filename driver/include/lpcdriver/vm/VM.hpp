@@ -210,7 +210,34 @@ private:
     Config& config_;
     Scheduler* scheduler_ = nullptr;
     std::vector<Value> stack_;
-    int evalCost_ = 0;
+    // Accumulated instruction count for the current top-level LPC dispatch
+    // (one player command, one call_out fire, one heartbeat call). Real
+    // FluffOS accumulates across all nested apply/call_other/callClosure
+    // calls within a single command rather than resetting per run() call
+    // (interpret.c's own eval_cost global, incremented per instruction,
+    // reset once by process_user_command() / call_heart_beat() /
+    // call_out.c's call_call_out(), not per-invocation). resetEvalCost()
+    // is called by Server::dispatchLine() at the top of each dispatch and
+    // by Scheduler::tickCallOuts()/tickHeartbeats() before each fired
+    // callback, matching those exact real reset points.
+    int64_t evalCost_ = 0;
+    // Per-dispatch ceiling set by set_eval_limit(x). Initialized to
+    // Config::maxEvalCost() at construction; set_eval_limit(-1) restores
+    // that default. Real FluffOS's set_eval_limit(x) raises or (with -1)
+    // resets the single global MAX_EVAL_COST, guarded by master-check in
+    // the simul_efun wrapper.
+    int64_t maxEvalCost_ = 1000000;
+
+public:
+    // Reset the accumulated eval cost to zero. Called at the start of
+    // every top-level dispatch (player command, call_out, heartbeat).
+    void resetEvalCost() { evalCost_ = 0; }
+
+    // Update the eval-cost ceiling for the remainder of the current
+    // dispatch. set_eval_limit(-1) passes -1 to restore the default.
+    void setMaxEvalCost(int64_t limit);
+
+private:
     // One entry per still-active run() call, innermost last -- see
     // currentObject() and run()'s StackGuard.
     std::vector<std::shared_ptr<LpcObject>> callStack_;
