@@ -7725,6 +7725,220 @@ static void testDeepInventoryRecursesThroughNestedChildren() {
     std::cout << "testDeepInventoryRecursesThroughNestedChildren OK\n";
 }
 
+// first_inventory(object|string)/next_inventory(object) -- func_spec.c.
+// Confirmed against fluffos-2.9-ds2.08's own simulate.c/efuns_main.c:
+// first_inventory(container) is the container's first child;
+// next_inventory(ob) is ob's own next *sibling* (not ob's own first
+// child). This driver's own LpcObject::inventory_ vector is populated by
+// VM::moveObject()'s push_back() (oldest arrival first) rather than real
+// FluffOS's own move_object() prepend (newest arrival first) -- a
+// pre-existing divergence, confirmed here rather than assumed
+// equivalent: item_a below (moved in first) is the one first_inventory()
+// returns, and next_inventory() walks a -> b -> c, oldest to newest.
+static void testFirstInventoryAndNextInventoryWalkChildrenInMoveOrder() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fi_room.c", "void init() {}\n");
+    harness.writeFile("/fi_item.c",
+        "void go(object dest) { move_object(dest); }\n"
+        "object probe_first(object ob) { return first_inventory(ob); }\n"
+        "object probe_first_default() { return first_inventory(); }\n"
+        "object probe_next(object ob) { return next_inventory(ob); }\n");
+
+    auto room = harness.objects.cloneObject("/fi_room");
+    auto itemA = harness.objects.cloneObject("/fi_item");
+    auto itemB = harness.objects.cloneObject("/fi_item");
+    auto itemC = harness.objects.cloneObject("/fi_item");
+    assert(room != nullptr && itemA != nullptr && itemB != nullptr && itemC != nullptr);
+
+    harness.vm.callFunction(itemA, "go", {lpcdriver::Value(room)});
+    harness.vm.callFunction(itemB, "go", {lpcdriver::Value(room)});
+    harness.vm.callFunction(itemC, "go", {lpcdriver::Value(room)});
+
+    // first_inventory(room) -- oldest occupant (itemA), not real
+    // FluffOS's own newest-occupant answer, per this driver's own
+    // append-order divergence noted above.
+    lpcdriver::Value first =
+        harness.vm.callFunction(itemA, "probe_first", {lpcdriver::Value(room)});
+    auto* firstOb = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&first.data);
+    assert(firstOb != nullptr && *firstOb == itemA);
+
+    // next_inventory() walks siblings, oldest to newest: a -> b -> c -> 0.
+    lpcdriver::Value nextOfA =
+        harness.vm.callFunction(itemA, "probe_next", {lpcdriver::Value(itemA)});
+    auto* nextOfAOb = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&nextOfA.data);
+    assert(nextOfAOb != nullptr && *nextOfAOb == itemB);
+
+    lpcdriver::Value nextOfB =
+        harness.vm.callFunction(itemA, "probe_next", {lpcdriver::Value(itemB)});
+    auto* nextOfBOb = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&nextOfB.data);
+    assert(nextOfBOb != nullptr && *nextOfBOb == itemC);
+
+    // itemC is the last sibling -- 0, not itemA (no wraparound).
+    lpcdriver::Value nextOfC =
+        harness.vm.callFunction(itemA, "probe_next", {lpcdriver::Value(itemC)});
+    assert(std::holds_alternative<std::monostate>(nextOfC.data));
+
+    // An item with no children of its own -- first_inventory() on it
+    // returns 0, not an error.
+    lpcdriver::Value emptyFirst =
+        harness.vm.callFunction(itemA, "probe_first", {lpcdriver::Value(itemB)});
+    assert(std::holds_alternative<std::monostate>(emptyFirst.data));
+
+    // Default-argument form (this_object() when no argument given) --
+    // called as itemA's own method, so this_object() is itemA, whose own
+    // inventory is empty.
+    lpcdriver::Value defaultResult = harness.vm.callFunction(itemA, "probe_first_default", {});
+    assert(std::holds_alternative<std::monostate>(defaultResult.data));
+
+    std::cout << "testFirstInventoryAndNextInventoryWalkChildrenInMoveOrder OK\n";
+}
+
+// first_inventory()'s own object|string signature (func_spec.c) --
+// confirmed against simulate.c's own first_inventory(): a string
+// argument is resolved with find_object(), same as call_other()'s own
+// string form; anything that resolves to no object throws (real
+// bad_argument()), as does a first argument that is neither an object
+// nor a string.
+static void testFirstInventoryStringArgumentResolvesOrThrows() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fis_room.c", "void init() {}\n");
+    harness.writeFile("/fis_item.c", "void go(object dest) { move_object(dest); }\n");
+    harness.writeFile("/fis_probe.c",
+        "object probe_path(string path) { return first_inventory(path); }\n"
+        "object probe_bad_arg() { return first_inventory(42); }\n");
+
+    // find_object() (what first_inventory()'s own string form resolves
+    // through) returns the cached, load-by-path object -- not a fresh,
+    // unrelated instance the way cloneObject() would -- so room must be
+    // obtained the same way, or "/fis_room" would resolve to a different
+    // object than the one item is actually moved into.
+    auto room = harness.objects.loadObject("/fis_room");
+    auto item = harness.objects.cloneObject("/fis_item");
+    auto probe = harness.objects.cloneObject("/fis_probe");
+    assert(room != nullptr && item != nullptr && probe != nullptr);
+    harness.vm.callFunction(item, "go", {lpcdriver::Value(room)});
+
+    lpcdriver::Value result = harness.vm.callFunction(
+        probe, "probe_path", {lpcdriver::Value(std::string("/fis_room"))});
+    auto* resultOb = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&result.data);
+    assert(resultOb != nullptr && *resultOb == item);
+
+    bool threwOnUnresolved = false;
+    try {
+        harness.vm.callFunction(
+            probe, "probe_path", {lpcdriver::Value(std::string("/does/not/exist"))});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threwOnUnresolved = true;
+    }
+    assert(threwOnUnresolved);
+
+    bool threwOnBadArgType = false;
+    try {
+        harness.vm.callFunction(probe, "probe_bad_arg", {});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threwOnBadArgType = true;
+    }
+    assert(threwOnBadArgType);
+
+    std::cout << "testFirstInventoryStringArgumentResolvesOrThrows OK\n";
+}
+
+// first_inventory()/next_inventory()'s real hidden-skip loop
+// (efuns_main.c/simulate.c, only compiled when F_SET_HIDE is defined --
+// it is, confirmed live): a hidden sibling is skipped unless the
+// observer (current_object) is itself hidden, or master()->valid_hide()
+// grants the observer permission -- the same master apply set_hide()
+// itself is gated behind (see its own tests above).
+static void testFirstInventoryAndNextInventorySkipHiddenSiblingsUnlessPermitted() {
+    // valid_hide() here checks query_privs(ob) == "wiz" rather than
+    // unconditionally permitting or denying everyone -- a uniformly
+    // denying master would also block set_hide() itself (it is gated
+    // behind the identical valid_hide() apply, checked against whichever
+    // object is trying to hide), so hidden below would never actually
+    // become hidden and this test would not be exercising the skip logic
+    // at all. Real valid_hide() implementations gate on privilege the
+    // same way (e.g. wizard-only); set_privs()/query_privs() already
+    // exist here and give the two objects below genuinely different
+    // permission without needing anything new.
+    ObjectVarHarness denying;
+    denying.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_hide(object ob) { return query_privs(ob) == \"wiz\"; }\n");
+    assert(denying.objects.loadMasterObject());
+    denying.writeFile("/hd_room.c", "void init() {}\n");
+    denying.writeFile("/hd_item.c",
+        "void go(object dest) { move_object(dest); }\n"
+        "void grant_wiz() { set_privs(this_object(), \"wiz\"); }\n"
+        "void hide() { set_hide(1); }\n"
+        "object probe_first(object ob) { return first_inventory(ob); }\n"
+        "object probe_next(object ob) { return next_inventory(ob); }\n");
+
+    // Three siblings, oldest to newest: before, hidden, after -- so
+    // next_inventory(before) genuinely has to skip over a *middle*
+    // hidden sibling to reach after, not just fall off the end.
+    auto room = denying.objects.cloneObject("/hd_room");
+    auto before = denying.objects.cloneObject("/hd_item");
+    auto hidden = denying.objects.cloneObject("/hd_item");
+    auto after = denying.objects.cloneObject("/hd_item");
+    assert(room != nullptr && before != nullptr && hidden != nullptr && after != nullptr);
+    denying.vm.callFunction(before, "go", {lpcdriver::Value(room)});
+    denying.vm.callFunction(hidden, "go", {lpcdriver::Value(room)});
+    denying.vm.callFunction(after, "go", {lpcdriver::Value(room)});
+    // hidden has "wiz" privs -- valid_hide(hidden) permits it to hide
+    // itself; before/after never get "wiz" privs, so valid_hide() checked
+    // with either of them as the *observer* stays denied.
+    denying.vm.callFunction(hidden, "grant_wiz", {});
+    denying.vm.callFunction(hidden, "hide", {});
+    assert(hidden->isHidden());
+
+    // Observer is "before" (never hidden itself, no "wiz" privs) --
+    // first_inventory(room) must skip the hidden occupant entirely and
+    // land on "before" itself, the oldest non-hidden occupant.
+    lpcdriver::Value firstSeen =
+        denying.vm.callFunction(before, "probe_first", {lpcdriver::Value(room)});
+    auto* firstSeenOb = std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&firstSeen.data);
+    assert(firstSeenOb != nullptr && *firstSeenOb == before);
+
+    // next_inventory(before) from the same unprivileged observer must
+    // skip straight over the hidden middle sibling and land on "after" --
+    // confirms the same skip loop applies to next_inventory(), not just
+    // first_inventory(), and that it skips a middle entry, not merely
+    // the first one checked.
+    lpcdriver::Value nextAfterBefore =
+        denying.vm.callFunction(before, "probe_next", {lpcdriver::Value(before)});
+    auto* nextAfterBeforeOb =
+        std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&nextAfterBefore.data);
+    assert(nextAfterBeforeOb != nullptr && *nextAfterBeforeOb == after);
+
+    // Permitting master: the same hidden occupant is now returned.
+    ObjectVarHarness permitting;
+    permitting.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_hide(object ob) { return 1; }\n");
+    assert(permitting.objects.loadMasterObject());
+    permitting.writeFile("/hd2_room.c", "void init() {}\n");
+    permitting.writeFile("/hd2_item.c",
+        "void go(object dest) { move_object(dest); }\n"
+        "void hide() { set_hide(1); }\n"
+        "object probe_first(object ob) { return first_inventory(ob); }\n");
+
+    auto room2 = permitting.objects.cloneObject("/hd2_room");
+    auto hidden2 = permitting.objects.cloneObject("/hd2_item");
+    auto visible2 = permitting.objects.cloneObject("/hd2_item");
+    assert(room2 != nullptr && hidden2 != nullptr && visible2 != nullptr);
+    permitting.vm.callFunction(hidden2, "go", {lpcdriver::Value(room2)});
+    permitting.vm.callFunction(visible2, "go", {lpcdriver::Value(room2)});
+    permitting.vm.callFunction(hidden2, "hide", {});
+
+    lpcdriver::Value firstPermitted =
+        permitting.vm.callFunction(visible2, "probe_first", {lpcdriver::Value(room2)});
+    auto* firstPermittedOb =
+        std::get_if<std::shared_ptr<lpcdriver::LpcObject>>(&firstPermitted.data);
+    assert(firstPermittedOb != nullptr && *firstPermittedOb == hidden2);
+
+    std::cout << "testFirstInventoryAndNextInventorySkipHiddenSiblingsUnlessPermitted OK\n";
+}
+
 // strcmp(string, string) -- func_spec.c: "int strcmp(string, string);",
 // backed by real efuns_main.c's own f_strcmp(): a plain C strcmp() call.
 // Found live needing this: /secure/daemon/player.c's own sort_list(),
@@ -10553,6 +10767,9 @@ int main() {
     testEnableCommandsGatesWhetherMoveObjectRegistersDestinationActions();
     testAllInventoryReturnsDirectChildrenOnlyNotGrandchildren();
     testDeepInventoryRecursesThroughNestedChildren();
+    testFirstInventoryAndNextInventoryWalkChildrenInMoveOrder();
+    testFirstInventoryStringArgumentResolvesOrThrows();
+    testFirstInventoryAndNextInventorySkipHiddenSiblingsUnlessPermitted();
     testStrcmpMatchesRealCComparisonSemantics();
     testMapDeleteRemovesKeyInPlaceAndLeavesOthersIntact();
     testCloneObjectAcceptsPathWithTrailingDotCWithoutDoublingExtension();

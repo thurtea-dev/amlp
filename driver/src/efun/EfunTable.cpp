@@ -295,6 +295,28 @@ std::string normalizeSavePath(const std::string& path) {
     return result + ".o";
 }
 
+// Real object.c's own object_visible() (only compiled when F_SET_HIDE
+// is defined -- confirmed live in the vendored fluffos-2.9-ds2.08: "if
+// (ob->flags & O_HIDDEN) { if (current_object->flags & O_HIDDEN) return
+// 1; return valid_hide(current_object); } else return 1;"). An object
+// that is not hidden is always visible; a hidden object is visible to
+// another hidden object unconditionally (hidden things can see each
+// other), and otherwise only if master()->valid_hide() grants the
+// *observer* (current_object -- not the hidden object itself)
+// permission -- the same master apply set_hide() is already gated
+// behind (see its own registration above). Used by first_inventory()/
+// next_inventory() below, both of which walk this exact skip when
+// F_SET_HIDE is defined (efuns_main.c/simulate.c, confirmed directly)
+// -- a real coupling this driver's own prior set_hide() slice makes
+// observable here for the first time, not a separate feature.
+bool isVisibleToObserver(VM& vm, const std::shared_ptr<LpcObject>& ob) {
+    if (!ob || !ob->isHidden()) return true;
+    auto observer = vm.currentObject();
+    if (observer && observer->isHidden()) return true;
+    auto master = vm.masterObject();
+    return master && isTruthy(vm.callFunction(master, "valid_hide", {Value(observer)}));
+}
+
 } // namespace
 
 void registerCoreEfuns() {
@@ -1991,6 +2013,85 @@ void registerCoreEfuns() {
             };
         collect(target);
         return Value(result);
+    });
+
+    // object first_inventory(object | string default: this_object()) --
+    // func_spec.c: "object first_inventory(object | string default:
+    // F__THIS_OBJECT);". Confirmed against fluffos-2.9-ds2.08's own
+    // simulate.c first_inventory(): a string argument is resolved via
+    // find_object() and, if the resolved container is itself hidden and
+    // not visible to the caller, treated as not found (real
+    // "bad_argument" -- this driver throws instead, matching the
+    // existing convention other object-or-string efuns already use, see
+    // call_other()'s own citation above); an object argument is used
+    // directly with no such check (a real, confirmed asymmetry in the
+    // reference source, not an oversight here). The result is the
+    // container's first child, skipping forward past any hidden entries
+    // the caller cannot see (isVisibleToObserver() above, only real
+    // because F_SET_HIDE is defined) -- 0 if the container has none.
+    // Real container->contains is a real doubly-linked list with newest-
+    // arrival prepended to the front (simulate.c's own move_object():
+    // "item->next_inv = dest->contains; dest->contains = item;"); this
+    // driver's own LpcObject::inventory_ is a plain vector that
+    // VM::moveObject() appends to instead (oldest-arrival first) -- a
+    // pre-existing divergence in moveObject() itself, not introduced
+    // here, but one this efun is the first to make LPC-observable:
+    // first_inventory() on this driver returns the *oldest* occupant,
+    // not the most recently arrived one real FluffOS would return.
+    t.registerEfun("first_inventory", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> container;
+        if (args.empty()) {
+            container = vm.currentObject();
+        } else if (std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            container = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else if (std::holds_alternative<std::string>(args[0].data)) {
+            container = vm.findObject(std::get<std::string>(args[0].data));
+            if (container && !isVisibleToObserver(vm, container)) container = nullptr;
+        } else {
+            throw LpcRuntimeError("first_inventory: expected an object or string first argument");
+        }
+        if (!container) throw LpcRuntimeError("first_inventory: bad argument 1");
+        for (auto& child : container->inventory()) {
+            if (isVisibleToObserver(vm, child)) return Value(child);
+        }
+        return Value{};
+    });
+
+    // object next_inventory(object default: this_object()) --
+    // func_spec.c: "object next_inventory(object default:
+    // F__THIS_OBJECT);". Confirmed against efuns_main.c's own
+    // f_next_inventory(): "ob = sp->u.ob->next_inv;" -- the *next
+    // sibling* in ob's own environment's inventory list, not "ob's own
+    // first child" (that's first_inventory() above; the two efuns walk
+    // different edges of the same tree, real FluffOS's own contains/
+    // next_inv pair). Same hidden-skip loop as first_inventory() above.
+    // No string-argument form in the real signature, unlike
+    // first_inventory() -- confirmed directly against func_spec.c, not
+    // assumed symmetric. Implemented as an O(n) scan of ob's
+    // environment's inventory vector for ob's own position plus one,
+    // rather than a stored sibling pointer -- this driver already made
+    // the same simplification for environment()/inventory() generally
+    // (see LpcObject.hpp's own comment on why a plain vector was chosen
+    // over an intrusive linked list), and nothing confirmed live needs
+    // better than O(n) here. Same real ordering divergence as
+    // first_inventory() above: this driver's vector walks oldest-to-
+    // newest arrival order, the reverse of real FluffOS's next_inv
+    // chain.
+    t.registerEfun("next_inventory", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob = !args.empty() &&
+                std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)
+            ? std::get<std::shared_ptr<LpcObject>>(args[0].data)
+            : vm.currentObject();
+        if (!ob) return Value{};
+        auto env = ob->environment().lock();
+        if (!env) return Value{};
+        auto& siblings = env->inventory();
+        auto it = std::find(siblings.begin(), siblings.end(), ob);
+        if (it == siblings.end()) return Value{};
+        for (++it; it != siblings.end(); ++it) {
+            if (isVisibleToObserver(vm, *it)) return Value(*it);
+        }
+        return Value{};
     });
 
     // object present(object | string, void | object) -- func_spec.c:
