@@ -11,6 +11,7 @@
 #include <chrono>
 #include <arpa/inet.h>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <dirent.h>
@@ -3304,6 +3305,283 @@ void registerCoreEfuns() {
     // query_parry_bonus(), same scale as parry.
     t.registerEfun("query_dodge_bonus", [](VM& vm, std::vector<Value>& args) -> Value {
         return EfunTable::instance().call("query_parry_bonus", vm, args);
+    });
+
+    // -------------------------------------------------------------------------
+    // Phase 0.13 efun growth batch — to_float, typeof, rename, rmdir, math
+    // -------------------------------------------------------------------------
+
+    // float to_float(string | float | int) -- real efuns_main.c's own
+    // f__to_float() (func_spec.c alias: "float to_float _to_float(...)").
+    // int → (double) cast; float passes through; string parsed via sscanf
+    // "%lf", returning 0.0 for an unparseable string (real f__to_float()
+    // does exactly that, no strtod, no error). Confirmed 13 real call sites
+    // in the mudlib (grep across lib/), all of the form `to_float(some_int)`
+    // to feed a float computation. No buffer case (this driver has no buffer
+    // type -- see Value.hpp) -- real FluffOS's T_BUFFER arm is a no-op here.
+    t.registerEfun("to_float", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) return Value(0.0);
+        const Value& v = args[0];
+        if (std::holds_alternative<double>(v.data))
+            return Value(std::get<double>(v.data));
+        if (std::holds_alternative<int64_t>(v.data))
+            return Value(static_cast<double>(std::get<int64_t>(v.data)));
+        if (std::holds_alternative<std::string>(v.data)) {
+            double result = 0.0;
+            std::sscanf(std::get<std::string>(v.data).c_str(), "%lf", &result);
+            return Value(result);
+        }
+        throw LpcRuntimeError("Bad argument 1 to to_float()");
+    });
+
+    // string typeof(mixed) -- real efuns_main.c's f_typeof(): calls
+    // type_name(sp->type) whose result string for each T_* type is:
+    //   T_NUMBER   → "int"    T_STRING   → "string"  T_ARRAY    → "array"
+    //   T_OBJECT   → "object" T_MAPPING  → "mapping" T_FUNCTION → "function"
+    //   T_REAL     → "float"
+    // monostate (undefined/void) maps to "int" because real FluffOS treats
+    // undefined as the integer 0 at the type-name level (T_NUMBER, subtype
+    // T_UNDEFINED -- type_names[0] is "int" for T_NUMBER).
+    t.registerEfun("typeof", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) return Value(std::string("int"));
+        const Value& v = args[0];
+        if (std::holds_alternative<int64_t>(v.data))       return Value(std::string("int"));
+        if (std::holds_alternative<double>(v.data))         return Value(std::string("float"));
+        if (std::holds_alternative<std::string>(v.data))    return Value(std::string("string"));
+        if (std::holds_alternative<std::shared_ptr<LpcObject>>(v.data))
+            return Value(std::string("object"));
+        if (std::holds_alternative<std::shared_ptr<Array>>(v.data))
+            return Value(std::string("array"));
+        if (std::holds_alternative<std::shared_ptr<Mapping>>(v.data))
+            return Value(std::string("mapping"));
+        if (std::holds_alternative<std::shared_ptr<Closure>>(v.data))
+            return Value(std::string("function"));
+        // monostate (void/undefined)
+        return Value(std::string("int"));
+    });
+
+    // int rename(string from, string to) -- real efuns_main.c's f_rename():
+    // delegates to do_rename(from, to, F_RENAME) which calls the C library
+    // rename(2). Returns 0 on success, 1 on failure in the real driver
+    // (do_rename() returns 0 for "ok, renamed" -- opposite of most file
+    // efuns, but confirmed by reading do_rename() directly). Confirmed 10
+    // real call sites in the mudlib. Both paths are resolved against mudlib
+    // root, matching real check_valid_path() wrapping both args.
+    t.registerEfun("rename", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("rename: expected two string arguments");
+        }
+        std::string from = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        std::string to   = vm.resolveMudlibPath(std::get<std::string>(args[1].data));
+        // Real do_rename() returns 0 on success, 1 on failure.
+        return Value(static_cast<int64_t>(::rename(from.c_str(), to.c_str()) == 0 ? 0 : 1));
+    });
+
+    // int rmdir(string dir) -- real efuns_main.c's f_rmdir(): checks the
+    // path, calls rmdir(2), pushes 1 on success or 0 on failure. Confirmed
+    // 4 real call sites in the mudlib (domains/Praxis/ and others).
+    t.registerEfun("rmdir", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("rmdir: expected a string path argument");
+        }
+        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        return Value(static_cast<int64_t>(::rmdir(path.c_str()) == 0 ? 1 : 0));
+    });
+
+    // -------------------------------------------------------------------------
+    // Math package (packages/math_spec.c / packages/math.c) — all confirmed
+    // against the FluffOS reference source directly. Each takes a float;
+    // the real implementations operate on sp->u.real in-place and do not
+    // do any int-promotion. This driver promotes an int arg to float at the
+    // call site (a plain cast), matching real LPC's implicit numeric coercion
+    // rather than throwing on an int argument -- call sites in the mudlib
+    // freely pass integers to sqrt() and friends.
+    // -------------------------------------------------------------------------
+    auto asFloat = [](const Value& v) -> double {
+        if (std::holds_alternative<double>(v.data))   return std::get<double>(v.data);
+        if (std::holds_alternative<int64_t>(v.data))  return static_cast<double>(std::get<int64_t>(v.data));
+        throw LpcRuntimeError("math efun: argument must be numeric");
+    };
+
+    // float cos(float) / sin(float) / tan(float) -- packages/math.c f_cos(),
+    // f_sin(), f_tan(). Real f_tan() has a comment noting it could blow up
+    // at x = Pi/2 + N*Pi but does not guard it -- we match that.
+    t.registerEfun("cos", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("cos: expected a numeric argument");
+        return Value(std::cos(asFloat(args[0])));
+    });
+    t.registerEfun("sin", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("sin: expected a numeric argument");
+        return Value(std::sin(asFloat(args[0])));
+    });
+    t.registerEfun("tan", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("tan: expected a numeric argument");
+        return Value(std::tan(asFloat(args[0])));
+    });
+
+    // float asin(float) / acos(float) / atan(float) -- packages/math.c.
+    // f_asin() and f_acos() throw if |x| > 1.0; f_atan() has no range check.
+    t.registerEfun("asin", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("asin: expected a numeric argument");
+        double x = asFloat(args[0]);
+        if (x < -1.0) throw LpcRuntimeError("math: asin(x) with (x < -1.0)");
+        if (x >  1.0) throw LpcRuntimeError("math: asin(x) with (x > 1.0)");
+        return Value(std::asin(x));
+    });
+    t.registerEfun("acos", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("acos: expected a numeric argument");
+        double x = asFloat(args[0]);
+        if (x < -1.0) throw LpcRuntimeError("math: acos(x) with (x < -1.0)");
+        if (x >  1.0) throw LpcRuntimeError("math: acos(x) with (x > 1.0)");
+        return Value(std::acos(x));
+    });
+    t.registerEfun("atan", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("atan: expected a numeric argument");
+        return Value(std::atan(asFloat(args[0])));
+    });
+
+    // float sqrt(float) -- packages/math.c f_sqrt(): throws if x < 0.0.
+    t.registerEfun("sqrt", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("sqrt: expected a numeric argument");
+        double x = asFloat(args[0]);
+        if (x < 0.0) throw LpcRuntimeError("math: sqrt(x) with (x < 0.0)");
+        return Value(std::sqrt(x));
+    });
+
+    // float log(float) -- packages/math.c f_log(): natural logarithm,
+    // throws if x <= 0.0.
+    t.registerEfun("log", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("log: expected a numeric argument");
+        double x = asFloat(args[0]);
+        if (x <= 0.0) throw LpcRuntimeError("math: log(x) with (x <= 0.0)");
+        return Value(std::log(x));
+    });
+
+    // float log10(float) -- packages/math_spec.c declares it; f_log10() is
+    // the base-10 variant. Same guard as log() for domain.
+    t.registerEfun("log10", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("log10: expected a numeric argument");
+        double x = asFloat(args[0]);
+        if (x <= 0.0) throw LpcRuntimeError("math: log10(x) with (x <= 0.0)");
+        return Value(std::log10(x));
+    });
+
+    // float pow(float, float) -- packages/math_spec.c.
+    t.registerEfun("pow", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2) throw LpcRuntimeError("pow: expected two numeric arguments");
+        return Value(std::pow(asFloat(args[0]), asFloat(args[1])));
+    });
+
+    // float exp(float) -- packages/math.c f_exp(): e^x.
+    t.registerEfun("exp", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("exp: expected a numeric argument");
+        return Value(std::exp(asFloat(args[0])));
+    });
+
+    // float floor(float) / float ceil(float) -- packages/math.c f_floor(),
+    // f_ceil(). Each operates on sp->u.real in place (T_REAL input only in
+    // real FluffOS); this driver promotes int to float the same way as the
+    // other math efuns.
+    t.registerEfun("floor", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("floor: expected a numeric argument");
+        return Value(std::floor(asFloat(args[0])));
+    });
+    t.registerEfun("ceil", [asFloat](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("ceil: expected a numeric argument");
+        return Value(std::ceil(asFloat(args[0])));
+    });
+
+    // mixed abs(int | float) -- packages/contrib.c f_abs(): negates negative
+    // numbers in-place; preserves the exact input type (int in → int out,
+    // float in → float out), not a float-returning function.
+    t.registerEfun("abs", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("abs: expected a numeric argument");
+        const Value& v = args[0];
+        if (std::holds_alternative<int64_t>(v.data)) {
+            int64_t n = std::get<int64_t>(v.data);
+            return Value(n < 0 ? -n : n);
+        }
+        if (std::holds_alternative<double>(v.data)) {
+            double d = std::get<double>(v.data);
+            return Value(d < 0.0 ? -d : d);
+        }
+        throw LpcRuntimeError("abs: argument must be int or float");
+    });
+
+    // mixed max(mixed *, void|int flag) -- packages/contrib.c f_max():
+    // takes an array of ints/floats/strings, returns the largest element.
+    // With flag != 0 (second argument), returns the *index* of the max
+    // element instead of the value itself, matching real f_max()'s own
+    // "if (st_num_arg == 2 && sp->u.number != 0) push_number(max_index)"
+    // branch. Confirmed against contrib.c directly.
+    t.registerEfun("max", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data))
+            throw LpcRuntimeError("max: expected an array as first argument");
+        const auto& arr = std::get<std::shared_ptr<Array>>(args[0].data)->items;
+        if (arr.empty()) throw LpcRuntimeError("max: can't find max of an empty array");
+
+        bool returnIndex = args.size() >= 2 &&
+            std::holds_alternative<int64_t>(args[1].data) &&
+            std::get<int64_t>(args[1].data) != 0;
+
+        size_t maxIdx = 0;
+        for (size_t i = 1; i < arr.size(); ++i) {
+            const Value& cur = arr[i];
+            const Value& best = arr[maxIdx];
+            bool curGreater = false;
+            if (std::holds_alternative<int64_t>(cur.data) && std::holds_alternative<int64_t>(best.data))
+                curGreater = std::get<int64_t>(cur.data) > std::get<int64_t>(best.data);
+            else if (std::holds_alternative<double>(cur.data) && std::holds_alternative<double>(best.data))
+                curGreater = std::get<double>(cur.data) > std::get<double>(best.data);
+            else if (std::holds_alternative<int64_t>(cur.data) && std::holds_alternative<double>(best.data))
+                curGreater = static_cast<double>(std::get<int64_t>(cur.data)) > std::get<double>(best.data);
+            else if (std::holds_alternative<double>(cur.data) && std::holds_alternative<int64_t>(best.data))
+                curGreater = std::get<double>(cur.data) > static_cast<double>(std::get<int64_t>(best.data));
+            else if (std::holds_alternative<std::string>(cur.data) && std::holds_alternative<std::string>(best.data))
+                curGreater = std::get<std::string>(cur.data) > std::get<std::string>(best.data);
+            else
+                throw LpcRuntimeError("max: array must consist of ints, floats, or strings of the same type");
+            if (curGreater) maxIdx = i;
+        }
+        if (returnIndex) return Value(static_cast<int64_t>(maxIdx));
+        return arr[maxIdx];
+    });
+
+    // mixed min(mixed *, void|int flag) -- packages/contrib.c f_min():
+    // mirror of max(), returns smallest element (or its index when flag!=0).
+    t.registerEfun("min", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data))
+            throw LpcRuntimeError("min: expected an array as first argument");
+        const auto& arr = std::get<std::shared_ptr<Array>>(args[0].data)->items;
+        if (arr.empty()) throw LpcRuntimeError("min: can't find min of an empty array");
+
+        bool returnIndex = args.size() >= 2 &&
+            std::holds_alternative<int64_t>(args[1].data) &&
+            std::get<int64_t>(args[1].data) != 0;
+
+        size_t minIdx = 0;
+        for (size_t i = 1; i < arr.size(); ++i) {
+            const Value& cur = arr[i];
+            const Value& best = arr[minIdx];
+            bool curSmaller = false;
+            if (std::holds_alternative<int64_t>(cur.data) && std::holds_alternative<int64_t>(best.data))
+                curSmaller = std::get<int64_t>(cur.data) < std::get<int64_t>(best.data);
+            else if (std::holds_alternative<double>(cur.data) && std::holds_alternative<double>(best.data))
+                curSmaller = std::get<double>(cur.data) < std::get<double>(best.data);
+            else if (std::holds_alternative<int64_t>(cur.data) && std::holds_alternative<double>(best.data))
+                curSmaller = static_cast<double>(std::get<int64_t>(cur.data)) < std::get<double>(best.data);
+            else if (std::holds_alternative<double>(cur.data) && std::holds_alternative<int64_t>(best.data))
+                curSmaller = std::get<double>(cur.data) < static_cast<double>(std::get<int64_t>(best.data));
+            else if (std::holds_alternative<std::string>(cur.data) && std::holds_alternative<std::string>(best.data))
+                curSmaller = std::get<std::string>(cur.data) < std::get<std::string>(best.data);
+            else
+                throw LpcRuntimeError("min: array must consist of ints, floats, or strings of the same type");
+            if (curSmaller) minIdx = i;
+        }
+        if (returnIndex) return Value(static_cast<int64_t>(minIdx));
+        return arr[minIdx];
     });
 }
 

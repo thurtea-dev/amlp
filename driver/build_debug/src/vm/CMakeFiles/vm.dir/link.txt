@@ -1,2 +1,0 @@
-/usr/bin/ar qc libvm.a CMakeFiles/vm.dir/VM.cpp.o CMakeFiles/vm.dir/Value.cpp.o
-/usr/bin/ranlib libvm.a
