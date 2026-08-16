@@ -2578,6 +2578,120 @@ void registerCoreEfuns() {
         return Value(int64_t{target && target->commandsEnabled() ? 1 : 0});
     });
 
+    // object shadow(object ob, int flag default: 1) -- Phase 0.6.
+    // Confirmed against fluffos-2.9-ds2.08's own f_shadow() and
+    // validate_shadowing() (efuns_main.c / interpret.c) directly, not
+    // instruct.md's own simplified description.
+    //
+    // flag == 0 is a pure query, not an attach: returns whoever is
+    // currently shadowing ob (real "ob = ob->shadowed"), or 0. This is
+    // the ONLY real, live-reachable shape of shadow() in this mudlib
+    // (cmds/creator/_scan.c's own "shadow(ob, 0)", confirmed by grep;
+    // its one real attach-mode caller is dead code, guarded behind
+    // "#if HAS_SHADOWS", a macro never defined anywhere in this mudlib's
+    // own config or in the real fluffos-2.9-ds2.08 source it was ported
+    // from). There is no separate "query_shadowed()" efun in real
+    // FluffOS at all, despite that being a natural-sounding name --
+    // shadow(ob, 0) is the real mechanism, confirmed by that same real
+    // call site.
+    //
+    // flag != 0 (attach mode) real validation, all confirmed directly
+    // against validate_shadowing(): current_object cannot already be
+    // shadowing something ("Already shadowing"), cannot itself already
+    // be shadowed ("Can't shadow when shadowed"), cannot be inside an
+    // environment ("must not reside inside another object"), ob cannot
+    // be the master object, ob cannot itself already be shadowing
+    // something ("Can't shadow a shadow"), and finally master's own
+    // valid_shadow(ob) apply must approve -- reusing this driver's own
+    // already-established "master && isTruthy(callFunction(master,
+    // "valid_X", ...))" pattern (see set_hide's identical valid_hide()
+    // gate just above). Confirmed this mudlib's own real master.c never
+    // defines valid_shadow() at all, so against this exact mudlib,
+    // attach-mode shadow() is correctly, always denied by default --
+    // matching real semantics precisely, not a driver gap: real
+    // MASTER_APPROVED() on an apply the master does not define is
+    // exactly as falsy as this driver's own callFunction() returning
+    // Value{} for the same case.
+    //
+    // Not implemented: check_shadow_functions()'s "nomask" conflict
+    // check -- this driver's compiler has no nomask modifier concept at
+    // all (same category of gap as the class/buffer type gaps already
+    // documented elsewhere), so nothing could ever trigger it anyway.
+    // On success, the new shadow is inserted at the END of any existing
+    // chain on ob (real "while (ob->shadowed) ob = ob->shadowed;" before
+    // the assignment), matching real multi-shadow stacking order.
+    t.registerEfun("shadow", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("shadow: expected an object as first argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob || ob->isDestructed()) return Value{};
+
+        bool attach = args.size() < 2 || !std::holds_alternative<int64_t>(args[1].data) ||
+                      std::get<int64_t>(args[1].data) != 0;
+        if (!attach) {
+            auto shadow = ob->shadowedBy().lock();
+            return shadow ? Value(shadow) : Value{};
+        }
+
+        auto self = vm.currentObject();
+        if (!self) return Value{};
+        if (ob == self) {
+            throw LpcRuntimeError("shadow: Can't shadow self");
+        }
+        if (self->shadowing().lock()) {
+            throw LpcRuntimeError("shadow: Already shadowing.");
+        }
+        if (self->shadowedBy().lock()) {
+            throw LpcRuntimeError("shadow: Can't shadow when shadowed.");
+        }
+        if (self->environment().lock()) {
+            throw LpcRuntimeError("shadow: The shadow must not reside inside another object.");
+        }
+        auto master = vm.masterObject();
+        if (ob == master) {
+            throw LpcRuntimeError("shadow: cannot shadow the master object.");
+        }
+        if (ob->shadowing().lock()) {
+            throw LpcRuntimeError("shadow: Can't shadow a shadow.");
+        }
+        bool approved = master && isTruthy(vm.callFunction(master, "valid_shadow", {Value(ob)}));
+        if (!approved) return Value{};
+        // Real f_shadow(): this second check happens only after
+        // validate_shadowing() (the block above) already approved,
+        // matching the real source's own two-step order exactly (a
+        // master valid_shadow() apply that destructs current_object as
+        // a side effect is the only way this can differ from the
+        // pre-check above).
+        if (self->isDestructed()) return Value{};
+
+        auto victim = ob;
+        while (auto next = victim->shadowedBy().lock()) victim = next;
+        self->setShadowing(victim);
+        victim->setShadowedBy(self);
+        return Value(victim);
+    });
+
+    // object query_shadowing(object ob default: this_object()) -- the
+    // inverse direction of shadow(ob, 0): confirmed against efuns_main.c's
+    // own f_query_shadowing() ("ob->shadowing"), returns whoever ob
+    // itself is shadowing, or 0. Zero real call sites in this mudlib
+    // (confirmed by grep), registered anyway per this row's own task
+    // list -- shadow() and query_shadowing() are the real, complete
+    // FluffOS pair (func_spec.c: "object shadow(object, int default: 1);
+    // object query_shadowing(object);"), not a driver invention.
+    t.registerEfun("query_shadowing", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            ob = vm.currentObject();
+        }
+        if (!ob) return Value{};
+        auto target = ob->shadowing().lock();
+        return target ? Value(target) : Value{};
+    });
+
     // void add_action(string fun, string | string* cmd, void | int flag)
     // -- registers fun (a function on current_object) onto
     // command_giver's action table under cmd (or once per element, for

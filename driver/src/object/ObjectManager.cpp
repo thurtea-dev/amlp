@@ -663,7 +663,52 @@ std::shared_ptr<LpcObject> ObjectManager::lookupLoadedObject(const std::string& 
 }
 
 void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
-    if (!obj) return;
+    if (!obj || obj->isDestructed()) return;
+
+    // Shadow chain cleanup (Phase 0.6), confirmed directly against real
+    // destruct_object()'s own two-branch shadow handling (simulate.c),
+    // not guessed. Real semantics are asymmetric, not a plain unlink in
+    // both cases:
+    //
+    // If obj is the base victim of a chain (something shadows it, and
+    // it does not itself shadow anything -- real "ob->shadowed &&
+    // !ob->shadowing"), destructing it cascades: the ENTIRE chain is
+    // destructed too, walking from the outermost shadow down to obj
+    // itself, each one severed from its neighbors before its own
+    // recursive destructObject() call. This function then returns
+    // without doing its own further processing, since the recursive
+    // call for obj itself (the last iteration) already did it -- exact
+    // mirror of the real source's own "return;" right after that loop.
+    auto shadowedBy = obj->shadowedBy().lock();
+    if (shadowedBy && !obj->shadowing().lock()) {
+        auto top = shadowedBy;
+        while (auto next = top->shadowedBy().lock()) top = next;
+        while (top) {
+            auto below = top->shadowing().lock();
+            if (below) below->setShadowedBy(std::weak_ptr<LpcObject>());
+            top->setShadowing(std::weak_ptr<LpcObject>());
+            auto current = top;
+            top = below;
+            destructObject(current);
+        }
+        return;
+    }
+    // Otherwise (obj is itself a shadow, or has no shadow relationship
+    // at all) destructing it just splices it out of the middle of
+    // whatever chain it was part of -- a real doubly-linked-list
+    // unlink, reconnecting its neighbors to each other directly, then
+    // falls through to the normal destruction steps below for obj
+    // itself. A no-shadow-relationship object naturally no-ops both
+    // branches here (both fields are already null).
+    if (auto shadowing = obj->shadowing().lock()) {
+        shadowing->setShadowedBy(shadowedBy);
+    }
+    if (shadowedBy) {
+        shadowedBy->setShadowing(obj->shadowing());
+    }
+    obj->setShadowing(std::weak_ptr<LpcObject>());
+    obj->setShadowedBy(std::weak_ptr<LpcObject>());
+
     obj->setDestructed(true);
 
     // real destruct_object() (simulate.c): "remove_living_name(ob);",

@@ -5188,6 +5188,348 @@ static void testCallOutInfoListsPendingEntryWithOwnerFunctionAndDelay() {
     std::cout << "testCallOutInfoListsPendingEntryWithOwnerFunctionAndDelay OK\n";
 }
 
+// --- shadow support (Phase 0.6) -------------------------------------------
+// All shadow tests use a master object defining a real (permissive)
+// valid_shadow(), matching the established set_hide()-style harness
+// pattern (loadMasterObject() + "/unused.c") -- real shadow() always
+// denies without one, confirmed against this mudlib's own master.c
+// (which defines no valid_shadow() at all), so a permissive test master
+// is the only way to exercise the attach path at all, on this driver or
+// on real FluffOS against this exact mudlib.
+
+static void testShadowAttachInterceptsCallOtherWhenShadowDefinesFunction() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh_victim.c",
+        "string greet() { return \"victim\"; }\n");
+    harness.writeFile("/sh_shadow.c",
+        "string greet() { return \"shadow\"; }\n"
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+    harness.writeFile("/sh_caller.c",
+        "string probe(object victim) { return victim->greet(); }\n");
+
+    auto victim = harness.objects.cloneObject("/sh_victim");
+    auto shadowOb = harness.objects.cloneObject("/sh_shadow");
+    auto caller = harness.objects.cloneObject("/sh_caller");
+    assert(victim != nullptr && shadowOb != nullptr && caller != nullptr);
+
+    lpcdriver::Value attachResult = harness.vm.callFunction(shadowOb, "attach", {lpcdriver::Value(victim)});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(attachResult.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(attachResult.data) == victim);
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "probe", {lpcdriver::Value(victim)});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "shadow");
+
+    std::cout << "testShadowAttachInterceptsCallOtherWhenShadowDefinesFunction OK\n";
+}
+
+static void testShadowFallsThroughToVictimWhenFunctionUndefinedOnShadowRegardlessOfReturnValue() {
+    // The real, easy-to-get-backwards detail: apply_low()'s own shadow
+    // retry is gated on whether the function is *defined* on a given
+    // link, never on the truthiness of what it returns. A shadow that
+    // DOES define the function, even returning a falsy 0, is still the
+    // final answer -- only an *undefined* function falls through.
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh2_victim.c",
+        "string only_on_victim() { return \"victim-answer\"; }\n"
+        "int falsy_on_both() { return 0; }\n");
+    harness.writeFile("/sh2_shadow.c",
+        "int falsy_on_both() { return 0; }\n"
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+    harness.writeFile("/sh2_caller.c",
+        "mixed probe_undefined(object victim) { return victim->only_on_victim(); }\n"
+        "mixed probe_falsy(object victim) { return victim->falsy_on_both(); }\n");
+
+    auto victim = harness.objects.cloneObject("/sh2_victim");
+    auto shadowOb = harness.objects.cloneObject("/sh2_shadow");
+    auto caller = harness.objects.cloneObject("/sh2_caller");
+    assert(victim != nullptr && shadowOb != nullptr && caller != nullptr);
+    harness.vm.callFunction(shadowOb, "attach", {lpcdriver::Value(victim)});
+
+    // Not defined on the shadow at all -- falls through to the victim's
+    // own definition, matching real "function not found, retry".
+    lpcdriver::Value undef = harness.vm.callFunction(caller, "probe_undefined", {lpcdriver::Value(victim)});
+    assert(std::holds_alternative<std::string>(undef.data));
+    assert(std::get<std::string>(undef.data) == "victim-answer");
+
+    // Defined on the shadow, returns a falsy 0 -- the call still
+    // resolves and returns cleanly (a falsy value is not a resolution
+    // error), no fall-through attempted. The next test below proves
+    // this is genuinely the shadow's own copy running, not the
+    // victim's, using bodies that return distinguishable values.
+    lpcdriver::Value falsy = harness.vm.callFunction(caller, "probe_falsy", {lpcdriver::Value(victim)});
+    assert(std::holds_alternative<int64_t>(falsy.data));
+    assert(std::get<int64_t>(falsy.data) == 0);
+
+    std::cout << "testShadowFallsThroughToVictimWhenFunctionUndefinedOnShadowRegardlessOfReturnValue OK\n";
+}
+
+static void testShadowDefinedFunctionReturningFalsyIsStillFinalNotAFallThroughTrigger() {
+    // Same real point as the test above, made unambiguous: the shadow's
+    // own falsy_on_both() and the victim's own return DIFFERENT falsy
+    // values (0 vs "", both falsy, but distinguishable by type), so
+    // getting back the shadow's own falsy int 0 (not the victim's own
+    // falsy empty string) is the only way this test passes.
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh3_victim.c",
+        "mixed answer() { return \"\"; }\n");
+    harness.writeFile("/sh3_shadow.c",
+        "mixed answer() { return 0; }\n"
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+    harness.writeFile("/sh3_caller.c",
+        "mixed probe(object victim) { return victim->answer(); }\n");
+
+    auto victim = harness.objects.cloneObject("/sh3_victim");
+    auto shadowOb = harness.objects.cloneObject("/sh3_shadow");
+    auto caller = harness.objects.cloneObject("/sh3_caller");
+    assert(victim != nullptr && shadowOb != nullptr && caller != nullptr);
+    harness.vm.callFunction(shadowOb, "attach", {lpcdriver::Value(victim)});
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "probe", {lpcdriver::Value(victim)});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testShadowDefinedFunctionReturningFalsyIsStillFinalNotAFallThroughTrigger OK\n";
+}
+
+static void testShadowGuardsAgainstReenteringItselfViaCurrentObjectCheck() {
+    // Real "ob->shadowed != current_object" guard: when the shadow's own
+    // code calls back into the victim (e.g. to reach the real,
+    // unshadowed implementation), that call must not immediately
+    // re-intercept itself, since the shadow IS current_object at that
+    // point.
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh4_victim.c",
+        "string greet() { return \"victim\"; }\n");
+    harness.writeFile("/sh4_shadow.c",
+        "string greet() { return \"shadow\"; }\n"
+        "string call_victim_directly(object victim) { return victim->greet(); }\n"
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+
+    auto victim = harness.objects.cloneObject("/sh4_victim");
+    auto shadowOb = harness.objects.cloneObject("/sh4_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+    harness.vm.callFunction(shadowOb, "attach", {lpcdriver::Value(victim)});
+
+    // Called directly ON the shadow object (so current_object during the
+    // nested victim->greet() call other is the shadow itself) -- must
+    // reach the victim's own real greet(), not re-intercept itself.
+    lpcdriver::Value result = harness.vm.callFunction(shadowOb, "call_victim_directly", {lpcdriver::Value(victim)});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "victim");
+
+    std::cout << "testShadowGuardsAgainstReenteringItselfViaCurrentObjectCheck OK\n";
+}
+
+static void testShadowDestructingVictimCascadesEntireChain() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh5_victim.c", "void create() {}\n");
+    harness.writeFile("/sh5_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+
+    auto victim = harness.objects.cloneObject("/sh5_victim");
+    auto shadowOb = harness.objects.cloneObject("/sh5_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+    harness.vm.callFunction(shadowOb, "attach", {lpcdriver::Value(victim)});
+    assert(!victim->isDestructed());
+    assert(!shadowOb->isDestructed());
+
+    harness.objects.destructObject(victim);
+    assert(victim->isDestructed());
+    // Real destruct_object(): destructing the base victim of a chain
+    // cascades to destruct every shadow above it too.
+    assert(shadowOb->isDestructed());
+
+    std::cout << "testShadowDestructingVictimCascadesEntireChain OK\n";
+}
+
+static void testShadowDestructingShadowSplicesItOutLeavingVictimIntact() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh6_victim.c", "void create() {}\n");
+    harness.writeFile("/sh6_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+
+    auto victim = harness.objects.cloneObject("/sh6_victim");
+    auto shadowOb = harness.objects.cloneObject("/sh6_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+    harness.vm.callFunction(shadowOb, "attach", {lpcdriver::Value(victim)});
+
+    harness.objects.destructObject(shadowOb);
+    assert(shadowOb->isDestructed());
+    // Real destruct_object(): destructing a shadow (not the base
+    // victim) just splices it out of the chain; the victim itself is
+    // untouched and no longer shows anyone shadowing it.
+    assert(!victim->isDestructed());
+    assert(!victim->shadowedBy().lock());
+
+    std::cout << "testShadowDestructingShadowSplicesItOutLeavingVictimIntact OK\n";
+}
+
+static void testShadowDeniedWhenMasterHasNoValidShadowApproval() {
+    // Real semantics, confirmed against this mudlib's own master.c
+    // (which defines no valid_shadow() at all): attach-mode shadow() is
+    // correctly, always denied by default without an approving master --
+    // the real MASTER_APPROVED() gate, not a driver-side no_shadow()
+    // efun (no such separate efun exists in real FluffOS).
+    ObjectVarHarness noMaster;
+    noMaster.writeFile("/sh7_victim.c", "void create() {}\n");
+    noMaster.writeFile("/sh7_shadow.c",
+        "mixed attach(object victim) { return shadow(victim, 1); }\n");
+    auto victim1 = noMaster.objects.cloneObject("/sh7_victim");
+    auto shadow1 = noMaster.objects.cloneObject("/sh7_shadow");
+    assert(victim1 != nullptr && shadow1 != nullptr);
+    lpcdriver::Value r1 = noMaster.vm.callFunction(shadow1, "attach", {lpcdriver::Value(victim1)});
+    assert(std::holds_alternative<std::monostate>(r1.data));
+    assert(!victim1->shadowedBy().lock());
+
+    ObjectVarHarness rejecting;
+    rejecting.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 0; }\n");
+    assert(rejecting.objects.loadMasterObject());
+    rejecting.writeFile("/sh7b_victim.c", "void create() {}\n");
+    rejecting.writeFile("/sh7b_shadow.c",
+        "mixed attach(object victim) { return shadow(victim, 1); }\n");
+    auto victim2 = rejecting.objects.cloneObject("/sh7b_victim");
+    auto shadow2 = rejecting.objects.cloneObject("/sh7b_shadow");
+    assert(victim2 != nullptr && shadow2 != nullptr);
+    lpcdriver::Value r2 = rejecting.vm.callFunction(shadow2, "attach", {lpcdriver::Value(victim2)});
+    assert(std::holds_alternative<std::monostate>(r2.data));
+    assert(!victim2->shadowedBy().lock());
+
+    std::cout << "testShadowDeniedWhenMasterHasNoValidShadowApproval OK\n";
+}
+
+static void testShadowQueryFormAndQueryShadowingReturnBothDirectionsOrZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh8_victim.c",
+        "mixed who_shadows_me() { return shadow(this_object(), 0); }\n");
+    harness.writeFile("/sh8_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n"
+        "mixed who_do_i_shadow() { return query_shadowing(this_object()); }\n");
+    auto victim = harness.objects.cloneObject("/sh8_victim");
+    auto shadowOb = harness.objects.cloneObject("/sh8_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+
+    // Before attaching: neither direction reports a relationship.
+    lpcdriver::Value beforeVictim = harness.vm.callFunction(victim, "who_shadows_me", {});
+    assert(std::holds_alternative<std::monostate>(beforeVictim.data));
+    lpcdriver::Value beforeShadow = harness.vm.callFunction(shadowOb, "who_do_i_shadow", {});
+    assert(std::holds_alternative<std::monostate>(beforeShadow.data));
+
+    harness.vm.callFunction(shadowOb, "attach", {lpcdriver::Value(victim)});
+
+    // shadow(victim, 0): who is currently shadowing victim?
+    lpcdriver::Value afterVictim = harness.vm.callFunction(victim, "who_shadows_me", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(afterVictim.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(afterVictim.data) == shadowOb);
+
+    // query_shadowing(shadowOb): who does shadowOb itself shadow?
+    lpcdriver::Value afterShadow = harness.vm.callFunction(shadowOb, "who_do_i_shadow", {});
+    assert(std::holds_alternative<std::shared_ptr<lpcdriver::LpcObject>>(afterShadow.data));
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>(afterShadow.data) == victim);
+
+    std::cout << "testShadowQueryFormAndQueryShadowingReturnBothDirectionsOrZero OK\n";
+}
+
+static void testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/sh9_a.c",
+        "mixed shadow_self() { return shadow(this_object(), 1); }\n");
+    auto selfOb = harness.objects.cloneObject("/sh9_a");
+    assert(selfOb != nullptr);
+    bool threwSelf = false;
+    try {
+        harness.vm.callFunction(selfOb, "shadow_self", {});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threwSelf = true;
+    }
+    assert(threwSelf);
+
+    harness.writeFile("/sh9_v1.c", "void create() {}\n");
+    harness.writeFile("/sh9_v2.c", "void create() {}\n");
+    harness.writeFile("/sh9_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+    auto v1 = harness.objects.cloneObject("/sh9_v1");
+    auto v2 = harness.objects.cloneObject("/sh9_v2");
+    auto sh = harness.objects.cloneObject("/sh9_shadow");
+    assert(v1 != nullptr && v2 != nullptr && sh != nullptr);
+    harness.vm.callFunction(sh, "attach", {lpcdriver::Value(v1)});
+
+    // sh is already shadowing v1 -- attaching to v2 as well must throw.
+    bool threwAlreadyShadowing = false;
+    try {
+        harness.vm.callFunction(sh, "attach", {lpcdriver::Value(v2)});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threwAlreadyShadowing = true;
+    }
+    assert(threwAlreadyShadowing);
+
+    // v1 is already shadowed (by sh) -- v1 itself then trying to shadow
+    // a third object must throw. v1's own file needs an attach()
+    // function to drive this from v1 as current_object, so a fresh
+    // "victim that can also attach" object stands in for it here rather
+    // than reusing v1 (whose file never declared one).
+    harness.writeFile("/sh9_v1b.c",
+        "void create() {}\n"
+        "mixed attach(object victim) { return shadow(victim, 1); }\n");
+    harness.writeFile("/sh9_v3.c", "void create() {}\n");
+    auto v1b = harness.objects.cloneObject("/sh9_v1b");
+    auto v3 = harness.objects.cloneObject("/sh9_v3");
+    auto shForV1b = harness.objects.cloneObject("/sh9_shadow");
+    assert(v1b != nullptr && v3 != nullptr && shForV1b != nullptr);
+    harness.vm.callFunction(shForV1b, "attach", {lpcdriver::Value(v1b)});
+    bool threwAlreadyShadowed = false;
+    try {
+        harness.vm.callFunction(v1b, "attach", {lpcdriver::Value(v3)});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threwAlreadyShadowed = true;
+    }
+    assert(threwAlreadyShadowed);
+
+    std::cout << "testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed OK\n";
+}
+
 static void testSqrtNegativeArgThrows() {
     // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
     ObjectVarHarness harness;
@@ -11622,6 +11964,15 @@ int main() {
     testInInputReflectsPendingInputToStateOnAConnectedObject();
     testMatchPathReturnsDeepestMatchingPrefix();
     testCallOutInfoListsPendingEntryWithOwnerFunctionAndDelay();
+    testShadowAttachInterceptsCallOtherWhenShadowDefinesFunction();
+    testShadowFallsThroughToVictimWhenFunctionUndefinedOnShadowRegardlessOfReturnValue();
+    testShadowDefinedFunctionReturningFalsyIsStillFinalNotAFallThroughTrigger();
+    testShadowGuardsAgainstReenteringItselfViaCurrentObjectCheck();
+    testShadowDestructingVictimCascadesEntireChain();
+    testShadowDestructingShadowSplicesItOutLeavingVictimIntact();
+    testShadowDeniedWhenMasterHasNoValidShadowApproval();
+    testShadowQueryFormAndQueryShadowingReturnBothDirectionsOrZero();
+    testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();

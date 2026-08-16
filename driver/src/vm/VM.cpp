@@ -479,6 +479,41 @@ Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
     // silently does nothing, not an error.
     if (obj->isDestructed()) return Value{};
 
+    // Shadow chain (Phase 0.6): real apply_low()'s own two-phase
+    // mechanism (interpret.c), confirmed directly before implementing,
+    // not assumed from instruct.md's own simplified "call the shadow,
+    // check truthy, else fall through" description, which gets the real
+    // condition wrong -- it is whether the function is *defined* on a
+    // given link of the chain, never the truthiness of what it returns.
+    //
+    // Phase 1: walk to the outermost still-active shadow. Real "while
+    // (ob->shadowed && ob->shadowed != current_object &&
+    // !(ob->shadowed->flags & O_DESTRUCTED)) ob = ob->shadowed;" -- the
+    // "!= current_object" guard is real and load-bearing: without it, a
+    // shadow's own function calling back into its victim (e.g. via
+    // call_other to reach the real, unshadowed implementation) would
+    // immediately re-enter itself instead, since it IS current_object at
+    // that point.
+    std::shared_ptr<LpcObject> target = obj;
+    {
+        auto caller = currentObject();
+        auto shadow = target->shadowedBy().lock();
+        while (shadow && shadow != caller && !shadow->isDestructed()) {
+            target = shadow;
+            shadow = target->shadowedBy().lock();
+        }
+    }
+
+    // Phase 2: search target's own inherit chain (same resolution
+    // external entry points always use, see the comment below); if the
+    // function is not *defined* there and target itself shadows
+    // something further in (a multi-shadow chain), retry one step
+    // toward the base victim -- real "goto retry_for_shadow" after the
+    // "if (ob->shadowing) { ob = ob->shadowing; ... }" check. This
+    // terminates at the original, unshadowed obj once shadowing() is
+    // unset, exactly matching real semantics: the base object's own
+    // program is always the last one tried.
+    //
     // External entry points (call_other, ObjectManager's create() call,
     // applyMaster()) must resolve inherited-but-not-locally-overridden
     // functions the same way a bare in-file call does, or calling an
@@ -488,9 +523,16 @@ Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
     // resolution, this deliberately does not fall back to the efun table
     // -- call_other("some/object", "sizeof") calling the sizeof() efun on
     // an unrelated object would not be a call_other at all.
-    FunctionLookupResult found = findFunctionInChain(obj->program(), functionName);
+    FunctionLookupResult found;
+    for (;;) {
+        found = findFunctionInChain(target->program(), functionName);
+        if (found.program) break;
+        auto next = target->shadowing().lock();
+        if (!next) break;
+        target = next;
+    }
     if (!found.program) return Value{};
-    return run(*found.program, *found.fn, std::move(args), obj);
+    return run(*found.program, *found.fn, std::move(args), target);
 }
 
 Value VM::callFunctionInProgram(const std::shared_ptr<LpcObject>& obj, const CompiledProgram& program,

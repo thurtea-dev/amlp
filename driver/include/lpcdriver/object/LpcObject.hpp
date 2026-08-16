@@ -173,6 +173,23 @@ public:
         return false;
     }
 
+    // real object_t's "shadowed" and "shadowing" fields (object.h), named
+    // to match exactly rather than instruct.md's own proposed
+    // "shadow_"/"shadowedBy_" pair, which had the relationship backwards
+    // in one direction -- confirmed directly against interpret.c's
+    // apply_low() and efuns_main.c's f_shadow() before naming these:
+    // shadowedBy() is "the object currently shadowing me" (real
+    // ob->shadowed; a victim's own field), shadowing() is "the object I
+    // am myself shadowing" (real ob->shadowing; a shadow's own field).
+    // Both weak_ptr: neither side of a shadow relationship keeps the
+    // other alive on its own, matching every other cross-object
+    // reference in this class. See VM::callFunction()'s own comment for
+    // the real two-phase chain walk these back.
+    std::weak_ptr<LpcObject> shadowedBy() const { return shadowedBy_; }
+    void setShadowedBy(std::weak_ptr<LpcObject> ob) { shadowedBy_ = std::move(ob); }
+    std::weak_ptr<LpcObject> shadowing() const { return shadowing_; }
+    void setShadowing(std::weak_ptr<LpcObject> ob) { shadowing_ = std::move(ob); }
+
 private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
@@ -187,6 +204,8 @@ private:
     std::vector<ActionEntry> actions_;
     std::optional<std::string> privs_;
     std::string livingName_;
+    std::weak_ptr<LpcObject> shadowedBy_;
+    std::weak_ptr<LpcObject> shadowing_;
 };
 
 } // namespace lpcdriver
