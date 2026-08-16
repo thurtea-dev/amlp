@@ -79,6 +79,14 @@ void Server::onNewConnection(int clientFd) {
 
     auto conn = std::make_shared<Connection>(clientFd);
 
+    // Real new_user() (comm.c): "Ask them for their window size" fires
+    // right at connection setup, unprompted, before master->connect()
+    // even runs ("add_binary_message(ob, telnet_do_naws, ...)"). This
+    // driver sends only the NAWS request (Phase 0.8's own scope); real
+    // new_user() also sends IAC DO TTYPE and IAC DO MXP here, neither of
+    // which anything in this driver processes yet.
+    conn->send(std::string("\xff\xfd\x1f", 3));  // IAC DO NAWS (255 253 31)
+
     OutputContext::set(conn.get());
 
     // A runtime error out of master->connect() (a bad clone_object(), a

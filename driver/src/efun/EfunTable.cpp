@@ -1090,12 +1090,18 @@ void registerCoreEfuns() {
         const std::string& function = std::get<std::string>(args[0].data);
 
         size_t extraStart = 1;
+        int64_t flags = 0;
         if (args.size() > 1 && std::holds_alternative<int64_t>(args[1].data)) {
+            flags = std::get<int64_t>(args[1].data);
             extraStart = 2;
         }
         std::vector<Value> extraArgs(args.begin() + static_cast<long>(extraStart), args.end());
 
         conn->setPendingInputTo(currentObj, function, std::move(extraArgs));
+        // Phase 0.8: real set_call()'s own "if (flags & I_NOECHO)
+        // add_binary_message(ob, telnet_yes_echo, ...)" (comm.c) --
+        // I_NOECHO is real bit 0x1 (comm.h), confirmed directly.
+        if (flags & 1) conn->suppressEcho();
         return Value(int64_t{1});
     });
 
@@ -3339,6 +3345,43 @@ void registerCoreEfuns() {
         int64_t idle = static_cast<int64_t>(std::time(nullptr)) -
                         static_cast<int64_t>(conn->lastActivityTime());
         return Value(idle);
+    });
+
+    // int query_screen_width(object ob) / int query_screen_height(object
+    // ob) -- Phase 0.8. Not real FluffOS efuns: confirmed by grepping
+    // func_spec.c/efun_defs.c/applies_table.c directly, zero hits. Real
+    // FluffOS's own actual NAWS mechanism is push-based, not pull-based:
+    // the driver calls a "window_size(width, height)" apply
+    // (applies.h's own APPLY_WINDOW_SIZE) on the connection's bound
+    // object every time a NAWS subnegotiation arrives, confirmed against
+    // comm.c directly ("apply(APPLY_WINDOW_SIZE, ip->ob, 2,
+    // ORIGIN_DRIVER)"); it is up to the mudlib's own window_size()
+    // handler to store the values if it wants them queryable later. That
+    // apply is deliberately not implemented here -- these two efuns are
+    // a driver-added pull-based convenience matching this row's own task
+    // list, reading the same Connection-level terminalWidth_/Height_
+    // fields the real NAWS subnegotiation parser already fills, not a
+    // port of the real apply-based mechanism. Same query-by-object
+    // pattern as query_idle() just above, not query_ip_number()'s
+    // current-connection-only shape, since window size is inherently a
+    // property of a specific player's own connection.
+    t.registerEfun("query_screen_width", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("query_screen_width: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        Connection* conn = ob ? InteractiveRegistry::find(ob) : nullptr;
+        if (!conn) throw LpcRuntimeError("query_screen_width: ob is not interactive");
+        return Value(static_cast<int64_t>(conn->terminalWidth()));
+    });
+    t.registerEfun("query_screen_height", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("query_screen_height: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        Connection* conn = ob ? InteractiveRegistry::find(ob) : nullptr;
+        if (!conn) throw LpcRuntimeError("query_screen_height: ob is not interactive");
+        return Value(static_cast<int64_t>(conn->terminalHeight()));
     });
 
     // string query_ip_number(void|object ob) -- comm.c's real

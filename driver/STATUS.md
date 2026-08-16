@@ -3,6 +3,71 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-17: Shadow support implemented (Phase 0 row 0.6).** `shadow(object
+ob, int flag default 1)`, `query_shadowing(object)`, the real shadow-chain
+effect on `VM::callFunction()`'s resolution order, and shadow-aware cleanup
+in `ObjectManager::destructObject()`.
+
+Read `efuns_main.c`'s `f_shadow()`/`f_query_shadowing()`, `interpret.c`'s
+`validate_shadowing()` and `apply_low()`'s shadow section, and
+`simulate.c`'s `destruct_object()` shadow cleanup directly before writing
+anything, not `driver/src/object/instruct.md`'s own proposed design, which
+turned out wrong on five real points, not just incomplete:
+
+1. There is no `query_shadowed()` efun in real FluffOS. `shadow(ob, 0)` is
+   the real query form (who is currently shadowing `ob`), confirmed by the
+   one real call site in this mudlib (`cmds/creator/_scan.c`'s own
+   `shadow(ob, 0)`).
+2. The chain-walk condition in `apply_low()` is whether the function is
+   *defined* on a given link, never the truthiness of what it returns.
+   `instruct.md` said "if the shadow defines the function and returns a
+   truthy value, use that result, otherwise fall through" -- wrong; a
+   shadow that defines the function and returns a falsy `0` is still the
+   final, real result, not a fall-through trigger.
+3. The master apply real FluffOS actually calls is `valid_shadow`, not
+   `query_allow_shadow` (that name is LDMud's own apply, already correctly
+   scoped to LDMud elsewhere in `src/apply/instruct.md`). Confirmed in
+   `applies_table.c` directly.
+4. There is no separate `no_shadow()` efun or apply. The real gate is
+   entirely `master()->valid_shadow(ob)`, reusing this driver's own
+   already-established `master && isTruthy(callFunction(master, "valid_X",
+   ...))` pattern (identical to `set_hide`'s `valid_hide` gate).
+5. Real `validate_shadowing()` has five checks, not the one `instruct.md`
+   named: can't shadow self, can't shadow while already shadowing
+   something, can't shadow while already shadowed, the shadow object can't
+   be inside an environment, the target can't be the master object, and
+   the target can't itself already be a shadow, plus the master approval.
+   All five implemented. Not implemented: the `nomask`-function conflict
+   check (`check_shadow_functions()`) -- this driver's compiler has no
+   `nomask` modifier concept at all, same category as the existing
+   class/buffer type gaps.
+
+Shadow removal has no dedicated efun in real FluffOS at all (no
+`unshadow()`); it is entirely a side effect of `destruct()`, and the real
+behavior is asymmetric, confirmed directly against `simulate.c`:
+destructing the base victim of a chain cascades to destruct every shadow
+above it too, while destructing a shadow (not the root) just splices it out
+of the chain, leaving the rest intact. Both branches implemented in
+`ObjectManager::destructObject()`.
+
+Real-usage check across `mudlib/`, excluding `/doc/`: `shadow()`'s only
+reference anywhere is that one `shadow(ob, 0)` call in `_scan.c`, and it is
+dead code, guarded behind `#if HAS_SHADOWS`, a macro never defined anywhere
+in this mudlib's own config or anywhere in the vendored
+`fluffos-2.9-ds2.08` source it was ported from. `query_shadowing()` has
+zero real call sites. Shadow support is a driver-completeness/ROADMAP-parity
+item in this mudlib, not currently load-bearing for anything reachable.
+
+9 new regression tests: basic chain interception, fall-through on an
+undefined function versus a final result on a falsy-but-defined one (two
+tests, the second using deliberately distinguishable return values to prove
+the shadow's own code actually ran), the `current_object` reentrancy guard,
+cascade-destruct of a whole chain via the base victim, splice-destruct of
+just one shadow, denial without master approval (both no-master and
+explicitly-rejecting-master cases), both query directions, and the five
+validation-rule rejections. Full suite: 449 tests passing, up from 440, no
+regressions.
+
 **Known issue, not fixed this session:** `driver/tests/test_lexer.cpp` uses
 bare `assert()` for real test logic in places, not just sanity checks, for
 example `assert(harness.objects.loadSimulEfunObject())`. Building the tests

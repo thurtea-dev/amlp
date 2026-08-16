@@ -57,6 +57,21 @@ public:
     bool closed() const { return closed_; }
     void close();
 
+    // Real set_call()'s own "if (flags & I_NOECHO) add_binary_message(ob,
+    // telnet_yes_echo, ...)" (comm.c): sends IAC WILL ECHO immediately
+    // (telling the client the server is taking over echo, so the client
+    // stops local-echoing -- real telnet's own confusing-but-correct
+    // "WILL ECHO" direction) and marks the connection so the next line
+    // pulled in pollLines() re-enables it. Idempotent: calling this again
+    // while already suppressed does not resend the negotiation bytes,
+    // matching set_call()'s own single-fire-per-registration behavior
+    // (only the input_to() efun call site, gated on the flag, decides
+    // when this runs at all).
+    void suppressEcho();
+
+    int terminalWidth() const { return terminalWidth_; }
+    int terminalHeight() const { return terminalHeight_; }
+
     // Registers/overwrites the pending input_to handler for this
     // connection (real FluffOS's set_call(), simulate.c).
     void setPendingInputTo(std::shared_ptr<LpcObject> obj, std::string function,
@@ -107,6 +122,19 @@ public:
     std::time_t lastActivityTime() const { return lastActivityTime_; }
 
 private:
+    // Telnet IAC state machine (Phase 0.8), confirmed directly against
+    // fluffos-2.9-ds2.08/comm.c's own copy_chars() byte-by-byte states
+    // before implementing (that real function is what net/instruct.md's
+    // own "telnet_neg()" citation actually refers to -- no function by
+    // that name exists anywhere in this vendored source; another stale
+    // instruct.md citation, corrected here rather than silently trusted).
+    // Persistent across pollLines() calls so a telnet sequence split
+    // across two separate TCP reads still parses correctly.
+    enum class TelnetState { Data, Iac, Will, Wont, Do, Dont, Sb, SbIac };
+    void processTelnetBytes(const std::string& raw, std::string& plainOut);
+    void handleNegotiation(TelnetState kind, unsigned char option);
+    void handleSubnegotiation();
+
     int fd_;
     std::string inputBuffer_;
     std::shared_ptr<LpcObject> boundObject_;
@@ -114,6 +142,11 @@ private:
     std::optional<PendingInputTo> pendingInputTo_;
     std::optional<Value> pendingNotifyFail_;
     std::time_t lastActivityTime_ = 0;
+    TelnetState telnetState_ = TelnetState::Data;
+    std::string sbBuffer_;
+    bool echoSuppressed_ = false;
+    int terminalWidth_ = 0;
+    int terminalHeight_ = 0;
 };
 
 } // namespace lpcdriver

@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <sstream>
 #include <chrono>
 #include <thread>
@@ -5529,6 +5530,289 @@ static void testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed() {
 
     std::cout << "testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed OK\n";
 }
+
+// --- telnet IAC negotiation, echo suppression, NAWS (Phase 0.8) ----------
+// AF_UNIX socketpair, same convention as the rest of this file's net
+// tests: fds[0] is what Connection reads from, fds[1] stands in for the
+// remote client -- writing to fds[1] simulates bytes arriving from the
+// client, reading fds[1] observes what the driver sent back.
+
+namespace {
+// Connection::pollLines()'s own read() loop treats EAGAIN/EWOULDBLOCK as
+// "no more data right now", matching real non-blocking socket handling --
+// but a plain socketpair() fd is blocking by default, so pollLines() would
+// hang on its own second read() once the first drains whatever was
+// written, unless the fd is put in non-blocking mode first, exactly like
+// Server::onNewConnection() already does for a real accepted connection
+// (setNonBlocking()) before ever constructing a Connection over it.
+void makeNonBlocking(int fd) {
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+std::string readAvailable(int fd) {
+    // A plain socketpair() fd is blocking by default -- without this, a
+    // "nothing was sent back" assertion would hang forever waiting for
+    // bytes that are never coming, rather than correctly observing zero.
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    std::string out;
+    char buf[256];
+    for (;;) {
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        out.append(buf, static_cast<size_t>(n));
+    }
+    return out;
+}
+}  // namespace
+
+static void testIacSequencesAreStrippedAndNeverReachDispatchedLines() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    // IAC WILL <99 = unsupported> "hel" IAC DO <99> "lo\n"
+    std::string raw;
+    raw += '\xff'; raw += '\xfb'; raw += '\x63';  // IAC WILL 99
+    raw += "hel";
+    raw += '\xff'; raw += '\xfd'; raw += '\x63';  // IAC DO 99
+    raw += "lo\n";
+    ::write(fds[1], raw.data(), raw.size());
+
+    auto lines = conn.pollLines();
+    assert(lines.size() == 1);
+    assert(lines[0] == "hello");
+    for (unsigned char c : lines[0]) assert(c != 0xff);
+
+    std::cout << "testIacSequencesAreStrippedAndNeverReachDispatchedLines OK\n";
+}
+
+static void testIacIacIsAnEscapedLiteral0xffDataByteNotACommand() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    std::string raw = "a";
+    raw += '\xff'; raw += '\xff';  // IAC IAC -> literal 0xff
+    raw += "b\n";
+    ::write(fds[1], raw.data(), raw.size());
+
+    auto lines = conn.pollLines();
+    assert(lines.size() == 1);
+    assert(lines[0].size() == 3);
+    assert(lines[0][0] == 'a');
+    assert(static_cast<unsigned char>(lines[0][1]) == 0xff);
+    assert(lines[0][2] == 'b');
+
+    std::cout << "testIacIacIsAnEscapedLiteral0xffDataByteNotACommand OK\n";
+}
+
+static void testTelnetWillEchoAndNawsAreSilentlyAcceptedOtherOptionsRefused() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    // IAC WILL ECHO, IAC WILL NAWS: both silently accepted, no reply.
+    std::string raw1;
+    raw1 += '\xff'; raw1 += '\xfb'; raw1 += '\x01';  // IAC WILL ECHO(1)
+    raw1 += '\xff'; raw1 += '\xfb'; raw1 += '\x1f';  // IAC WILL NAWS(31)
+    ::write(fds[1], raw1.data(), raw1.size());
+    conn.pollLines();
+    assert(readAvailable(fds[1]).empty());
+
+    // IAC WILL <99>: unsupported, real default branch refuses with DONT.
+    std::string raw2;
+    raw2 += '\xff'; raw2 += '\xfb'; raw2 += '\x63';  // IAC WILL 99
+    ::write(fds[1], raw2.data(), raw2.size());
+    conn.pollLines();
+    std::string reply = readAvailable(fds[1]);
+    assert(reply.size() == 3);
+    assert(static_cast<unsigned char>(reply[0]) == 0xff);
+    assert(static_cast<unsigned char>(reply[1]) == 254);  // DONT
+    assert(static_cast<unsigned char>(reply[2]) == 99);
+
+    std::cout << "testTelnetWillEchoAndNawsAreSilentlyAcceptedOtherOptionsRefused OK\n";
+}
+
+static void testTelnetDoEchoIsSilentlyAcceptedOtherOptionsRefusedWithWont() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    std::string raw1;
+    raw1 += '\xff'; raw1 += '\xfd'; raw1 += '\x01';  // IAC DO ECHO
+    ::write(fds[1], raw1.data(), raw1.size());
+    conn.pollLines();
+    assert(readAvailable(fds[1]).empty());
+
+    std::string raw2;
+    raw2 += '\xff'; raw2 += '\xfd'; raw2 += '\x63';  // IAC DO 99
+    ::write(fds[1], raw2.data(), raw2.size());
+    conn.pollLines();
+    std::string reply = readAvailable(fds[1]);
+    assert(reply.size() == 3);
+    assert(static_cast<unsigned char>(reply[0]) == 0xff);
+    assert(static_cast<unsigned char>(reply[1]) == 252);  // WONT
+    assert(static_cast<unsigned char>(reply[2]) == 99);
+
+    std::cout << "testTelnetDoEchoIsSilentlyAcceptedOtherOptionsRefusedWithWont OK\n";
+}
+
+static void testNawsSubnegotiationUpdatesTerminalWidthAndHeight() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    assert(conn.terminalWidth() == 0 && conn.terminalHeight() == 0);
+
+    // IAC SB NAWS <w1><w2><h1><h2> IAC SE -- 132x43, matching a real
+    // client's own typical negotiated value, not a round/suspicious one.
+    std::string raw;
+    raw += '\xff'; raw += '\xfa'; raw += '\x1f';  // IAC SB NAWS
+    raw += static_cast<char>(0);  raw += static_cast<char>(132);  // width = 132
+    raw += static_cast<char>(0);  raw += static_cast<char>(43);   // height = 43
+    raw += '\xff'; raw += '\xf0';  // IAC SE
+    ::write(fds[1], raw.data(), raw.size());
+    conn.pollLines();
+
+    assert(conn.terminalWidth() == 132);
+    assert(conn.terminalHeight() == 43);
+
+    std::cout << "testNawsSubnegotiationUpdatesTerminalWidthAndHeight OK\n";
+}
+
+static void testNawsSubnegotiationSplitAcrossTwoReadsStillParsesCorrectly() {
+    // Persistent state machine check: a real TCP stream can split any
+    // telnet sequence across separate read()s. Splitting mid-subnegotiation
+    // is the sharpest case (SB, IAC, and SE are all real, distinct states).
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    std::string part1;
+    part1 += '\xff'; part1 += '\xfa'; part1 += '\x1f';  // IAC SB NAWS
+    part1 += static_cast<char>(0); part1 += static_cast<char>(80);  // width = 80
+    ::write(fds[1], part1.data(), part1.size());
+    conn.pollLines();  // no line yet, but state must persist
+    assert(conn.terminalWidth() == 0);  // subneg not finished yet
+
+    std::string part2;
+    part2 += static_cast<char>(0); part2 += static_cast<char>(24);  // height = 24
+    part2 += '\xff'; part2 += '\xf0';  // IAC SE
+    ::write(fds[1], part2.data(), part2.size());
+    conn.pollLines();
+
+    assert(conn.terminalWidth() == 80);
+    assert(conn.terminalHeight() == 24);
+
+    std::cout << "testNawsSubnegotiationSplitAcrossTwoReadsStillParsesCorrectly OK\n";
+}
+
+static void testQueryScreenWidthAndHeightReturnNegotiatedValues() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qswtest.c",
+        "int probe_w(object ob) { return query_screen_width(ob); }\n"
+        "int probe_h(object ob) { return query_screen_height(ob); }\n");
+    auto ob = harness.objects.cloneObject("/qswtest");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    conn.attach(ob);
+
+    std::string raw;
+    raw += '\xff'; raw += '\xfa'; raw += '\x1f';
+    raw += static_cast<char>(0); raw += static_cast<char>(100);
+    raw += static_cast<char>(0); raw += static_cast<char>(40);
+    raw += '\xff'; raw += '\xf0';
+    ::write(fds[1], raw.data(), raw.size());
+    conn.pollLines();
+
+    lpcdriver::Value w = harness.vm.callFunction(ob, "probe_w", {lpcdriver::Value(ob)});
+    lpcdriver::Value h = harness.vm.callFunction(ob, "probe_h", {lpcdriver::Value(ob)});
+    assert(std::get<int64_t>(w.data) == 100);
+    assert(std::get<int64_t>(h.data) == 40);
+
+    std::cout << "testQueryScreenWidthAndHeightReturnNegotiatedValues OK\n";
+}
+
+static void testInputToNoEchoFlagSendsIacWillEchoImmediately() {
+    ObjectVarHarness harness;
+    harness.writeFile("/noechotest.c",
+        "void start() { input_to(\"get_pw\", 1); }\n"
+        "void get_pw(string str) {}\n");
+    auto ob = harness.objects.cloneObject("/noechotest");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    conn.attach(ob);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(ob, "start", {});
+    lpcdriver::OutputContext::set(nullptr);
+
+    std::string reply = readAvailable(fds[1]);
+    assert(reply.size() == 3);
+    assert(static_cast<unsigned char>(reply[0]) == 0xff);
+    assert(static_cast<unsigned char>(reply[1]) == 251);  // WILL
+    assert(static_cast<unsigned char>(reply[2]) == 1);    // ECHO
+
+    std::cout << "testInputToNoEchoFlagSendsIacWillEchoImmediately OK\n";
+}
+
+static void testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives() {
+    ObjectVarHarness harness;
+    harness.writeFile("/noecho2test.c",
+        "void start() { input_to(\"get_pw\", 1); }\n"
+        "void get_pw(string str) {}\n");
+    auto ob = harness.objects.cloneObject("/noecho2test");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    conn.attach(ob);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(ob, "start", {});
+    lpcdriver::OutputContext::set(nullptr);
+    readAvailable(fds[1]);  // drain the WILL ECHO from registration
+
+    ::write(fds[1], "secret\n", 7);
+    auto lines = conn.pollLines();
+    assert(lines.size() == 1 && lines[0] == "secret");
+
+    std::string reply = readAvailable(fds[1]);
+    assert(reply.size() == 3);
+    assert(static_cast<unsigned char>(reply[0]) == 0xff);
+    assert(static_cast<unsigned char>(reply[1]) == 252);  // WONT
+    assert(static_cast<unsigned char>(reply[2]) == 1);    // ECHO
+
+    std::cout << "testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives OK\n";
+}
+
+// Not tested directly: the "IAC DO NAWS sent from Server::onNewConnection()"
+// trigger itself. onNewConnection() is private, deliberately outside this
+// driver's established test seam (Server::dispatchLine()/
+// fireNetDeadIfLinkDead() are the two methods pulled out static and public
+// specifically so tests do not need a live accept loop -- see their own
+// comments in Server.hpp). The byte sequence and subnegotiation parsing it
+// triggers are fully covered by the Connection-level tests above; only the
+// one-line call site in Server.cpp itself is unverified by a regression
+// test.
 
 static void testSqrtNegativeArgThrows() {
     // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
@@ -11973,6 +12257,15 @@ int main() {
     testShadowDeniedWhenMasterHasNoValidShadowApproval();
     testShadowQueryFormAndQueryShadowingReturnBothDirectionsOrZero();
     testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed();
+    testIacSequencesAreStrippedAndNeverReachDispatchedLines();
+    testIacIacIsAnEscapedLiteral0xffDataByteNotACommand();
+    testTelnetWillEchoAndNawsAreSilentlyAcceptedOtherOptionsRefused();
+    testTelnetDoEchoIsSilentlyAcceptedOtherOptionsRefusedWithWont();
+    testNawsSubnegotiationUpdatesTerminalWidthAndHeight();
+    testNawsSubnegotiationSplitAcrossTwoReadsStillParsesCorrectly();
+    testQueryScreenWidthAndHeightReturnNegotiatedValues();
+    testInputToNoEchoFlagSendsIacWillEchoImmediately();
+    testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();
