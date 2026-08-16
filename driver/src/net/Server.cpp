@@ -4,6 +4,7 @@
 #include "lpcdriver/object/ObjectManager.hpp"
 #include "lpcdriver/object/LpcObject.hpp"
 #include "lpcdriver/net/OutputContext.hpp"
+#include "lpcdriver/net/SocketRegistry.hpp"
 #include "lpcdriver/core/Errors.hpp"
 
 #include <iostream>
@@ -13,6 +14,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <poll.h>
 #include <algorithm>
 
 namespace lpcdriver {
@@ -22,6 +25,51 @@ bool setNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return false;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+// string|function dispatch shared by every socket callback -- the exact
+// same two-shape Value dispatchLine() already uses just below for
+// notify_fail()'s own pending message/closure. A destructed owner
+// (weak_ptr lock() failure) silently drops the callback rather than
+// erroring, matching PendingInputTo's own established O_DESTRUCTED
+// handling (see LpcSocket.hpp's own comment on LpcSocket::owner).
+void fireSocketCallback(VM& vm, const Value& callback, const std::weak_ptr<LpcObject>& owner,
+                         std::vector<Value> args) {
+    if (std::holds_alternative<std::monostate>(callback.data)) return;
+    if (auto* closure = std::get_if<std::shared_ptr<Closure>>(&callback.data)) {
+        if (!*closure) return;
+        try {
+            vm.callClosure(*closure, std::move(args));
+        } catch (const std::exception& e) {
+            std::cerr << "[net] socket closure callback failed: " << e.what() << "\n";
+        }
+        return;
+    }
+    if (auto* name = std::get_if<std::string>(&callback.data)) {
+        auto ob = owner.lock();
+        if (!ob) return;
+        try {
+            vm.callFunction(ob, *name, std::move(args));
+        } catch (const std::exception& e) {
+            std::cerr << "[net] socket callback " << *name << "() failed: " << e.what() << "\n";
+        }
+    }
+}
+
+// Real "flags |= S_LINKDEAD; socket_close(fd, SC_FORCE | SC_DO_CALLBACK |
+// SC_FINAL_CLOSE);" -- the driver-detected side of a socket going away
+// (peer EOF, a read/write error), as opposed to the LPC-initiated
+// SocketRegistry::close() path, which never fires close_callback (see
+// SocketRegistry.hpp's own comment on why). sock is a local shared_ptr
+// copy from SocketRegistry::all(), so it stays valid for the fire below
+// even after SocketRegistry::forceRemove() erases the registry's own
+// entry.
+void closeSocketAndFireCallback(VM& vm, const std::shared_ptr<LpcSocket>& sock) {
+    Value cb = sock->closeCallback;
+    std::weak_ptr<LpcObject> owner = sock->owner;
+    int handle = sock->handle;
+    SocketRegistry::forceRemove(handle);
+    fireSocketCallback(vm, cb, owner, {Value(static_cast<int64_t>(handle))});
 }
 }
 
@@ -299,6 +347,115 @@ void Server::fireNetDeadIfLinkDead(VM& vm, Connection& conn) {
     OutputContext::set(nullptr);
 }
 
+void Server::pollSockets(VM& vm) {
+    for (auto& sock : SocketRegistry::all()) {
+        if (sock->fd < 0) continue;
+
+        if (sock->mode == SocketMode::Datagram) {
+            // Real read_socket_handler's own STATE_BOUND/DATAGRAM branch:
+            // datagram sockets are read-polled regardless of state (no
+            // DATA_XFER/connected concept for UDP) -- confirmed directly
+            // against socket_read_select_handler()'s own switch, which
+            // handles DATAGRAM identically whether STATE_BOUND or
+            // (unreachable for datagram) otherwise.
+            pollfd pfd{sock->fd, POLLIN, 0};
+            if (::poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) continue;
+            char buf[2048];
+            sockaddr_in peer{};
+            socklen_t peerLen = sizeof(peer);
+            ssize_t n = ::recvfrom(sock->fd, buf, sizeof(buf) - 1, 0,
+                                    reinterpret_cast<sockaddr*>(&peer), &peerLen);
+            if (n <= 0) continue;
+            buf[n] = '\0';
+            std::string addr = std::string(::inet_ntoa(peer.sin_addr)) + " " +
+                                std::to_string(ntohs(peer.sin_port));
+            // Real: push_number(fd); push string; push addr;
+            // call_callback(fd, S_READ_FP, 3) -- three args.
+            fireSocketCallback(vm, sock->readCallback, sock->owner,
+                {Value(static_cast<int64_t>(sock->handle)), Value(std::string(buf)), Value(addr)});
+            continue;
+        }
+
+        if (sock->state == SocketState::Listen) {
+            // Real S_WACCEPT: only re-arm/re-fire once socket_accept()
+            // actually consumes the pending connection.
+            if (sock->acceptPending) continue;
+            pollfd pfd{sock->fd, POLLIN, 0};
+            if (::poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) continue;
+            sock->acceptPending = true;
+            // Real: push_number(fd); call_callback(fd, S_READ_FP, 1) --
+            // one arg, the listening socket's own handle, not a new one
+            // (socket_accept() itself, called from LPC in response, is
+            // what actually performs accept() and returns the new
+            // handle -- see SocketRegistry::accept()).
+            fireSocketCallback(vm, sock->readCallback, sock->owner,
+                {Value(static_cast<int64_t>(sock->handle))});
+            continue;
+        }
+
+        if (sock->state != SocketState::DataXfer) continue;
+
+        short events = POLLIN;
+        if (sock->blocked) events |= POLLOUT;
+        pollfd pfd{sock->fd, events, 0};
+        if (::poll(&pfd, 1, 0) <= 0) continue;
+
+        if (pfd.revents & POLLIN) {
+            char buf[4096];
+            ssize_t n = ::read(sock->fd, buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                // Real: push_number(fd); push string; call_callback(fd,
+                // S_READ_FP, 2) -- two args for STREAM (MUD mode's own
+                // three-arg svalue form is not implemented, see
+                // LpcSocket.hpp's own SocketMode comment).
+                fireSocketCallback(vm, sock->readCallback, sock->owner,
+                    {Value(static_cast<int64_t>(sock->handle)), Value(std::string(buf))});
+            } else if (n == 0) {
+                // Peer closed cleanly. Real socket_read_select_handler()
+                // itself does nothing special on cc<=0 (just breaks out
+                // of its switch); the actual close/close_callback firing
+                // for a dead peer happens elsewhere in real comm.c's own
+                // outer select loop, outside socket_efuns.c's scope this
+                // driver has vendored source for. Closing here on a
+                // clean EOF (rather than leaving the socket to spin
+                // forever re-detecting the same readable-with-nothing-
+                // to-read state) is a deliberate, pragmatic choice for
+                // this driver, not a literal port of unread reference
+                // code.
+                closeSocketAndFireCallback(vm, sock);
+                continue;
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                closeSocketAndFireCallback(vm, sock);
+                continue;
+            }
+        }
+
+        if ((pfd.revents & POLLOUT) && sock->blocked) {
+            if (!sock->pendingWrite.empty()) {
+                ssize_t off = ::write(sock->fd, sock->pendingWrite.data(), sock->pendingWrite.size());
+                if (off > 0) {
+                    sock->pendingWrite.erase(0, static_cast<size_t>(off));
+                } else if (off < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    closeSocketAndFireCallback(vm, sock);
+                    continue;
+                }
+            }
+            if (sock->pendingWrite.empty()) {
+                // Real socket_write_select_handler(): "flags &=
+                // ~S_BLOCKED; ... call_callback(fd, S_WRITE_FP, 1);" --
+                // fires identically whether this was a flushed partial
+                // write or a completed non-blocking connect() (both set
+                // S_BLOCKED the same way; see SocketRegistry::connect()'s
+                // own comment).
+                sock->blocked = false;
+                fireSocketCallback(vm, sock->writeCallback, sock->owner,
+                    {Value(static_cast<int64_t>(sock->handle))});
+            }
+        }
+    }
+}
+
 void Server::handleConnection(Connection& conn) {
     auto lines = conn.pollLines();
 
@@ -359,6 +516,8 @@ void Server::pollOnce() {
             handleConnection(*conn);
         }
     }
+
+    pollSockets(vm_);
 
     connections_.erase(
         std::remove_if(connections_.begin(), connections_.end(),

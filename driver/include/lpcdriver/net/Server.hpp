@@ -53,6 +53,22 @@ public:
     // simplification, not assumed equivalent.
     static void fireNetDeadIfLinkDead(VM& vm, Connection& conn);
 
+    // Row 0.10's own async half: every LPC efun socket currently
+    // registered in SocketRegistry gets a non-blocking readiness check
+    // (select()) each call, and any event found fires the matching LPC
+    // callback (read_callback/write_callback/close_callback) via this
+    // VM& -- the deferred counterpart to SocketRegistry's own
+    // synchronous, efun-triggered half (create/bind/listen/accept/
+    // connect/write/close), mirroring the exact Connection/Server split
+    // window_size() already established: SocketRegistry (like
+    // Connection) never touches a VM directly, only Server does. Pulled
+    // out static and public, taking only a VM& (SocketRegistry itself is
+    // a global registry, no Server instance state needed either) for the
+    // same reason dispatchLine()/fireNetDeadIfLinkDead() are: a real
+    // regression test can drive this directly over a socketpair-backed
+    // LpcSocket, no live accept loop required.
+    static void pollSockets(VM& vm);
+
 private:
     void acceptNewConnections();
     void handleConnection(Connection& conn);

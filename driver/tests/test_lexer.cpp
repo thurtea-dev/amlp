@@ -14,6 +14,7 @@
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Server.hpp"
 #include "lpcdriver/net/InteractiveRegistry.hpp"
+#include "lpcdriver/net/SocketRegistry.hpp"
 #include "lpcdriver/scheduler/Scheduler.hpp"
 #include <cassert>
 #include <iostream>
@@ -27,6 +28,7 @@
 #include <sstream>
 #include <chrono>
 #include <thread>
+#include <functional>
 
 static void testBasicTokenize() {
     std::string src =
@@ -5967,6 +5969,249 @@ static void testTerminalColourMultipleRealCodesInOneString() {
            "\x1b[1m\x1b[32mok\x1b[0m \x1b[36mbye\x1b[0m");
 
     std::cout << "testTerminalColourMultipleRealCodesInOneString OK\n";
+}
+
+// --- socket_* efun family (ROADMAP row 0.10) -----------------------------
+// Real signatures/state machine/error codes/callback argument conventions
+// verified against fluffos-2.9-ds2.08/socket_efuns.c and socket_efuns.h --
+// see EfunTable.cpp's own comment on the registration block for the full
+// citation trail and net/instruct.md corrections. Server::pollSockets()
+// is static and takes only a VM& (SocketRegistry is a global registry,
+// same as InteractiveRegistry), so these tests drive the async
+// read/write/accept/close callback machinery directly, with no live
+// accept loop or listening Server instance needed -- the same test seam
+// dispatchLine()/fireNetDeadIfLinkDead() already established.
+
+// Real sockets are non-blocking and event-driven even on loopback --
+// pollSockets() needs to be called repeatedly until the OS actually
+// delivers the event (a loopback connect()/accept() is normally near-
+// instant, but never synchronous). Bounded so a genuine regression hangs
+// the test suite for at most ~1 second rather than forever.
+static void pollSocketsUntil(lpcdriver::VM& vm, const std::function<bool()>& done) {
+    for (int i = 0; i < 200 && !done(); ++i) {
+        lpcdriver::Server::pollSockets(vm);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+static void testSocketCreateRejectsUnsupportedModesAndReturnsIncreasingHandles() {
+    ObjectVarHarness harness;
+    harness.writeFile("/socktest_modes.c",
+        "int make(int mode) { return socket_create(mode, \"cb\", 0); }\n"
+        "void cb(int fd, string msg) {}\n");
+    auto ob = harness.objects.cloneObject("/socktest_modes");
+    assert(ob != nullptr);
+
+    // MUD (0), STREAM_BINARY (3), DATAGRAM_BINARY (4) are real modes
+    // (socket_efuns.h's own enum) but unimplemented here -- see
+    // LpcSocket.hpp's own SocketMode comment. Each must reject with
+    // SocketErr::EModeNotSupp (-12), matching real socket_create()'s own
+    // "default: return EEMODENOTSUPP;" for any mode outside its switch.
+    lpcdriver::Value mud = harness.vm.callFunction(ob, "make", {lpcdriver::Value(static_cast<int64_t>(0))});
+    lpcdriver::Value streamBinary = harness.vm.callFunction(ob, "make", {lpcdriver::Value(static_cast<int64_t>(3))});
+    lpcdriver::Value datagramBinary = harness.vm.callFunction(ob, "make", {lpcdriver::Value(static_cast<int64_t>(4))});
+    assert(std::get<int64_t>(mud.data) == lpcdriver::SocketErr::EModeNotSupp);
+    assert(std::get<int64_t>(streamBinary.data) == lpcdriver::SocketErr::EModeNotSupp);
+    assert(std::get<int64_t>(datagramBinary.data) == lpcdriver::SocketErr::EModeNotSupp);
+
+    // STREAM (1) is real and implemented -- handles are a monotonic
+    // counter, never reused, per net/instruct.md's own explicit "Key
+    // invariants" for this row.
+    lpcdriver::Value h1 = harness.vm.callFunction(ob, "make", {lpcdriver::Value(static_cast<int64_t>(1))});
+    lpcdriver::Value h2 = harness.vm.callFunction(ob, "make", {lpcdriver::Value(static_cast<int64_t>(1))});
+    assert(std::get<int64_t>(h1.data) >= 0);
+    assert(std::get<int64_t>(h2.data) > std::get<int64_t>(h1.data));
+
+    std::cout << "testSocketCreateRejectsUnsupportedModesAndReturnsIncreasingHandles OK\n";
+}
+
+static void testSocketWriteOnUnknownHandleReturnsFdRangeAndErrorTextMatchesReal() {
+    ObjectVarHarness harness;
+    harness.writeFile("/socktest_err.c",
+        "int write_to(int fd, string msg) { return socket_write(fd, msg); }\n"
+        "string err(int e) { return socket_error(e); }\n");
+    auto ob = harness.objects.cloneObject("/socktest_err");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r = harness.vm.callFunction(ob, "write_to",
+        {lpcdriver::Value(static_cast<int64_t>(99999)), lpcdriver::Value(std::string("x"))});
+    assert(std::get<int64_t>(r.data) == lpcdriver::SocketErr::EFdRange);
+
+    // Real error_strings[] (socket_err.c), same text, same "-(error+1)"
+    // index formula, confirmed directly.
+    lpcdriver::Value s1 = harness.vm.callFunction(ob, "err",
+        {lpcdriver::Value(static_cast<int64_t>(lpcdriver::SocketErr::EFdRange))});
+    assert(std::get<std::string>(s1.data) == "Descriptor out of range");
+    lpcdriver::Value s2 = harness.vm.callFunction(ob, "err",
+        {lpcdriver::Value(static_cast<int64_t>(lpcdriver::SocketErr::EModeNotSupp))});
+    assert(std::get<std::string>(s2.data) == "Socket mode not supported");
+
+    std::cout << "testSocketWriteOnUnknownHandleReturnsFdRangeAndErrorTextMatchesReal OK\n";
+}
+
+static void testSocketStreamCreateBindListenAcceptConnectWriteReadCloseRoundTrip() {
+    ObjectVarHarness harness;
+    harness.writeFile("/socktest_stream.c",
+        "int server_fd; int accepted_fd = -1; int accept_fired;\n"
+        "string server_received = \"\";\n"
+        "int client_fd; int client_write_fired; string client_received = \"\";\n"
+        "\n"
+        "int start_server(int port) {\n"
+        "    server_fd = socket_create(1, \"on_listen_readable\", 0);\n"
+        "    if (server_fd < 0) return server_fd;\n"
+        "    if (socket_bind(server_fd, port) != 1) return -100;\n"
+        "    if (socket_listen(server_fd, \"on_listen_readable\") != 1) return -101;\n"
+        "    return server_fd;\n"
+        "}\n"
+        "void on_listen_readable(int fd) { accept_fired = 1; }\n"
+        "int do_accept() {\n"
+        "    accepted_fd = socket_accept(server_fd, \"on_server_read\", \"on_server_write\");\n"
+        "    return accepted_fd;\n"
+        "}\n"
+        "void on_server_read(int fd, string msg) { server_received = msg; }\n"
+        "void on_server_write(int fd) {}\n"
+        "int start_client(string addr) {\n"
+        "    client_fd = socket_create(1, \"on_client_read\", 0);\n"
+        "    return socket_connect(client_fd, addr, \"on_client_read\", \"on_client_write\");\n"
+        "}\n"
+        "void on_client_write(int fd) { client_write_fired = 1; }\n"
+        "void on_client_read(int fd, string msg) { client_received = msg; }\n"
+        "int send_client_msg(string msg) { return socket_write(client_fd, msg); }\n"
+        "int send_server_reply(string msg) { return socket_write(accepted_fd, msg); }\n"
+        "int close_client() { return socket_close(client_fd); }\n"
+        "int close_server() { return socket_close(server_fd); }\n"
+        "int get_accept_fired() { return accept_fired; }\n"
+        "int get_client_write_fired() { return client_write_fired; }\n"
+        "string get_server_received() { return server_received; }\n"
+        "string get_client_received() { return client_received; }\n"
+        "int get_accepted_fd() { return accepted_fd; }\n");
+    auto ob = harness.objects.cloneObject("/socktest_stream");
+    assert(ob != nullptr);
+    auto& vm = harness.vm;
+
+    // port 0: let the OS pick a free ephemeral port, then read the real
+    // bound port straight back out of the registry -- no fixed port
+    // number to collide with anything else on the test machine.
+    lpcdriver::Value serverResult = vm.callFunction(ob, "start_server", {lpcdriver::Value(static_cast<int64_t>(0))});
+    int serverFd = static_cast<int>(std::get<int64_t>(serverResult.data));
+    assert(serverFd >= 0);
+    auto serverSock = lpcdriver::SocketRegistry::find(serverFd);
+    assert(serverSock != nullptr);
+    assert(serverSock->localPort > 0);
+
+    std::string addr = "127.0.0.1 " + std::to_string(serverSock->localPort);
+    lpcdriver::Value connectResult = vm.callFunction(ob, "start_client", {lpcdriver::Value(addr)});
+    assert(std::get<int64_t>(connectResult.data) == lpcdriver::SocketErr::Success);
+
+    pollSocketsUntil(vm, [&] {
+        return std::get<int64_t>(vm.callFunction(ob, "get_accept_fired", {}).data) == 1;
+    });
+    assert(std::get<int64_t>(vm.callFunction(ob, "get_accept_fired", {}).data) == 1);
+
+    lpcdriver::Value acceptResult = vm.callFunction(ob, "do_accept", {});
+    int acceptedFd = static_cast<int>(std::get<int64_t>(acceptResult.data));
+    assert(acceptedFd >= 0);
+
+    // The client's own write_callback is real FluffOS's own "connect
+    // complete" signal (see SocketRegistry::connect()'s own comment) --
+    // socket_write() must wait for it, exactly like real LPC code does
+    // (see lib/secure/std/client.c's own eventReadCallback/write-after-
+    // connect pattern).
+    pollSocketsUntil(vm, [&] {
+        return std::get<int64_t>(vm.callFunction(ob, "get_client_write_fired", {}).data) == 1;
+    });
+    assert(std::get<int64_t>(vm.callFunction(ob, "get_client_write_fired", {}).data) == 1);
+
+    lpcdriver::Value writeResult = vm.callFunction(ob, "send_client_msg", {lpcdriver::Value(std::string("hello server"))});
+    assert(std::get<int64_t>(writeResult.data) == lpcdriver::SocketErr::Success);
+
+    pollSocketsUntil(vm, [&] {
+        return !std::get<std::string>(vm.callFunction(ob, "get_server_received", {}).data).empty();
+    });
+    assert(std::get<std::string>(vm.callFunction(ob, "get_server_received", {}).data) == "hello server");
+
+    lpcdriver::Value replyResult = vm.callFunction(ob, "send_server_reply", {lpcdriver::Value(std::string("hello client"))});
+    assert(std::get<int64_t>(replyResult.data) == lpcdriver::SocketErr::Success);
+
+    pollSocketsUntil(vm, [&] {
+        return !std::get<std::string>(vm.callFunction(ob, "get_client_received", {}).data).empty();
+    });
+    assert(std::get<std::string>(vm.callFunction(ob, "get_client_received", {}).data) == "hello client");
+
+    // Real plain LPC-initiated socket_close(fd): succeeds (EESUCCESS),
+    // and the fd is gone from the registry entirely afterward.
+    lpcdriver::Value closeClientResult = vm.callFunction(ob, "close_client", {});
+    assert(std::get<int64_t>(closeClientResult.data) == lpcdriver::SocketErr::Success);
+    lpcdriver::Value closeServerResult = vm.callFunction(ob, "close_server", {});
+    assert(std::get<int64_t>(closeServerResult.data) == lpcdriver::SocketErr::Success);
+
+    // The accepted socket's own peer (the client) just closed -- a poll-
+    // detected EOF must eventually remove it from the registry too
+    // (Server::pollSockets()'s own closeSocketAndFireCallback() path).
+    pollSocketsUntil(vm, [&] {
+        return lpcdriver::SocketRegistry::find(acceptedFd) == nullptr;
+    });
+    assert(lpcdriver::SocketRegistry::find(acceptedFd) == nullptr);
+
+    // A write to a now-fully-closed handle is exactly the unknown-handle
+    // case: SocketErr::EFdRange.
+    lpcdriver::Value postCloseWrite = vm.callFunction(ob, "send_client_msg", {lpcdriver::Value(std::string("x"))});
+    assert(std::get<int64_t>(postCloseWrite.data) == lpcdriver::SocketErr::EFdRange);
+
+    std::cout << "testSocketStreamCreateBindListenAcceptConnectWriteReadCloseRoundTrip OK\n";
+}
+
+static void testSocketDatagramWriteAndReadCallbackCarriesSenderAddress() {
+    ObjectVarHarness harness;
+    harness.writeFile("/socktest_dgram.c",
+        "int a_fd; int b_fd; string b_received = \"\"; string b_from = \"\";\n"
+        "int make_a() { a_fd = socket_create(2, \"noop\", 0); return socket_bind(a_fd, 0); }\n"
+        "int make_b() { b_fd = socket_create(2, \"on_b_read\", 0); return socket_bind(b_fd, 0); }\n"
+        "void noop(int fd, string msg, string addr) {}\n"
+        "void on_b_read(int fd, string msg, string addr) { b_received = msg; b_from = addr; }\n"
+        "int send_to_b(string addr, string msg) { return socket_write(a_fd, msg, addr); }\n"
+        "string get_b_received() { return b_received; }\n"
+        "string get_b_from() { return b_from; }\n"
+        "int get_b_fd() { return b_fd; }\n");
+    auto ob = harness.objects.cloneObject("/socktest_dgram");
+    assert(ob != nullptr);
+    auto& vm = harness.vm;
+
+    lpcdriver::Value makeA = vm.callFunction(ob, "make_a", {});
+    assert(std::get<int64_t>(makeA.data) == lpcdriver::SocketErr::Success);
+    lpcdriver::Value makeB = vm.callFunction(ob, "make_b", {});
+    assert(std::get<int64_t>(makeB.data) == lpcdriver::SocketErr::Success);
+
+    // b's actual bound ephemeral port is only known to SocketRegistry
+    // (never returned to LPC by socket_bind() itself, matching real
+    // socket_bind()'s own int-status-only return) -- read it straight
+    // back out via b's own handle (both a_fd and b_fd are datagram
+    // sockets bound to their own ephemeral ports, so this must key off
+    // b's specific handle rather than scanning for "a bound datagram
+    // socket", which could just as easily match a_fd).
+    int bFd = static_cast<int>(std::get<int64_t>(vm.callFunction(ob, "get_b_fd", {}).data));
+    auto bSock = lpcdriver::SocketRegistry::find(bFd);
+    assert(bSock != nullptr);
+    int bPort = bSock->localPort;
+    assert(bPort > 0);
+
+    std::string addr = "127.0.0.1 " + std::to_string(bPort);
+    lpcdriver::Value sendResult = vm.callFunction(ob, "send_to_b",
+        {lpcdriver::Value(addr), lpcdriver::Value(std::string("ping"))});
+    assert(std::get<int64_t>(sendResult.data) == lpcdriver::SocketErr::Success);
+
+    pollSocketsUntil(vm, [&] {
+        return !std::get<std::string>(vm.callFunction(ob, "get_b_received", {}).data).empty();
+    });
+    assert(std::get<std::string>(vm.callFunction(ob, "get_b_received", {}).data) == "ping");
+    // Real DATAGRAM read_callback's own third argument: "host port",
+    // built from recvfrom()'s own sender address -- confirmed here as a
+    // loopback address string, not asserting the exact ephemeral source
+    // port (which is real, but not deterministic across runs).
+    std::string from = std::get<std::string>(vm.callFunction(ob, "get_b_from", {}).data);
+    assert(from.rfind("127.0.0.1 ", 0) == 0);
+
+    std::cout << "testSocketDatagramWriteAndReadCallbackCarriesSenderAddress OK\n";
 }
 
 static void testSqrtNegativeArgThrows() {
@@ -12428,6 +12673,10 @@ int main() {
     testTerminalColourLeavesUnrecognizedTokensAndPlainTextAsIs();
     testTerminalColourWithNoMarkupReturnsStringUnchanged();
     testTerminalColourMultipleRealCodesInOneString();
+    testSocketCreateRejectsUnsupportedModesAndReturnsIncreasingHandles();
+    testSocketWriteOnUnknownHandleReturnsFdRangeAndErrorTextMatchesReal();
+    testSocketStreamCreateBindListenAcceptConnectWriteReadCloseRoundTrip();
+    testSocketDatagramWriteAndReadCallbackCarriesSenderAddress();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();

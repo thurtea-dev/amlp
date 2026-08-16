@@ -3,6 +3,130 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-19: `socket_*` efun family basics implemented (Phase 0 row 0.10).**
+`LpcSocket` (`include/lpcdriver/net/LpcSocket.hpp`), `SocketRegistry`
+(`src/net/SocketRegistry.cpp`), and `Server::pollSockets()` (a new static,
+publicly-testable method, same test-seam shape as `dispatchLine()`/
+`fireNetDeadIfLinkDead()`), plus nine registered efuns: `socket_create`,
+`socket_bind`, `socket_listen`, `socket_accept`, `socket_connect`,
+`socket_write`, `socket_close`, `socket_error`, `socket_status`.
+
+Read `fluffos-2.9-ds2.08/socket_efuns.c` and `socket_efuns.h` directly
+(the real C implementation) rather than trusting `net/instruct.md`'s own
+proposed design for this row, which turned out wrong on three points:
+
+1. It lists a `socket_read(int handle) -> mixed` efun. No such efun exists
+   anywhere in `efun_defs.c` (grepped directly) -- real sockets are purely
+   callback-driven; incoming data always arrives via `read_callback` firing
+   asynchronously, never via a synchronous read call. Not implemented,
+   because it is not real.
+2. Its proposed `socket_create(int type, string callback)` and
+   `socket_bind(int handle, int port)` both drop a real optional third
+   argument each actually has (`void|string close_callback`; `void|string
+   addr`) -- confirmed against `efun_defs.c`'s own `F_SOCKET_CREATE`/
+   `F_SOCKET_BIND` entries (2-3 args each). Implemented with the real
+   3-arg signatures.
+3. Its efun list omits `socket_listen` and `socket_accept` entirely, even
+   though a listening/accepting server socket cannot exist without both
+   (confirmed via `efun_defs.c`'s own `F_SOCKET_LISTEN`/`F_SOCKET_ACCEPT`
+   entries and `lib/daemon/network.c`'s real, non-doc call site).
+   Implemented, since "basics" cannot mean client-only.
+
+Real signature/error-code/callback-argument details confirmed directly,
+not assumed: `EESUCCESS` is `1`, not `0`; every real error code down to
+`socket_error()`'s own `error_strings[]` text (`socket_err.c`) is mirrored
+exactly; `read_callback` fires with 1 arg for a listening socket (`fd`,
+"a connection is waiting"), 2 args for STREAM data (`fd`, `msg`), and 3
+args for DATAGRAM data (`fd`, `msg`, `"host port"`); `write_callback`
+fires with 1 arg (`fd`) both when a partial write flushes and when a
+non-blocking `connect()` completes -- real FluffOS reuses the identical
+`S_BLOCKED`/`socket_write_select_handler()` mechanism for both, confirmed
+directly in `socket_efuns.c`, not assumed; a plain LPC-initiated
+`socket_close()` never fires `close_callback`, only a driver-detected
+async failure (peer EOF, a write error) does, matching real
+`SC_DO_CALLBACK`'s only internal call site.
+
+Not implemented, flagged rather than left silently absent: MUD mode
+(needs real `socket_write()`'s own arbitrary-LPC-value wire framing this
+driver has no equivalent for while `save_object()` still writes its own
+custom format, ROADMAP row 0.7); the two BINARY modes (no buffer type in
+this driver's `Value` at all, the same pre-existing gap already noted on
+`to_int()`'s own `T_BUFFER` case); `socket_release()`/`socket_acquire()`
+(object-to-object socket transfer, out of "basics" scope); DNS resolution
+for `socket_connect()`/`socket_bind()` addresses (numeric dotted-quad
+only, matching real `socket_name_to_sin()`'s own `inet_addr()`-only
+behavior, and this driver's pre-existing `query_ip_name()` precedent);
+real `STATE_FLUSHING` (`socket_close()` while a partial write is still
+draining closes immediately here rather than deferring, dropping any
+undelivered remainder); `close_referencing_sockets()` (a destructed
+object's still-open sockets are not force-closed, though they do stop
+firing callbacks once their owner is gone, matching `PendingInputTo`'s
+own established weak_ptr handling).
+
+Directly closes out two items from row 0.13's own efun-growth batch:
+`efun/instruct.md`'s own status table already listed both `socket_close`
+and `socket_write` as "belongs to row 0.10's `LpcSocket`/`SocketRegistry`
+subsystem, not a standalone efun" -- both fell out of this row's own
+implementation as-is, not as separately scoped extra work. Efun table is
+now 167 registered efuns total (up from the ~131 last recorded).
+
+4 new regression tests: unsupported-mode rejection (MUD/STREAM_BINARY/
+DATAGRAM_BINARY) plus monotonically increasing handles, unknown-handle
+`EFdRange` plus real `socket_error()` text, a full STREAM round trip
+(create/bind/listen/accept/connect/write/read/close, driven entirely
+through `Server::pollSockets()` over real loopback TCP sockets with an
+OS-assigned ephemeral port, no fixed port to collide with), and a
+DATAGRAM round trip confirming the real 3-argument `read_callback` and
+its sender-address argument. Full suite: 469 tests passing, up from 465,
+no regressions, stable across three consecutive runs.
+
+**2026-08-18: Full telnet IAC negotiation, echo suppression, NAWS,
+`window_size()`, and `terminal_colour()` implemented (Phase 0 row 0.8),
+closing it out across two sessions with no dated entry written for either
+until now.**
+
+Session one (IAC/echo/NAWS base): real IAC state machine confirmed against
+`comm.c`'s own `copy_chars()` -- not `telnet_neg()`, which does not exist
+anywhere in the vendored source; `net/instruct.md`'s own citation for this
+row was wrong. Echo suppression sends `IAC WILL ECHO` immediately on the
+`input_to()` `I_NOECHO` flag and `IAC WONT ECHO` the moment a full line is
+pulled off the buffer (not when the callback finishes, confirmed against
+real `get_user_command()`). NAWS is driver-initiated (`IAC DO NAWS` sent
+proactively in `onNewConnection()`, matching real `new_user()`, not
+client-initiated as `net/instruct.md` claimed); subnegotiation parsing
+fills `Connection::terminalWidth_`/`terminalHeight_`, exposed via new
+`query_screen_width()`/`query_screen_height()` efuns.
+
+Session two (this arc's own follow-up, `window_size()` +
+`terminal_colour()`): `window_size(int width, int height)` now fires on
+the connection's bound object every time a NAWS subnegotiation is parsed
+(real `APPLY_WINDOW_SIZE`, `comm.c`), via a one-shot `Connection` flag
+(`takeWindowSizeUpdate()`, the same shape as `takePendingInputTo()`)
+consumed by `Server::handleConnection()` -- additive, `query_screen_width()`/
+`query_screen_height()` unchanged. `terminal_colour(string str, mapping
+colours, void|int max_colors, void|int indent)` has no C reference
+implementation anywhere in the vendored tree (same gap as `debug_info`/
+`base_name`/`pluralize`), so it was grounded instead against two real,
+live implementations of the same `%^TOKEN%^` markup convention:
+`daemon/terminal.c`'s `no_colours()` and `std/user.c`'s `message()`, both
+of which split on the literal `"%^"` delimiter (not paired-wrapper
+parsing) and substitute/strip per segment. `indent` is accepted for
+signature compatibility only, not implemented. Flagged, not fixed: this
+driver's own `isTruthy()` treats an empty string as falsy, unlike real
+LPC, so a colour mapping using `""` as a disabled-colour placeholder
+(real `terminal.c`'s own "unknown" variant) will not be recognized here
+the way real `no_colours()` recognizes it.
+
+16 new regression tests across both sessions (9 telnet/echo/NAWS + 2
+`window_size` flag behavior + 5 `terminal_colour` mapping cases). Full
+suite: 465 tests passing, up from 449, no regressions. Known gap: the
+actual `window_size()`/NAWS-trigger apply-firing call sites inside
+`Server::handleConnection()`/`onNewConnection()` are untested directly --
+both are private methods, outside this driver's established test seam
+(only `dispatchLine()`/`fireNetDeadIfLinkDead()`, and now
+`pollSockets()`, are pulled out static and public); the flag/byte-parsing
+mechanics each one reads are fully covered instead.
+
 **2026-08-17: Shadow support implemented (Phase 0 row 0.6).** `shadow(object
 ob, int flag default 1)`, `query_shadowing(object)`, the real shadow-chain
 effect on `VM::callFunction()`'s resolution order, and shadow-aware cleanup

@@ -24,12 +24,12 @@ complete and the full test suite is passing with no regressions.**
 | 0.5 | Full `O_DESTRUCTED` apply guards on every cross-object call | `src/object` | [x] |
 | 0.6 | Shadow support: `shadow(ob, flag)` efun + shadow chain traversal | `src/object` | [x] |
 | 0.7 | `save_object`/`restore_object` in FluffOS `.o` text format | `src/efun` | [x] (partial: restore-side only; `save_object` still writes this driver's own custom format) |
-| 0.8 | Full telnet IAC negotiation, echo suppression, NAWS | `src/net` | [ ] |
+| 0.8 | Full telnet IAC negotiation, echo suppression, NAWS | `src/net` | [x] |
 | 0.9 | `map`/`filter`/`sort_array` as real closure consumers | `src/efun` | [x] (partial: all mudlib shapes covered) |
-| 0.10 | `socket_*` family basics (create/connect/write/read/close) | `src/net` + `src/efun` | [ ] |
+| 0.10 | `socket_*` family basics (create/connect/write/read/close) | `src/net` + `src/efun` | [x] (partial: STREAM/DATAGRAM only, no MUD mode or binary modes; no `socket_read` efun -- real FluffOS has none, reads are callback-only) |
 | 0.11 | `regexp`/`regexplode`/`reg_assoc` PCRE efuns | `src/efun` | [x] |
 | 0.12 | Every efun has at least one regression test | `tests` | [ ] (ongoing) |
-| 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: ~131 registered) |
+| 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: 167 registered) |
 
 ---
 
@@ -133,14 +133,14 @@ cmake --build driver/build
 ctest --test-dir driver/build --output-on-failure
 ```
 
-Current baseline: **449 tests passing** (as of 2026-08-17). Every new slice
+Current baseline: **469 tests passing** (as of 2026-08-19). Every new slice
 must pass the full suite before merging.
 
 ---
 
 ## Sequencing principle
 
-- **Never break the 374-test baseline.** All work is incremental slices.
+- **Never break the current test baseline** (see above). All work is incremental slices.
 - **Phase 0 before Phase 1.** A buggy foundation makes dialect work meaningless.
 - **Phase 1 before Phase 2.** Dialect abstraction unlocks concurrent dialect work.
 - **Read the instruct.md in the target directory first.** Each one lists exact

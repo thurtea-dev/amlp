@@ -6,6 +6,7 @@
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Connection.hpp"
 #include "lpcdriver/net/InteractiveRegistry.hpp"
+#include "lpcdriver/net/SocketRegistry.hpp"
 #include "lpcdriver/scheduler/Scheduler.hpp"
 #include <algorithm>
 #include <chrono>
@@ -3538,6 +3539,157 @@ void registerCoreEfuns() {
             return Value{};
         }
         return Value(std::string(buf));
+    });
+
+    // socket_* efun family (ROADMAP row 0.10). Signatures, mode/state
+    // values, error codes, and callback argument conventions verified
+    // directly against fluffos-2.9-ds2.08/socket_efuns.c and
+    // socket_efuns.h (the real C implementation, not net/instruct.md's
+    // own proposed design for this row -- see below for what instruct.md
+    // got wrong). Actual socket() family syscalls and state-machine logic
+    // live in SocketRegistry (mirroring how Connection, not EfunTable,
+    // owns telnet parsing); these registrations are thin arg-validation
+    // wrappers, matching every other net-layer efun in this file.
+    //
+    // net/instruct.md's own "What to build" list for this row (net/
+    // instruct.md's own text) does not match the real efun family in
+    // three ways, each corrected here rather than followed blindly, same
+    // as every previous row this pattern has shown up in:
+    // 1. It lists a `socket_read(int handle) -> mixed` efun. No such
+    //    efun exists anywhere in efun_defs.c (grepped directly) -- real
+    //    FluffOS sockets are purely callback-driven; incoming data always
+    //    arrives via read_callback firing asynchronously (see
+    //    Server::pollSockets()), never via a synchronous read call. Not
+    //    implemented, because it is not real.
+    // 2. Its proposed `socket_create(int type, string callback)` two-arg
+    //    shape and `socket_bind(int handle, int port)` shape both drop a
+    //    real optional third argument each actually has (void|string
+    //    close_callback; void|string addr) -- confirmed against
+    //    efun_defs.c's own F_SOCKET_CREATE (2-3 args) / F_SOCKET_BIND
+    //    (2-3 args). Implemented with the real 3-arg signatures.
+    // 3. Its efun list omits socket_listen and socket_accept entirely
+    //    (despite citing them nowhere) while real FluffOS's socket family
+    //    cannot open a listening/accepting server socket without both --
+    //    confirmed real via efun_defs.c's own F_SOCKET_LISTEN/
+    //    F_SOCKET_ACCEPT entries and lib/daemon/network.c's own live
+    //    (non-doc) socket_create()/socket_bind() call site. Implemented,
+    //    since "basics" cannot mean client-only.
+    //
+    // Not implemented, and flagged here rather than left silently absent:
+    // MUD mode (arbitrary-LPC-value socket_write, needs real wire framing
+    // this driver has no equivalent for -- see LpcSocket.hpp), the two
+    // BINARY modes (no buffer type in this driver's Value at all, the
+    // same pre-existing gap noted on to_int()'s own T_BUFFER case), and
+    // socket_release()/socket_acquire() (PACKAGE_SOCKETS-gated object-to-
+    // object socket transfer, out of "basics" scope, not cited by
+    // net/instruct.md either).
+
+    // int socket_create(int mode, string|function read_callback, void|string|function close_callback)
+    t.registerEfun("socket_create", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("socket_create: expected (int, string|function, void|string|function)");
+        }
+        int mode = static_cast<int>(std::get<int64_t>(args[0].data));
+        Value closeCb = args.size() > 2 ? args[2] : Value{};
+        int result = SocketRegistry::create(mode, args[1], closeCb, vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
+    // int socket_bind(int fd, int port, void|string addr)
+    t.registerEfun("socket_bind", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("socket_bind: expected (int, int, void|string)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        int port = static_cast<int>(std::get<int64_t>(args[1].data));
+        bool hasAddr = args.size() > 2 && std::holds_alternative<std::string>(args[2].data);
+        std::string addr = hasAddr ? std::get<std::string>(args[2].data) : std::string();
+        int result = SocketRegistry::bind(handle, port, addr, hasAddr, vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
+    // int socket_listen(int fd, string|function connect_callback)
+    t.registerEfun("socket_listen", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("socket_listen: expected (int, string|function)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        int result = SocketRegistry::listen(handle, args[1], vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
+    // int socket_accept(int fd, string|function read_callback, string|function write_callback)
+    t.registerEfun("socket_accept", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("socket_accept: expected (int, string|function, string|function)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        int result = SocketRegistry::accept(handle, args[1], args[2], vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
+    // int socket_connect(int fd, string address, string|function read_callback, string|function write_callback)
+    t.registerEfun("socket_connect", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 4 || !std::holds_alternative<int64_t>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("socket_connect: expected (int, string, string|function, string|function)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        const std::string& address = std::get<std::string>(args[1].data);
+        int result = SocketRegistry::connect(handle, address, args[2], args[3], vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
+    // int socket_write(int fd, mixed message, void|string address)
+    t.registerEfun("socket_write", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("socket_write: expected (int, mixed, void|string)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        bool hasAddress = args.size() > 2 && std::holds_alternative<std::string>(args[2].data);
+        std::string address = hasAddress ? std::get<std::string>(args[2].data) : std::string();
+        int result = SocketRegistry::write(handle, args[1], address, hasAddress, vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
+    // int socket_close(int fd)
+    // Directly closes out two of row 0.13's own efun-table-growth batch
+    // (efun/instruct.md's own status table lists both socket_close and
+    // socket_write as "belongs to row 0.10's LpcSocket/SocketRegistry
+    // subsystem, not a standalone efun") -- both fall out of this row's
+    // own implementation as-is, not as separately scoped extra work.
+    t.registerEfun("socket_close", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("socket_close: expected (int)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        int result = SocketRegistry::close(handle, vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
+    // string socket_error(int error)
+    t.registerEfun("socket_error", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("socket_error: expected (int)");
+        }
+        int error = static_cast<int>(std::get<int64_t>(args[0].data));
+        return Value(SocketRegistry::errorString(error));
+    });
+
+    // mixed *socket_status(void|int fd)
+    t.registerEfun("socket_status", [](VM&, std::vector<Value>& args) -> Value {
+        if (!args.empty() && std::holds_alternative<int64_t>(args[0].data)) {
+            int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+            auto sock = SocketRegistry::find(handle);
+            if (!sock) return Value(std::make_shared<Array>());
+            return SocketRegistry::statusOne(*sock);
+        }
+        auto result = std::make_shared<Array>();
+        for (auto& sock : SocketRegistry::all()) {
+            result->items.push_back(SocketRegistry::statusOne(*sock));
+        }
+        return Value(result);
     });
 
     // object *users() -- every object currently bound to a live
