@@ -103,6 +103,21 @@ public:
 
     static void requestShutdown();
 
+    // Query-only counterpart to requestShutdown(), for the shutdown()
+    // efun's own test coverage and anything else that needs to observe
+    // the flag without driving a full run() loop (run() only checks it
+    // internally, once per iteration, and resets it to false at its own
+    // start). Does not consume or reset the flag.
+    static bool isShutdownRequested();
+
+    // Real get_all_call_outs() (call_out.c): read-only access to every
+    // still-pending entry, for the call_out_info() efun. Deliberately a
+    // plain accessor, not a copy or a filtered view -- call_out_info()
+    // itself does the destructed-owner skip real get_all_call_outs()
+    // does, matching where that filter lives in the real source (the
+    // efun's own loop, not the scheduler's storage).
+    const std::vector<CallOutEntry>& pendingCallOuts() const { return callOuts_; }
+
 private:
     int64_t newCallOutHandle();
 

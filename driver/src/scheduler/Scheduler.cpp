@@ -20,6 +20,10 @@ void Scheduler::requestShutdown() {
     g_shutdownRequested.store(true);
 }
 
+bool Scheduler::isShutdownRequested() {
+    return g_shutdownRequested.load();
+}
+
 void Scheduler::run(Server& server, int maxIterations) {
     g_shutdownRequested.store(false);
     int iterations = 0;

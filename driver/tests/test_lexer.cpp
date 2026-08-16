@@ -4959,6 +4959,235 @@ static void testUniqueArrayGroupsElementsByClosureResultAndExcludesSkipValue() {
     std::cout << "testUniqueArrayGroupsElementsByClosureResultAndExcludesSkipValue OK\n";
 }
 
+// --- Corrected Tier 1 batch (base_name, debug_message, rusage, command, ---
+// --- shutdown, uptime, in_edit, in_input, match_path, call_out_info) -----
+
+static void testBaseNameReturnsSameAsFileNameSinceNoCloneSuffixExistsHere() {
+    ObjectVarHarness harness;
+    harness.writeFile("/basenametest.c",
+        "string probe_self() { return base_name(); }\n"
+        "string probe_arg(object ob) { return base_name(ob); }\n"
+        "string probe_file_name(object ob) { return file_name(ob); }\n");
+    auto ob = harness.objects.cloneObject("/basenametest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value self = harness.vm.callFunction(ob, "probe_self", {});
+    assert(std::holds_alternative<std::string>(self.data));
+    assert(std::get<std::string>(self.data) == ob->filename());
+
+    lpcdriver::Value viaArg = harness.vm.callFunction(ob, "probe_arg", {lpcdriver::Value(ob)});
+    lpcdriver::Value viaFileName = harness.vm.callFunction(ob, "probe_file_name", {lpcdriver::Value(ob)});
+    assert(std::get<std::string>(viaArg.data) == std::get<std::string>(viaFileName.data));
+
+    std::cout << "testBaseNameReturnsSameAsFileNameSinceNoCloneSuffixExistsHere OK\n";
+}
+
+static void testDebugMessageAcceptsAStringArgumentAndDoesNotThrow() {
+    ObjectVarHarness harness;
+    harness.writeFile("/debugmsgtest.c",
+        "int probe() { debug_message(\"test diagnostic line\\n\"); return 1; }\n");
+    auto ob = harness.objects.cloneObject("/debugmsgtest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    std::cout << "testDebugMessageAcceptsAStringArgumentAndDoesNotThrow OK\n";
+}
+
+static void testUptimeIsNonNegativeAndNonDecreasingAcrossTwoCalls() {
+    ObjectVarHarness harness;
+    harness.writeFile("/uptimetest.c",
+        "int probe() { return uptime(); }\n");
+    auto ob = harness.objects.cloneObject("/uptimetest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value first = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<int64_t>(first.data));
+    assert(std::get<int64_t>(first.data) >= 0);
+
+    lpcdriver::Value second = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<int64_t>(second.data) >= std::get<int64_t>(first.data));
+
+    std::cout << "testUptimeIsNonNegativeAndNonDecreasingAcrossTwoCalls OK\n";
+}
+
+static void testRusageReturnsMappingWithExpectedKeysAndNonNegativeValues() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rusagetest.c",
+        "mapping probe() { return rusage(); }\n");
+    auto ob = harness.objects.cloneObject("/rusagetest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* map = std::get_if<std::shared_ptr<lpcdriver::Mapping>>(&result.data);
+    assert(map != nullptr && *map);
+    assert((*map)->entries.size() == 16);
+
+    bool foundUtime = false, foundMaxrss = false;
+    for (const auto& entry : (*map)->entries) {
+        assert(std::holds_alternative<std::string>(entry.first.data));
+        assert(std::holds_alternative<int64_t>(entry.second.data));
+        assert(std::get<int64_t>(entry.second.data) >= 0);
+        const std::string& key = std::get<std::string>(entry.first.data);
+        if (key == "utime") foundUtime = true;
+        if (key == "maxrss") foundMaxrss = true;
+    }
+    assert(foundUtime);
+    assert(foundMaxrss);
+
+    std::cout << "testRusageReturnsMappingWithExpectedKeysAndNonNegativeValues OK\n";
+}
+
+static void testCommandDispatchesToCurrentObjectsOwnActionTableAndReturnsTruthy() {
+    ObjectVarHarness harness;
+    harness.writeFile("/commandtest.c",
+        "int wasForced;\n"
+        "int cmd_force_action(string arg) { wasForced = 1; return 1; }\n"
+        "void register_hook() { add_action(\"cmd_force_action\", \"force_action\"); }\n"
+        "int probe_hit() { return command(\"force_action now\"); }\n"
+        "int probe_miss() { return command(\"totally_unrecognized_verb\"); }\n"
+        "int query_was_forced() { return wasForced; }\n");
+    auto ob = harness.objects.cloneObject("/commandtest");
+    assert(ob != nullptr);
+
+    // add_action() outside any dispatch/move context needs an explicit
+    // command_giver, and current_object must equal command_giver for its
+    // own nearness check to pass -- same setup as the established
+    // precedent elsewhere in this file for registering an action outside
+    // a real move/dispatch context (see
+    // testAddActionCatchAllShortFlagReceivesRemainderAndQueryVerbReturnsFullTypedWord's
+    // own comment).
+    harness.vm.pushCommandGiver(ob);
+    harness.vm.callFunction(ob, "register_hook", {});
+    harness.vm.popCommandGiver();
+
+    lpcdriver::Value hit = harness.vm.callFunction(ob, "probe_hit", {});
+    assert(std::holds_alternative<int64_t>(hit.data));
+    assert(std::get<int64_t>(hit.data) == 1);
+
+    lpcdriver::Value forced = harness.vm.callFunction(ob, "query_was_forced", {});
+    assert(std::get<int64_t>(forced.data) == 1);
+
+    lpcdriver::Value miss = harness.vm.callFunction(ob, "probe_miss", {});
+    assert(std::get<int64_t>(miss.data) == 0);
+
+    std::cout << "testCommandDispatchesToCurrentObjectsOwnActionTableAndReturnsTruthy OK\n";
+}
+
+static void testShutdownSetsSchedulerRequestFlag() {
+    ObjectVarHarness harness;
+    harness.writeFile("/shutdowntest.c",
+        "void probe() { shutdown(); }\n");
+    auto ob = harness.objects.cloneObject("/shutdowntest");
+    assert(ob != nullptr);
+
+    assert(!lpcdriver::Scheduler::isShutdownRequested());
+    harness.vm.callFunction(ob, "probe", {});
+    assert(lpcdriver::Scheduler::isShutdownRequested());
+
+    std::cout << "testShutdownSetsSchedulerRequestFlag OK\n";
+}
+
+static void testInEditAlwaysReturnsFalseSinceEdIsNotImplemented() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ineditest.c",
+        "mixed probe() { return in_edit(); }\n");
+    auto ob = harness.objects.cloneObject("/ineditest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testInEditAlwaysReturnsFalseSinceEdIsNotImplemented OK\n";
+}
+
+static void testInInputReflectsPendingInputToStateOnAConnectedObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ininputtest.c",
+        "void start() { input_to(\"get_name\"); }\n"
+        "void get_name(string str) {}\n"
+        "int probe() { return in_input(); }\n");
+    auto ob = harness.objects.cloneObject("/ininputtest");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(ob);
+
+    lpcdriver::Value before = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<int64_t>(before.data) == 0);
+
+    lpcdriver::OutputContext::set(&conn);
+    harness.vm.callFunction(ob, "start", {});
+    lpcdriver::OutputContext::set(nullptr);
+
+    lpcdriver::Value after = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<int64_t>(after.data) == 1);
+
+    ::close(fds[1]);
+    std::cout << "testInInputReflectsPendingInputToStateOnAConnectedObject OK\n";
+}
+
+static void testMatchPathReturnsDeepestMatchingPrefix() {
+    ObjectVarHarness harness;
+    harness.writeFile("/matchpathtest.c",
+        "mixed probe(mapping m, string path) { return match_path(m, path); }\n");
+    auto ob = harness.objects.cloneObject("/matchpathtest");
+    assert(ob != nullptr);
+
+    auto m = std::make_shared<lpcdriver::Mapping>();
+    m->entries.emplace_back(lpcdriver::Value(std::string("/")), lpcdriver::Value(std::string("low")));
+    m->entries.emplace_back(lpcdriver::Value(std::string("/domains/")), lpcdriver::Value(std::string("mid")));
+    m->entries.emplace_back(lpcdriver::Value(std::string("/domains/Praxis/")), lpcdriver::Value(std::string("high")));
+
+    lpcdriver::Value deep = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(m), lpcdriver::Value(std::string("/domains/Praxis/room.c"))});
+    assert(std::holds_alternative<std::string>(deep.data));
+    assert(std::get<std::string>(deep.data) == "high");
+
+    lpcdriver::Value mid = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(m), lpcdriver::Value(std::string("/domains/other.c"))});
+    assert(std::get<std::string>(mid.data) == "mid");
+
+    lpcdriver::Value none = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::make_shared<lpcdriver::Mapping>()), lpcdriver::Value(std::string("/anything"))});
+    assert(std::holds_alternative<int64_t>(none.data));
+    assert(std::get<int64_t>(none.data) == 0);
+
+    std::cout << "testMatchPathReturnsDeepestMatchingPrefix OK\n";
+}
+
+static void testCallOutInfoListsPendingEntryWithOwnerFunctionAndDelay() {
+    ObjectVarHarness harness;
+    lpcdriver::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/coinfotest.c",
+        "int probe() { return call_out(\"idle\", 60); }\n"
+        "mixed *probe_info() { return call_out_info(); }\n"
+        "void idle() {}\n");
+    auto ob = harness.objects.cloneObject("/coinfotest");
+    assert(ob != nullptr);
+
+    harness.vm.callFunction(ob, "probe", {});
+    lpcdriver::Value infoResult = harness.vm.callFunction(ob, "probe_info", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&infoResult.data);
+    assert(arr != nullptr && (*arr)->items.size() == 1);
+
+    auto* entry = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*arr)->items[0].data);
+    assert(entry != nullptr && (*entry)->items.size() == 3);
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>((*entry)->items[0].data) == ob);
+    assert(std::get<std::string>((*entry)->items[1].data) == "idle");
+    assert(std::holds_alternative<int64_t>((*entry)->items[2].data));
+    int64_t delay = std::get<int64_t>((*entry)->items[2].data);
+    assert(delay >= 0 && delay <= 60);
+
+    std::cout << "testCallOutInfoListsPendingEntryWithOwnerFunctionAndDelay OK\n";
+}
+
 static void testSqrtNegativeArgThrows() {
     // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
     ObjectVarHarness harness;
@@ -11383,6 +11612,16 @@ int main() {
     testWriteBytesOverwritesAtOffsetThenReadBytesConfirmsIt();
     testLinkCreatesASecondNameForTheSameFileContent();
     testUniqueArrayGroupsElementsByClosureResultAndExcludesSkipValue();
+    testBaseNameReturnsSameAsFileNameSinceNoCloneSuffixExistsHere();
+    testDebugMessageAcceptsAStringArgumentAndDoesNotThrow();
+    testUptimeIsNonNegativeAndNonDecreasingAcrossTwoCalls();
+    testRusageReturnsMappingWithExpectedKeysAndNonNegativeValues();
+    testCommandDispatchesToCurrentObjectsOwnActionTableAndReturnsTruthy();
+    testShutdownSetsSchedulerRequestFlag();
+    testInEditAlwaysReturnsFalseSinceEdIsNotImplemented();
+    testInInputReflectsPendingInputToStateOnAConnectedObject();
+    testMatchPathReturnsDeepestMatchingPrefix();
+    testCallOutInfoListsPendingEntryWithOwnerFunctionAndDelay();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();

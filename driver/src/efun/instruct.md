@@ -6,7 +6,7 @@
 |------|------|
 | `EfunTable.cpp` + `include/.../EfunTable.hpp` | Singleton registry mapping efun name → `EfunFn`. `registerCoreEfuns()` is called from `main.cpp`. |
 
-Currently **~144 registered names** (including aliases). Target is **~300** for
+Currently **~154 registered names** (including aliases). Target is **~300** for
 FluffOS parity and **beyond 300** for the features that exceed all three
 reference drivers.
 
@@ -120,24 +120,63 @@ to `driver/CMakeLists.txt` and link `efun` against it.
 
 ### 0.13 — Grow to ~300 efuns (FluffOS parity)
 
-After the above Phase 0 items, audit `func_spec.c` against the current
-`EfunTable.cpp` registration list and implement the remaining core efuns in
-priority order. Tier the work:
+After the above Phase 0 items, audit `func_spec.c` AND `efun_defs.c` (the
+auto-generated dispatch table, ground truth over the hand-edited text file
+when the two disagree, confirmed real for `debug_info` and several others
+below) against the current `EfunTable.cpp` registration list, then rank the
+remaining gap by real call-site frequency across `mudlib/`, excluding
+`/doc/` (grep hits there are documentation, not code). Tier the work.
 
-**Tier 1 (high usage, moderate effort):**
-`strsrch`, `replace_string` (full bounds), `string_to_array`, `capitalize`,
-`lower_case`, `trim`, `pad`, `repeat_string`, `count`, `slice_array`,
-`unique_array`, `member_array`, `flatten_array`, `allocate`, `allocate_mapping`,
-`keys`, `values`, `m_delete`, `m_add`, `sizeof` on all types, `typeof`,
-`objectp`, `stringp`, `intp`, `floatp`, `arrayp`, `mappingp`, `functionp`,
-`classp`, `pointerp`, `undefinedp`, `nullp`, `random`, `time`, `ctime`,
-`localtime`, `abs`, `min`, `max`, `pow`, `sqrt`, `floor`, `ceil`, `round`,
-`log`, `exp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`,
-`read_file`, `write_file`, `append_file`, `file_size`, `file_exists`,
-`get_dir`, `mkdir`, `rmdir`, `rm`, `rename`, `stat`, `read_bytes`,
-`write_bytes`, `copy_file`, `link`, `users`, `this_player`, `this_object`,
-`previous_object`, `all_previous_objects`, `caller_stack_depth`,
-`caller_stack`, `trace`, `traceing`, `debug_info`.
+**Note on the previous version of this list:** it named 17 efuns that turned
+out not to be real names in this reference build at all (`string_to_array`,
+`trim`, `pad`, `count`, `slice_array`, `flatten_array`, `m_add`, `mappingp`,
+`round`, `atan2`, `append_file`, `file_exists`, `copy_file`,
+`caller_stack_depth`, `caller_stack`, `trace`, `traceing`), zero hits in
+`func_spec.c`, `efun_defs.c`, `efunctions.h`, or `opc.h`. Confirmed and
+removed. `debug_info` is real (`efun_defs.c`) but has zero call sites in
+this mudlib, no implementation anywhere in the vendored source tree (only
+its prototype), and its documented behavior dumps FluffOS-internal C struct
+fields (`O_HEART_BEAT`, `swap_num`, `next_all`) with no clean equivalent in
+this driver's object model. Excluded from the implementation queue, same
+category as `get_char` below, not a usage-weight tradeoff.
+
+**Tier 1 (top 15 by real call-site count, current as of the 2026-08-16
+efun-growth sessions):** `tell_object`/`tell_room`/`say`/`shout` are
+excluded from this ranking entirely, not just deprioritized -- all four are
+already real, confirmed simul_efuns in this mudlib's own
+`secure/SimulEfun/communications.c`, so this driver's existing tier-3
+(simul_efun) call resolution already handles every real call site; a core
+efun registration would be unreachable, shadowed code. Same for `translate`
+(`secure/SimulEfun/translate.c`) and `event`
+(`secure/SimulEfun/events.c`), found while researching this list -- both
+real efun names, both already fully shadowed by this mudlib's own
+simul_efun of the same name.
+
+| Rank | Efun | Calls | Files | Status |
+|---|---|---|---|---|
+| 1 | `base_name` | 95 | 57 | Real gap. |
+| 2 | `debug_message` | 23 | 4 | Real gap. |
+| 3 | `pluralize` | 13 | 6 | Real gap, but no reference implementation anywhere in the vendored source tree (no C source, no doc page) -- do not implement without one to verify against. |
+| 3 | `socket_close` | 13 | 4 | Real gap, but belongs to row 0.10's `LpcSocket`/`SocketRegistry` subsystem, not a standalone efun. |
+| 3 | `socket_write` | 13 | 4 | Same as `socket_close` -- row 0.10. |
+| 4 | `rusage` | 12 | 2 | Real gap. |
+| 5 | `get_char` | 8 | 1 | Real gap, architecture mismatch (this driver's network layer is line-buffered; `get_char` needs per-keystroke input) -- established exclusion, see the 2026-08-09 STATUS.md entry. |
+| 5 | `query_snoop` | 8 | 4 | Real gap, needs new Connection-level output-duplication infrastructure (who is snooping whom, message mirroring) -- a real feature, not a self-contained efun body. |
+| 5 | `snoop` | 8 | 3 | Same as `query_snoop`. |
+| 6 | `command` | 7 | 5 | Real gap. |
+| 7 | `livings` | 6 | 4 | Real gap, but needs a full live-object registry (every loaded object, not just currently-connected players) that does not exist yet -- `InteractiveRegistry` only covers the latter. |
+| 7 | `shutdown` | 6 | 5 | Real gap. |
+| 7 | `uptime` | 6 | 4 | Real gap. |
+| 8 | `in_edit` | 5 | 5 | Real gap. |
+| 8 | `in_input` | 5 | 5 | Real gap. |
+
+Two more, real and verified, just outside the top 15 by count, pulled in
+this round to round out a genuine 10 rather than force through the
+not-yet-safe items above: `match_path` (4 calls, 2 files, real, `array.c`'s
+own prefix-walk algorithm fully traced before implementing) and
+`call_out_info` (2 calls, 2 files, real, needed one small new public
+accessor on `Scheduler` to expose its existing `callOuts_` list, not a new
+subsystem).
 
 **Tier 2 (medium effort):**
 `add_action`, `remove_action`, `query_actions` (already done — verify),

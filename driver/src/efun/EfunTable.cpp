@@ -26,6 +26,7 @@
 #include <sstream>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 namespace lpcdriver {
@@ -867,6 +868,54 @@ void registerCoreEfuns() {
     t.registerEfun("map_delete", mapDeleteImpl);
     t.registerEfun("m_delete", mapDeleteImpl);
 
+    // mixed match_path(mapping paths, string str) -- real efuns_main.c's
+    // f_match_path() traced instruction by instruction before
+    // implementing, not guessed at (its own source comment warns "DO NOT
+    // CHANGE THIS EFUN TIL YOU UNDERSTAND IT" for a reason): walks str
+    // left to right, splitting on '/' (collapsing repeats, matching the
+    // real "while (*++src=='/');" skip), and after every slash boundary
+    // looks up the prefix accumulated SO FAR in the mapping; each hit
+    // overwrites the previous one, so the final result is whichever
+    // matching prefix was the DEEPEST (most specific), not the first or
+    // the exact full string -- "implements the search loop in TMI's
+    // access object as a single efun", per the real source's own
+    // comment. Returns 0 (real const0u) if no prefix ever matched.
+    t.registerEfun("match_path", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("match_path: expected (mapping, string)");
+        }
+        auto map = std::get<std::shared_ptr<Mapping>>(args[0].data);
+        const std::string& str = std::get<std::string>(args[1].data);
+
+        auto lookup = [&](const std::string& prefix) -> const Value* {
+            if (!map) return nullptr;
+            for (const auto& entry : map->entries) {
+                if (std::holds_alternative<std::string>(entry.first.data) &&
+                    std::get<std::string>(entry.first.data) == prefix) {
+                    return &entry.second;
+                }
+            }
+            return nullptr;
+        };
+
+        Value value(int64_t{0});
+        std::string built;
+        size_t i = 0;
+        while (i < str.size()) {
+            while (i < str.size() && str[i] != '/') built.push_back(str[i++]);
+            if (i < str.size() && str[i] == '/') {
+                ++i;
+                while (i < str.size() && str[i] == '/') ++i;
+                if (i < str.size() || built.empty()) built.push_back('/');
+            }
+            if (const Value* found = lookup(built)) {
+                value = *found;
+            }
+        }
+        return value;
+    });
+
     // string read_file(string file, void|int start, void|int numLines).
     // Real signature and behavior confirmed against the FluffOS
     // reference driver's file.c: returns 0 (not an error) if the file
@@ -1139,6 +1188,89 @@ void registerCoreEfuns() {
                 vm.currentObject(), std::get<std::string>(args[0].data)));
         }
         return Value(int64_t{-1});
+    });
+
+    // mixed *call_out_info() -- real call_out.c's own get_all_call_outs():
+    // one ({owner, function_name_or_string, remaining_delay}) triple per
+    // still-pending entry, skipping any whose owner is gone or destructed
+    // (matching real "if (!ob || (ob->flags & O_DESTRUCTED)) continue;"
+    // exactly). Confirmed against the real 2 call sites in this mudlib
+    // (cmds/creator/_callouts.c, domains/Praxis/sage_room.c) that this is
+    // the shape they read from -- element[0]/[1]/[2]. Note found while
+    // verifying: _callouts.c's own display code actually checks
+    // "sizeof(element) != 4" and expects a 4th "args" element that real
+    // get_all_call_outs() never produces (it is genuinely a 3-element
+    // array in the real source) -- a pre-existing mismatch on the mudlib
+    // side, not a driver gap; this implementation matches the real
+    // 3-element driver output, not the mudlib's own inconsistent
+    // expectation of it. The closure-bound form's own "stringify the
+    // function pointer" (real svalue_to_string()) is approximated as the
+    // closure's own bare functionName, not a byte-exact format match --
+    // no real call site parses that string, both just print it.
+    t.registerEfun("call_out_info", [](VM& vm, std::vector<Value>&) -> Value {
+        auto result = std::make_shared<Array>();
+        if (!vm.scheduler()) return Value(result);
+        auto now = std::chrono::steady_clock::now();
+        for (const auto& entry : vm.scheduler()->pendingCallOuts()) {
+            std::shared_ptr<LpcObject> owner;
+            std::string funcName;
+            if (entry.closure) {
+                owner = entry.closure->owner.lock();
+                funcName = entry.closure->functionName;
+            } else {
+                owner = entry.target.lock();
+                funcName = entry.function;
+            }
+            if (!owner || owner->isDestructed()) continue;
+            int64_t remaining = std::chrono::duration_cast<std::chrono::seconds>(
+                entry.dueAt - now).count();
+            if (remaining < 0) remaining = 0;
+            auto triple = std::make_shared<Array>();
+            triple->items.emplace_back(owner);
+            triple->items.emplace_back(funcName);
+            triple->items.emplace_back(remaining);
+            result->items.emplace_back(triple);
+        }
+        return Value(result);
+    });
+
+    // int command(string str) -- real add_action.c's own f_command():
+    // executes str as a command for current_object (parse_command()
+    // against current_object's own action table), returning a truthy
+    // cost on success or falsy 0 on failure. This driver's own
+    // VM::dispatchCommand() is exactly that mechanism, already used by
+    // Server::dispatchLine() for real player input -- reused directly
+    // here rather than a second, separately-approximated dispatch path.
+    // Real per-command eval-cost accounting is not reproduced (this
+    // driver's own accumulated eval-cost model resets per top-level
+    // command dispatch, not per nested command() call); a plain 1/0
+    // truthy result is returned instead, matching every one of this
+    // mudlib's own 7 real bare command() call sites, which only ever
+    // branch on truthiness (std/living.c's force_me(): "res =
+    // command(cmd);", std/monster.c's own NPC wander/patrol AI,
+    // std/user/nmsh.c's alias system: "if(!command(lines[i]))"), never
+    // the exact numeric cost value.
+    t.registerEfun("command", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("command: expected a string argument");
+        }
+        auto giver = vm.currentObject();
+        if (!giver) return Value(int64_t{0});
+        bool handled = vm.dispatchCommand(giver, std::get<std::string>(args[0].data));
+        return Value(static_cast<int64_t>(handled ? 1 : 0));
+    });
+
+    // void shutdown(void|int exit_code) -- real efuns_main.c's
+    // f_shutdown(): calls shutdownMudOS(exit_code), terminating the
+    // driver process. This driver's own Scheduler::requestShutdown()
+    // (a static signal the run loop checks once per iteration, per
+    // scheduler/instruct.md's own Key invariants) is the equivalent
+    // mechanism -- reused directly rather than calling std::exit()
+    // in-line, which would skip this driver's own graceful per-
+    // iteration shutdown path.
+    t.registerEfun("shutdown", [](VM&, std::vector<Value>&) -> Value {
+        Scheduler::requestShutdown();
+        return Value{};
     });
 
     // string capitalize(string) -- efuns_main.c's f_capitalize(): the
@@ -1809,6 +1941,36 @@ void registerCoreEfuns() {
     // driver runs yet depends on telling them apart this way (base_name()
     // strips any "#<id>" suffix right back off again regardless).
     t.registerEfun("file_name", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            ob = vm.currentObject();
+        }
+        if (!ob) return Value{};
+        return Value(ob->filename());
+    });
+
+    // string base_name(void|object ob default: this_object()) -- real
+    // signature confirmed against efun_defs.c ground truth
+    // ("base_name",F_BASE_NAME,...,T_STRING|T_OBJECT,...,DEFAULT_THIS_OBJECT)
+    // since neither func_spec.c's text nor any .c file in the vendored
+    // tree carries an actual f_base_name() body (a real gap in this
+    // specific archived copy, same situation as debug_info). Confirmed
+    // implementable anyway, not guessed: real base_name() is
+    // file_name()'s own real algorithm minus its "#<clone id>" suffix
+    // strip (both ultimately reach the same obname string in real
+    // FluffOS), and file_name()'s own comment directly above already
+    // documents that this driver's LpcObject has no clone-id concept at
+    // all, so that strip is already a no-op here -- base_name() and
+    // file_name() are therefore identical on this driver, by this
+    // driver's own prior, already-verified reasoning, not a fresh
+    // assumption. The real string-argument overload (T_STRING|T_OBJECT)
+    // is not implemented -- every one of the 95 real call sites in this
+    // mudlib passes an object or nothing, confirmed by grep, never a
+    // bare path string. By far the single highest-usage gap found in
+    // the 2026-08-16 Tier 1 ranking.
+    t.registerEfun("base_name", [](VM& vm, std::vector<Value>& args) -> Value {
         std::shared_ptr<LpcObject> ob;
         if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
             ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
@@ -2752,6 +2914,56 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
+    // mapping rusage() -- confirmed against efuns_port.c's own
+    // F_RUSAGE/RUSAGE branch (the one this Linux target actually
+    // compiles, not the WIN32/GET_PROCESS_STATS alternatives): a
+    // getrusage(RUSAGE_SELF, ...) call, keys named for the real
+    // rus.ru_* struct fields, utime/stime converted from
+    // seconds+microseconds to whole milliseconds exactly as the real
+    // source does ("tv_sec * 1000 + tv_usec / 1000"). maxrss on Linux
+    // is resident-set-size in kilobytes read from /proc/self/statm
+    // (the real source's own Linux-specific branch, confirmed live
+    // reachable on this platform, not the "sun" getpagesize() branch
+    // next to it) since Linux's own getrusage() never actually fills
+    // ru_maxrss on the kernels this real code was written against.
+    // ru_ixrss/idrss/isrss/nswap are always 0 on Linux in both real
+    // FluffOS and here (the kernel never populates them; not a driver
+    // gap, matching real rus.ru_ixrss etc's own always-0 value here too).
+    t.registerEfun("rusage", [](VM&, std::vector<Value>&) -> Value {
+        auto result = std::make_shared<Mapping>();
+        struct ::rusage rus{};
+        if (::getrusage(RUSAGE_SELF, &rus) != 0) {
+            return Value(result);
+        }
+        int64_t maxrss = 0;
+        std::ifstream statm("/proc/self/statm");
+        if (statm) {
+            int64_t pages = 0, resident = 0;
+            statm >> pages >> resident;
+            maxrss = resident * (::sysconf(_SC_PAGESIZE) / 1024);
+        }
+        auto add = [&](const char* key, int64_t v) {
+            result->entries.emplace_back(Value(std::string(key)), Value(v));
+        };
+        add("utime", static_cast<int64_t>(rus.ru_utime.tv_sec) * 1000 + rus.ru_utime.tv_usec / 1000);
+        add("stime", static_cast<int64_t>(rus.ru_stime.tv_sec) * 1000 + rus.ru_stime.tv_usec / 1000);
+        add("maxrss", maxrss);
+        add("ixrss", static_cast<int64_t>(rus.ru_ixrss));
+        add("idrss", static_cast<int64_t>(rus.ru_idrss));
+        add("isrss", static_cast<int64_t>(rus.ru_isrss));
+        add("minflt", static_cast<int64_t>(rus.ru_minflt));
+        add("majflt", static_cast<int64_t>(rus.ru_majflt));
+        add("nswap", static_cast<int64_t>(rus.ru_nswap));
+        add("inblock", static_cast<int64_t>(rus.ru_inblock));
+        add("oublock", static_cast<int64_t>(rus.ru_oublock));
+        add("msgsnd", static_cast<int64_t>(rus.ru_msgsnd));
+        add("msgrcv", static_cast<int64_t>(rus.ru_msgrcv));
+        add("nsignals", static_cast<int64_t>(rus.ru_nsignals));
+        add("nvcsw", static_cast<int64_t>(rus.ru_nvcsw));
+        add("nivcsw", static_cast<int64_t>(rus.ru_nivcsw));
+        return Value(result);
+    });
+
     // int random(int n) -- confirmed against real efuns_main.c's
     // f_random(): "if (sp->u.number <= 0) { sp->u.number = 0; return; }
     // sp->u.number = random_number(sp->u.number);" -- a uniform int in
@@ -2769,6 +2981,69 @@ void registerCoreEfuns() {
         static std::mt19937 rng(std::random_device{}());
         std::uniform_int_distribution<int64_t> dist(0, n - 1);
         return Value(dist(rng));
+    });
+
+    // int uptime() -- real efuns_main.c's f_uptime(): "push_number(
+    // current_time - boot_time)", seconds since the driver's own boot.
+    // bootTime is captured here, at registerCoreEfuns() time (this
+    // driver's own real boot, called once from main.cpp before the
+    // server starts accepting connections), not lazily on first call --
+    // matching real boot_time's own "set once at startup" semantics
+    // rather than approximating boot as "whenever uptime() first ran".
+    {
+        const std::time_t bootTime = std::time(nullptr);
+        t.registerEfun("uptime", [bootTime](VM&, std::vector<Value>&) -> Value {
+            return Value(static_cast<int64_t>(std::time(nullptr) - bootTime));
+        });
+    }
+
+    // void debug_message(string str) -- real main.c's own debug_message()
+    // C primitive (varargs, "%s"-style) appends to the driver's own debug
+    // log file (LOG_DIR/debug.log by default); the LPC-facing f_debug_message()
+    // dispatch wrapper itself has no body anywhere in this vendored source
+    // tree (confirmed by grep; only its efun_defs.c table entry exists),
+    // but its signature (1 required T_STRING arg, TYPE_NOVALUE return) and
+    // the underlying primitive's own well-documented purpose leave little
+    // real ambiguity: write the string somewhere the operator can see it.
+    // This driver has no configured log-directory facility of its own yet
+    // (Config has no logDir()-equivalent key), so this writes to stderr
+    // rather than inventing new config surface for a single low-stakes
+    // diagnostic efun -- a real, documented simplification, not a silent
+    // no-op the way a stub would be.
+    t.registerEfun("debug_message", [](VM&, std::vector<Value>& args) -> Value {
+        if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
+            std::cerr << std::get<std::string>(args[0].data);
+        }
+        return Value{};
+    });
+
+    // string in_edit(object ob default: this_object()) -- real
+    // efuns_main.c's f_in_edit(): returns the filename currently being
+    // edited if ob is in an ed() session, else int 0. This driver has no
+    // ed() efun at all (not in this batch either -- a full stateful,
+    // input_to()-driven multi-line text editor, out of scope for a
+    // self-contained efun body), so no object can ever be "in edit" here
+    // -- always 0 is the real, correct answer for this driver's current
+    // capabilities, not a placeholder.
+    t.registerEfun("in_edit", [](VM&, std::vector<Value>&) -> Value {
+        return Value(static_cast<int64_t>(0));
+    });
+
+    // int in_input(object ob default: this_object()) -- real
+    // efuns_main.c's f_in_input(): "ob->interactive && ob->interactive->input_to"
+    // -- true only for a currently-connected object with a pending
+    // input_to() handler registered. Confirmed against this driver's own
+    // Connection::hasPendingInputTo() (net/instruct.md's own file
+    // description already documents this exact state).
+    t.registerEfun("in_input", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            ob = vm.currentObject();
+        }
+        Connection* conn = ob ? InteractiveRegistry::find(ob) : nullptr;
+        return Value(static_cast<int64_t>(conn && conn->hasPendingInputTo() ? 1 : 0));
     });
 
     // int userp(object ob) / int query_once_interactive(object ob) --
