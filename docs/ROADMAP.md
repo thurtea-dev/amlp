@@ -23,7 +23,7 @@ complete and the full test suite is passing with no regressions.**
 | 0.4 | `set_eval_limit` as a real accumulated-cost model (not no-op) | `src/vm` | [x] |
 | 0.5 | Full `O_DESTRUCTED` apply guards on every cross-object call | `src/object` | [x] |
 | 0.6 | Shadow support: `shadow(ob, flag)` efun + shadow chain traversal | `src/object` | [ ] |
-| 0.7 | `save_object`/`restore_object` in FluffOS `.o` text format | `src/efun` | [x] |
+| 0.7 | `save_object`/`restore_object` in FluffOS `.o` text format | `src/efun` | [x] (partial: restore-side only; `save_object` still writes this driver's own custom format) |
 | 0.8 | Full telnet IAC negotiation, echo suppression, NAWS | `src/net` | [ ] |
 | 0.9 | `map`/`filter`/`sort_array` as real closure consumers | `src/efun` | [x] (partial: all mudlib shapes covered) |
 | 0.10 | `socket_*` family basics (create/connect/write/read/close) | `src/net` + `src/efun` | [ ] |

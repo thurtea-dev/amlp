@@ -613,6 +613,69 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
+    // mixed *unique_array(mixed *arr, string | function classifier,
+    // void|mixed skip) -- confirmed against array.c's own
+    // f_unique_array(): each element is passed to the classifier (a
+    // Closure called directly, or a string function name applied on
+    // the element itself when the element is an object, matching real
+    // "apply(func, v->item[i].u.ob, 0, ORIGIN_EFUN)" exactly -- unlike
+    // map_array/filter_array/sort_array above, the function is called
+    // ON the element, not on a separately supplied target object, and a
+    // non-object element with a string classifier is simply excluded,
+    // matching real "else sv = 0"). Elements whose classifier result
+    // equals skip (default int 0) are excluded; the rest are grouped by
+    // equal classifier result into sub-arrays, each keeping its
+    // elements' original relative order. Real group order comes from
+    // array.c's own reverse-linked-list bucket construction and is not
+    // documented as contractual anywhere; this implementation orders
+    // groups by first-appearance instead (a different but equally
+    // valid deterministic order), flagged here rather than silently
+    // assumed to match. Zero real call sites in this mudlib (confirmed
+    // by grep; the only hit is the doc page), implemented anyway per
+    // this row's own Tier 1 list.
+    t.registerEfun("unique_array", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("unique_array: expected an array first argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        Value skip = args.size() > 2 ? args[2] : Value(int64_t{0});
+        auto result = std::make_shared<Array>();
+        if (!arr || arr->items.empty()) return Value(result);
+
+        auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data);
+        const std::string* funcName = std::get_if<std::string>(&args[1].data);
+        if (!closurePtr && !funcName) {
+            throw LpcRuntimeError("unique_array: expected a string or function second argument");
+        }
+
+        std::vector<Value> keys;
+        std::vector<std::shared_ptr<Array>> groups;
+        for (const auto& item : arr->items) {
+            Value key;
+            if (closurePtr) {
+                if (!*closurePtr) continue;
+                key = vm.callClosure(*closurePtr, {item});
+            } else {
+                auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&item.data);
+                if (!obPtr || !*obPtr) continue;
+                key = vm.callFunction(*obPtr, *funcName, {});
+            }
+            if (valuesEqual(key, skip)) continue;
+
+            size_t groupIdx = keys.size();
+            for (size_t i = 0; i < keys.size(); ++i) {
+                if (valuesEqual(keys[i], key)) { groupIdx = i; break; }
+            }
+            if (groupIdx == keys.size()) {
+                keys.push_back(key);
+                groups.push_back(std::make_shared<Array>());
+            }
+            groups[groupIdx]->items.push_back(item);
+        }
+        for (auto& g : groups) result->items.emplace_back(g);
+        return Value(result);
+    });
+
     // string *explode(string, string) -- confirmed against
     // fluffos-2.9-ds2.08's own array.c explode_string(), and against
     // this exact vendored reference's own options.h (neither
@@ -773,7 +836,15 @@ void registerCoreEfuns() {
     // catch()), so this one was fatal to the connection rather than
     // silently swallowed -- it is what actually stopped the STEP 4
     // alignment pick from ever reaching STEP 5.
-    t.registerEfun("map_delete", [](VM&, std::vector<Value>& args) -> Value {
+    // "m_delete" -- the other spelling func_spec.c declares for the same
+    // function ("mapping m_delete map_delete(mapping, mixed);"). Checked
+    // against real usage before adding: a raw grep for "m_delete(" only
+    // ever matches as a substring of "confirm_delete(" in this mudlib
+    // (secure/std/post.c) -- zero genuine call sites -- but the alias
+    // costs nothing once map_delete's own real, heavily-used
+    // implementation already exists, and func_spec.c declares it as a
+    // real second name, so it is registered anyway.
+    auto mapDeleteImpl = [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data)) {
             throw LpcRuntimeError("map_delete: expected a mapping argument");
         }
@@ -792,7 +863,9 @@ void registerCoreEfuns() {
                 entries.end());
         }
         return Value{};
-    });
+    };
+    t.registerEfun("map_delete", mapDeleteImpl);
+    t.registerEfun("m_delete", mapDeleteImpl);
 
     // string read_file(string file, void|int start, void|int numLines).
     // Real signature and behavior confirmed against the FluffOS
@@ -1678,6 +1751,20 @@ void registerCoreEfuns() {
     t.registerEfun("pointerp", pointerpImpl);
     t.registerEfun("arrayp", pointerpImpl);
 
+    // int classp(mixed) -- real efuns_main.c's f_classp(): true only for
+    // a T_CLASS value (real LPC's struct-like "class" literal, "(/ ...
+    // /)"). This driver has no class/struct type anywhere in its own
+    // Value variant (same gap the save_object Known Stubs note already
+    // documents), so nothing this driver can ever produce is a class --
+    // always false. Confirmed real, live-reachable: secure/std/
+    // client.c's own socket-argument dispatch calls it twice
+    // ("if(classp(arg)) sock = arg; if(!classp(arg)){...}"), both
+    // branches correctly falling to the "not a class" path here, which
+    // is the real answer for every value this driver can construct.
+    t.registerEfun("classp", [](VM&, std::vector<Value>&) -> Value {
+        return Value(static_cast<int64_t>(0));
+    });
+
     // mixed *allocate(int size, void|mixed initial) -- an array of size
     // elements, each set to initial (default int 0, real func_spec.c's
     // own default -- confirmed live: secure/SimulEfun/copy.c's own
@@ -1851,6 +1938,22 @@ void registerCoreEfuns() {
         auto ob = vm.previousObject(static_cast<int>(idx));
         if (!ob) return Value{};
         return Value(ob);
+    });
+
+    // object *all_previous_objects(void) -- the other spelling
+    // func_spec.c declares for the same underlying function ("object
+    // *all_previous_objects previous_object(int default: -1);", i.e.
+    // this name is real previous_object() called with the -1 flag
+    // baked in as its own default, exactly what "idx == -1" already
+    // does above). Zero real call sites in this mudlib (confirmed by
+    // grep), registered anyway since it costs nothing on top of the
+    // already-implemented VM::allPreviousObjects() and func_spec.c
+    // declares it as a genuine second name, not a driver invention.
+    t.registerEfun("all_previous_objects", [](VM& vm, std::vector<Value>&) -> Value {
+        auto objs = vm.allPreviousObjects();
+        auto arr = std::make_shared<Array>();
+        for (auto& o : objs) arr->items.emplace_back(o);
+        return Value(arr);
     });
 
     // void error(string msg) -- raises a real runtime error carrying
@@ -2608,6 +2711,45 @@ void registerCoreEfuns() {
         }
         char* s = std::ctime(&clock);
         return Value(std::string(s ? s : ""));
+    });
+
+    // mixed *localtime(int clock) -- confirmed against
+    // fluffos-2.9-ds2.08/efuns_port.c's own f_localtime() and
+    // include/localtime.h's LT_* index constants: an 11-element array
+    // ({sec, min, hour, mday, mon, year, wday, yday, gmtoff, zone,
+    // isdst}), year already +1900'd (real f_localtime() does "tm->tm_year
+    // + 1900" itself, not a raw tm_year). gmtoff/zone come from
+    // struct tm's own tm_gmtoff/tm_zone fields directly (glibc
+    // extensions available on this Linux target) rather than the real
+    // source's own tangle of platform-specific #ifdef branches (sequent/
+    // BSD42/hpux/etc) for the exact same two values on other platforms --
+    // functionally identical output on the platform this driver actually
+    // builds on, not a different algorithm. Zero real call sites in this
+    // mudlib (confirmed by grep; the only hits are doc files and the
+    // LT_* constant header), implemented anyway per this row's own Tier 1
+    // list.
+    t.registerEfun("localtime", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("localtime: expected an int argument");
+        }
+        std::time_t clock = static_cast<std::time_t>(std::get<int64_t>(args[0].data));
+        std::tm tmVal{};
+        if (!::localtime_r(&clock, &tmVal)) {
+            throw LpcRuntimeError("localtime: localtime_r failed");
+        }
+        auto result = std::make_shared<Array>();
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_sec));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_min));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_hour));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_mday));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_mon));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_year + 1900));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_wday));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_yday));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_gmtoff));
+        result->items.emplace_back(std::string(tmVal.tm_zone ? tmVal.tm_zone : ""));
+        result->items.emplace_back(static_cast<int64_t>(tmVal.tm_isdst));
+        return Value(result);
     });
 
     // int random(int n) -- confirmed against real efuns_main.c's
@@ -3445,6 +3587,137 @@ void registerCoreEfuns() {
         }
         std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
         return Value(static_cast<int64_t>(::rmdir(path.c_str()) == 0 ? 1 : 0));
+    });
+
+    // mixed stat(string path, void|int flags) -- confirmed against
+    // fluffos-2.9-ds2.08/efuns_main.c's f_stat() and the real doc/efun/
+    // stat page: a regular file returns ({size, mtime, load_time}), a
+    // directory (or anything else) falls straight through to
+    // get_dir()'s own behavior with the same flags argument. This
+    // driver has no per-object "when was this loaded" tracking (see the
+    // Known Stubs list's existing query_ip_name() precedent for the
+    // same kind of honest, documented gap), so the third element is
+    // always 0 rather than a real load timestamp. The directory
+    // fallback is implemented by calling this driver's own already-
+    // registered get_dir() efun directly (same flags-not-implemented
+    // restriction it already has), not a separate reimplementation.
+    // Confirmed real, live-reachable: std/user/editor.c's own
+    // "stat(__FileName, -1)[1]" (both call sites resolve to a real
+    // file, taking the regular-file branch; the -1 flag only matters if
+    // get_dir()'s own fallback is reached).
+    t.registerEfun("stat", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("stat: expected a string path argument");
+        }
+        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        struct stat st;
+        if (::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            auto result = std::make_shared<Array>();
+            result->items.emplace_back(static_cast<int64_t>(st.st_size));
+            result->items.emplace_back(static_cast<int64_t>(st.st_mtime));
+            result->items.emplace_back(int64_t{0});
+            return Value(result);
+        }
+        std::vector<Value> dirArgs{args[0]};
+        if (args.size() > 1) dirArgs.push_back(args[1]);
+        return EfunTable::instance().call("get_dir", vm, dirArgs);
+    });
+
+    // string read_bytes(string file, void|int start, void|int len) --
+    // confirmed against fluffos-2.9-ds2.08/file.c's own read_bytes():
+    // start defaults to 0, a negative start counts back from the end of
+    // the file, len 0 (or omitted) means "the rest of the file", and it
+    // returns plain int 0 (not an error) for a missing file or a start
+    // past the end. Confirmed real, live-reachable: secure/SimulEfun/
+    // misc.c's own "read_bytes(file, diff, 1024)".
+    t.registerEfun("read_bytes", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("read_bytes: expected a string filename argument");
+        }
+        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        int64_t start = 0, len = 0;
+        if (args.size() > 1 && std::holds_alternative<int64_t>(args[1].data)) {
+            start = std::get<int64_t>(args[1].data);
+        }
+        if (args.size() > 2 && std::holds_alternative<int64_t>(args[2].data)) {
+            len = std::get<int64_t>(args[2].data);
+        }
+        if (len < 0) return Value(int64_t{0});
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return Value(int64_t{0});
+        auto size = static_cast<int64_t>(f.tellg());
+        if (start < 0) start = size + start;
+        if (start < 0 || start >= size) return Value(int64_t{0});
+        if (len == 0) len = size;
+        if (start + len > size) len = size - start;
+        f.seekg(start);
+        std::string data(static_cast<size_t>(len), '\0');
+        f.read(&data[0], len);
+        auto actuallyRead = f.gcount();
+        if (actuallyRead <= 0) return Value(int64_t{0});
+        data.resize(static_cast<size_t>(actuallyRead));
+        return Value(data);
+    });
+
+    // int write_bytes(string file, int start, string str) -- confirmed
+    // against fluffos-2.9-ds2.08/file.c's own write_bytes(): opens for
+    // update (creating the file if it does not exist), a negative start
+    // counts back from the end, an out-of-range start fails, writes str
+    // at that byte offset (overwriting, not inserting), returns 1 on
+    // success and 0 on failure -- the ordinary file-efun convention,
+    // NOT rename()'s inverted one, matching real write_bytes() directly
+    // rather than assuming it shares do_rename()'s convention the way
+    // link() below genuinely does. Only the plain-string form of the
+    // real "int | buffer | string" third argument is implemented; this
+    // driver has no buffer type (same documented gap as to_int()).
+    t.registerEfun("write_bytes", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data) ||
+            !std::holds_alternative<std::string>(args[2].data)) {
+            throw LpcRuntimeError("write_bytes: expected (string, int, string)");
+        }
+        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        int64_t start = std::get<int64_t>(args[1].data);
+        const std::string& data = std::get<std::string>(args[2].data);
+
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        if (!f) {
+            // File does not exist yet -- create it, matching real
+            // write_bytes()'s own fopen(file, "wb") fallback.
+            std::ofstream create(path, std::ios::binary);
+            if (!create) return Value(int64_t{0});
+            create.close();
+            f.open(path, std::ios::binary | std::ios::in | std::ios::out);
+            if (!f) return Value(int64_t{0});
+        }
+        f.seekg(0, std::ios::end);
+        int64_t size = static_cast<int64_t>(f.tellg());
+        if (start < 0) start = size + start;
+        if (start < 0 || start > size) return Value(int64_t{0});
+        f.seekp(start);
+        f.write(data.data(), static_cast<std::streamsize>(data.size()));
+        return Value(static_cast<int64_t>(f.good() ? 1 : 0));
+    });
+
+    // int link(string from, string to) -- confirmed against
+    // fluffos-2.9-ds2.08/efuns_main.c's f_link(): routes through the
+    // exact same do_rename()-family function rename() above already
+    // uses, just with the F_LINK flag instead of F_RENAME, so it shares
+    // that function's own inverted return convention (0 on success, 1
+    // on failure), not the ordinary file-efun convention write_bytes()
+    // above uses. Zero real call sites in this mudlib (confirmed by
+    // grep; the only hits are doc files), implemented anyway per this
+    // row's own Tier 1 list.
+    t.registerEfun("link", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("link: expected two string arguments");
+        }
+        std::string from = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        std::string to   = vm.resolveMudlibPath(std::get<std::string>(args[1].data));
+        return Value(static_cast<int64_t>(::link(from.c_str(), to.c_str()) == 0 ? 0 : 1));
     });
 
     // -------------------------------------------------------------------------

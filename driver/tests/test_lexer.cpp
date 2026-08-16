@@ -4726,6 +4726,239 @@ static void testRegAssocZeroPatternsReturnsWholeStringWithDefaultToken() {
     std::cout << "testRegAssocZeroPatternsReturnsWholeStringWithDefaultToken OK\n";
 }
 
+// --- Phase 0.13 Tier 1 batch (m_delete, classp, all_previous_objects, ---
+// --- localtime, stat, read_bytes, write_bytes, link, unique_array) -----
+
+static void testMapDeleteAndMDeleteAliasBothRemoveTheKey() {
+    // map_delete/m_delete mutate the mapping in place; a missing key is
+    // a silent no-op, matching real mapping_delete().
+    ObjectVarHarness harness;
+    harness.writeFile("/mapdel.c",
+        "mapping probe_map_delete() {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2]);\n"
+        "    map_delete(m, \"a\");\n"
+        "    map_delete(m, \"nope\");\n"
+        "    return m;\n"
+        "}\n"
+        "mapping probe_m_delete() {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2]);\n"
+        "    m_delete(m, \"b\");\n"
+        "    return m;\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/mapdel");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(ob, "probe_map_delete", {});
+    auto* map1 = std::get_if<std::shared_ptr<lpcdriver::Mapping>>(&r1.data);
+    assert(map1 != nullptr && (*map1)->entries.size() == 1);
+    assert(std::get<std::string>((*map1)->entries[0].first.data) == "b");
+
+    lpcdriver::Value r2 = harness.vm.callFunction(ob, "probe_m_delete", {});
+    auto* map2 = std::get_if<std::shared_ptr<lpcdriver::Mapping>>(&r2.data);
+    assert(map2 != nullptr && (*map2)->entries.size() == 1);
+    assert(std::get<std::string>((*map2)->entries[0].first.data) == "a");
+
+    std::cout << "testMapDeleteAndMDeleteAliasBothRemoveTheKey OK\n";
+}
+
+static void testClasspAlwaysReturnsFalseSinceNoClassTypeExists() {
+    ObjectVarHarness harness;
+    harness.writeFile("/classptest.c",
+        "int probe_int() { return classp(5); }\n"
+        "int probe_string() { return classp(\"hi\"); }\n"
+        "int probe_array() { return classp(({1,2,3})); }\n");
+    auto ob = harness.objects.cloneObject("/classptest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(ob, "probe_int", {});
+    assert(std::get<int64_t>(r1.data) == 0);
+    lpcdriver::Value r2 = harness.vm.callFunction(ob, "probe_string", {});
+    assert(std::get<int64_t>(r2.data) == 0);
+    lpcdriver::Value r3 = harness.vm.callFunction(ob, "probe_array", {});
+    assert(std::get<int64_t>(r3.data) == 0);
+
+    std::cout << "testClasspAlwaysReturnsFalseSinceNoClassTypeExists OK\n";
+}
+
+static void testAllPreviousObjectsReturnsSameArrayAsPreviousObjectMinusOne() {
+    ObjectVarHarness harness;
+    harness.writeFile("/allprevcallee.c",
+        "mixed *probe() { return all_previous_objects(); }\n"
+        "mixed *probe_via_flag() { return previous_object(-1); }\n");
+    auto callee = harness.objects.loadObject("/allprevcallee");
+    assert(callee != nullptr);
+
+    harness.writeFile("/allprevcaller.c",
+        "mixed *call_probe() { return call_other(\"/allprevcallee\", \"probe\"); }\n"
+        "mixed *call_probe_via_flag() { return call_other(\"/allprevcallee\", \"probe_via_flag\"); }\n");
+
+    auto caller = harness.objects.cloneObject("/allprevcaller");
+    assert(caller != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(caller, "call_probe", {});
+    auto* arr1 = std::get_if<std::shared_ptr<lpcdriver::Array>>(&r1.data);
+    assert(arr1 != nullptr && (*arr1)->items.size() == 1);
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>((*arr1)->items[0].data) == caller);
+
+    lpcdriver::Value r2 = harness.vm.callFunction(caller, "call_probe_via_flag", {});
+    auto* arr2 = std::get_if<std::shared_ptr<lpcdriver::Array>>(&r2.data);
+    assert(arr2 != nullptr && (*arr2)->items.size() == 1);
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>((*arr2)->items[0].data) == caller);
+
+    std::cout << "testAllPreviousObjectsReturnsSameArrayAsPreviousObjectMinusOne OK\n";
+}
+
+static void testLocaltimeReturnsElevenElementArrayMatchingKnownEpochInstant() {
+    // 2005-03-18 01:58:31 UTC = epoch 1111111111 -- a well-known,
+    // easy-to-eyeball test instant. TZ is not pinned here (localtime()
+    // is genuinely local-timezone-dependent, matching the real efun),
+    // so only the fields that do not shift with timezone are checked
+    // exactly; array shape and the derived fields are checked for
+    // internal consistency instead.
+    ObjectVarHarness harness;
+    harness.writeFile("/localtimetest.c",
+        "mixed *probe(int clock) { return localtime(clock); }\n");
+    auto ob = harness.objects.cloneObject("/localtimetest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(int64_t{1111111111})});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 11);
+    for (int i = 0; i < 8; ++i) {
+        assert(std::holds_alternative<int64_t>((*arr)->items[i].data));
+    }
+    int64_t year = std::get<int64_t>((*arr)->items[5].data);
+    assert(year == 2005);
+    int64_t wday = std::get<int64_t>((*arr)->items[6].data);
+    assert(wday >= 0 && wday <= 6);
+    assert(std::holds_alternative<std::string>((*arr)->items[9].data));
+
+    std::cout << "testLocaltimeReturnsElevenElementArrayMatchingKnownEpochInstant OK\n";
+}
+
+static void testStatOnRegularFileReturnsSizeAndMtimeArray() {
+    ObjectVarHarness harness;
+    harness.writeFile("/stattest.c",
+        "mixed *probe() { return stat(\"/statfile.txt\"); }\n");
+    harness.writeFile("/statfile.txt", "12345");
+    auto ob = harness.objects.cloneObject("/stattest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 3);
+    assert(std::get<int64_t>((*arr)->items[0].data) == 5);
+    assert(std::holds_alternative<int64_t>((*arr)->items[1].data));
+    assert(std::get<int64_t>((*arr)->items[2].data) == 0);
+
+    std::cout << "testStatOnRegularFileReturnsSizeAndMtimeArray OK\n";
+}
+
+static void testReadBytesReadsSubrangeAndHandlesNegativeStartAndMissingFile() {
+    ObjectVarHarness harness;
+    harness.writeFile("/readbytestest.c",
+        "mixed probe_range() { return read_bytes(\"/rb.txt\", 2, 3); }\n"
+        "mixed probe_neg_start() { return read_bytes(\"/rb.txt\", -4); }\n"
+        "mixed probe_missing() { return read_bytes(\"/nope.txt\"); }\n");
+    harness.writeFile("/rb.txt", "abcdefghij");
+    auto ob = harness.objects.cloneObject("/readbytestest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(ob, "probe_range", {});
+    assert(std::holds_alternative<std::string>(r1.data));
+    assert(std::get<std::string>(r1.data) == "cde");
+
+    lpcdriver::Value r2 = harness.vm.callFunction(ob, "probe_neg_start", {});
+    assert(std::holds_alternative<std::string>(r2.data));
+    assert(std::get<std::string>(r2.data) == "ghij");
+
+    lpcdriver::Value r3 = harness.vm.callFunction(ob, "probe_missing", {});
+    assert(std::holds_alternative<int64_t>(r3.data));
+    assert(std::get<int64_t>(r3.data) == 0);
+
+    std::cout << "testReadBytesReadsSubrangeAndHandlesNegativeStartAndMissingFile OK\n";
+}
+
+static void testWriteBytesOverwritesAtOffsetThenReadBytesConfirmsIt() {
+    ObjectVarHarness harness;
+    harness.writeFile("/writebytestest.c",
+        "int probe_write() { return write_bytes(\"/wb.txt\", 2, \"XY\"); }\n"
+        "mixed probe_read() { return read_bytes(\"/wb.txt\"); }\n");
+    harness.writeFile("/wb.txt", "abcdefgh");
+    auto ob = harness.objects.cloneObject("/writebytestest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value writeResult = harness.vm.callFunction(ob, "probe_write", {});
+    assert(std::holds_alternative<int64_t>(writeResult.data));
+    assert(std::get<int64_t>(writeResult.data) == 1);
+
+    lpcdriver::Value readResult = harness.vm.callFunction(ob, "probe_read", {});
+    assert(std::holds_alternative<std::string>(readResult.data));
+    assert(std::get<std::string>(readResult.data) == "abXYefgh");
+
+    std::cout << "testWriteBytesOverwritesAtOffsetThenReadBytesConfirmsIt OK\n";
+}
+
+static void testLinkCreatesASecondNameForTheSameFileContent() {
+    ObjectVarHarness harness;
+    harness.writeFile("/linktest.c",
+        "int probe_link() { return link(\"/orig.txt\", \"/linked.txt\"); }\n"
+        "mixed probe_read_linked() { return read_file(\"/linked.txt\"); }\n");
+    harness.writeFile("/orig.txt", "shared content\n");
+    auto ob = harness.objects.cloneObject("/linktest");
+    assert(ob != nullptr);
+
+    lpcdriver::Value linkResult = harness.vm.callFunction(ob, "probe_link", {});
+    assert(std::holds_alternative<int64_t>(linkResult.data));
+    // Real link() shares rename()'s own inverted convention: 0 = success.
+    assert(std::get<int64_t>(linkResult.data) == 0);
+
+    lpcdriver::Value readResult = harness.vm.callFunction(ob, "probe_read_linked", {});
+    assert(std::holds_alternative<std::string>(readResult.data));
+    assert(std::get<std::string>(readResult.data) == "shared content\n");
+
+    std::cout << "testLinkCreatesASecondNameForTheSameFileContent OK\n";
+}
+
+static void testUniqueArrayGroupsElementsByClosureResultAndExcludesSkipValue() {
+    ObjectVarHarness harness;
+    harness.writeFile("/uniqarrtest.c",
+        "mixed *probe(mixed *arr) {\n"
+        "    return unique_array(arr, (: $1 % 3 :));\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/uniqarrtest");
+    assert(ob != nullptr);
+
+    auto arr = std::make_shared<lpcdriver::Array>();
+    for (int64_t v : {1, 2, 3, 4, 5, 6, 9}) arr->items.emplace_back(v);
+    // 1%3=1, 2%3=2, 3%3=0(skip default), 4%3=1, 5%3=2, 6%3=0(skip), 9%3=0(skip)
+    // Groups expected (order not asserted beyond membership): {1,4} and {2,5}.
+    // 3, 6, 9 are excluded (classifier result 0 == default skip value).
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {lpcdriver::Value(arr)});
+    auto* groups = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(groups != nullptr && (*groups)->items.size() == 2);
+
+    std::vector<std::vector<int64_t>> actual;
+    for (const auto& g : (*groups)->items) {
+        auto* gArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&g.data);
+        assert(gArr != nullptr);
+        std::vector<int64_t> nums;
+        for (const auto& item : (*gArr)->items) nums.push_back(std::get<int64_t>(item.data));
+        actual.push_back(nums);
+    }
+    bool foundOneFour = false, foundTwoFive = false;
+    for (const auto& g : actual) {
+        if (g.size() == 2 && g[0] == 1 && g[1] == 4) foundOneFour = true;
+        if (g.size() == 2 && g[0] == 2 && g[1] == 5) foundTwoFive = true;
+    }
+    assert(foundOneFour);
+    assert(foundTwoFive);
+
+    std::cout << "testUniqueArrayGroupsElementsByClosureResultAndExcludesSkipValue OK\n";
+}
+
 static void testSqrtNegativeArgThrows() {
     // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
     ObjectVarHarness harness;
@@ -11141,6 +11374,15 @@ int main() {
     testRegexplodeWithCaptureGroupPatternUsesFullMatchNotGroupText();
     testRegAssocMatchesRealDocCommentExample();
     testRegAssocZeroPatternsReturnsWholeStringWithDefaultToken();
+    testMapDeleteAndMDeleteAliasBothRemoveTheKey();
+    testClasspAlwaysReturnsFalseSinceNoClassTypeExists();
+    testAllPreviousObjectsReturnsSameArrayAsPreviousObjectMinusOne();
+    testLocaltimeReturnsElevenElementArrayMatchingKnownEpochInstant();
+    testStatOnRegularFileReturnsSizeAndMtimeArray();
+    testReadBytesReadsSubrangeAndHandlesNegativeStartAndMissingFile();
+    testWriteBytesOverwritesAtOffsetThenReadBytesConfirmsIt();
+    testLinkCreatesASecondNameForTheSameFileContent();
+    testUniqueArrayGroupsElementsByClosureResultAndExcludesSkipValue();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();
