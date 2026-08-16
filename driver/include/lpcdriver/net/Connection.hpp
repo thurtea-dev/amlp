@@ -72,6 +72,22 @@ public:
     int terminalWidth() const { return terminalWidth_; }
     int terminalHeight() const { return terminalHeight_; }
 
+    // One-shot flag mirroring real comm.c's own "apply(APPLY_WINDOW_SIZE,
+    // ip->ob, 2, ORIGIN_DRIVER)" firing every time a NAWS subnegotiation
+    // is actually parsed, not just when the values happen to change --
+    // set by handleSubnegotiation(), consumed by Server::handleConnection()
+    // right after pollLines(), the same "optional one-shot value" shape
+    // takePendingInputTo()/takePendingNotifyFail() already use. Kept
+    // separate from terminalWidth()/terminalHeight() themselves (which
+    // stay valid and queryable at any time via query_screen_width()/
+    // query_screen_height()) since firing an LPC apply needs VM access
+    // this class deliberately does not have.
+    bool takeWindowSizeUpdate() {
+        bool had = windowSizeUpdated_;
+        windowSizeUpdated_ = false;
+        return had;
+    }
+
     // Registers/overwrites the pending input_to handler for this
     // connection (real FluffOS's set_call(), simulate.c).
     void setPendingInputTo(std::shared_ptr<LpcObject> obj, std::string function,
@@ -147,6 +163,7 @@ private:
     bool echoSuppressed_ = false;
     int terminalWidth_ = 0;
     int terminalHeight_ = 0;
+    bool windowSizeUpdated_ = false;
 };
 
 } // namespace lpcdriver

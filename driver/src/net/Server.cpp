@@ -303,6 +303,25 @@ void Server::handleConnection(Connection& conn) {
     auto lines = conn.pollLines();
 
     auto obj = conn.boundObject();
+
+    // Real comm.c: "apply(APPLY_WINDOW_SIZE, ip->ob, 2, ORIGIN_DRIVER)"
+    // fires on whichever object is currently bound the moment a NAWS
+    // subnegotiation is parsed -- independent of whether any text line
+    // was also completed in this same poll (NAWS data is out-of-band
+    // control data, not line data).
+    if (conn.takeWindowSizeUpdate() && obj) {
+        OutputContext::set(&conn);
+        try {
+            vm_.callFunction(obj, "window_size",
+                {Value(static_cast<int64_t>(conn.terminalWidth())),
+                 Value(static_cast<int64_t>(conn.terminalHeight()))});
+        } catch (const std::exception& e) {
+            std::cerr << "[net] connection fd=" << conn.fd()
+                       << " window_size() failed: " << e.what() << "\n";
+        }
+        OutputContext::set(nullptr);
+    }
+
     if (obj && !lines.empty()) {
         OutputContext::set(&conn);
         for (const auto& line : lines) {

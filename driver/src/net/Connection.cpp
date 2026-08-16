@@ -248,6 +248,10 @@ void Connection::handleSubnegotiation() {
     auto byteAt = [&](size_t i) { return static_cast<unsigned char>(sbBuffer_[i]); };
     terminalWidth_ = (byteAt(1) << 8) | byteAt(2);
     terminalHeight_ = (byteAt(3) << 8) | byteAt(4);
+    // Real comm.c fires APPLY_WINDOW_SIZE every time this branch runs,
+    // not just when the values actually differ from before -- matched
+    // here via a plain one-shot flag Server::handleConnection() consumes.
+    windowSizeUpdated_ = true;
 }
 
 void Connection::setPendingInputTo(std::shared_ptr<LpcObject> obj, std::string function,

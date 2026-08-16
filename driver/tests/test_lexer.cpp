@@ -5804,6 +5804,66 @@ static void testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives() {
     std::cout << "testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives OK\n";
 }
 
+static void testWindowSizeUpdateFlagSetOnNawsAndConsumedOnce() {
+    // Connection-level check of the one-shot flag Server::handleConnection()
+    // consumes to decide whether to fire window_size() (APPLY_WINDOW_SIZE) --
+    // mirrors testNawsSubnegotiationUpdatesTerminalWidthAndHeight()'s own
+    // byte sequence, just also asserting the flag side of handleSubnegotiation().
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    // Nothing has happened yet: no update pending.
+    assert(conn.takeWindowSizeUpdate() == false);
+
+    std::string raw;
+    raw += '\xff'; raw += '\xfa'; raw += '\x1f';  // IAC SB NAWS
+    raw += static_cast<char>(0);  raw += static_cast<char>(90);   // width = 90
+    raw += static_cast<char>(0);  raw += static_cast<char>(30);   // height = 30
+    raw += '\xff'; raw += '\xf0';  // IAC SE
+    ::write(fds[1], raw.data(), raw.size());
+    conn.pollLines();
+
+    // Set exactly once by handleSubnegotiation() -- take it and confirm the
+    // flag is consumed (a second take returns false), matching the same
+    // "optional one-shot value" contract takePendingInputTo()/
+    // takePendingNotifyFail() already use.
+    assert(conn.takeWindowSizeUpdate() == true);
+    assert(conn.takeWindowSizeUpdate() == false);
+
+    std::cout << "testWindowSizeUpdateFlagSetOnNawsAndConsumedOnce OK\n";
+}
+
+static void testWindowSizeUpdateFlagNotSetByPlainDataLines() {
+    // Ordinary line traffic (no telnet subnegotiation at all) must never
+    // spuriously flag a window-size update -- window_size() firing is
+    // strictly tied to a NAWS subnegotiation actually being parsed.
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+
+    ::write(fds[1], "hello\n", 6);
+    auto lines = conn.pollLines();
+    assert(lines.size() == 1 && lines[0] == "hello");
+    assert(conn.takeWindowSizeUpdate() == false);
+
+    std::cout << "testWindowSizeUpdateFlagNotSetByPlainDataLines OK\n";
+}
+
+// Not tested directly: the actual window_size() apply firing inside
+// Server::handleConnection() ("if (conn.takeWindowSizeUpdate() && obj) ...
+// vm_.callFunction(obj, \"window_size\", ...)"), for the same reason
+// documented just below for the IAC DO NAWS trigger -- handleConnection()
+// is private, outside this driver's established test seam
+// (Server::dispatchLine()/fireNetDeadIfLinkDead() are the two methods
+// pulled out static and public specifically so tests do not need a live
+// accept loop). The flag Server::handleConnection() reads is fully covered
+// by the two Connection-level tests just above; only the one call site in
+// Server.cpp itself (mirroring fireNetDeadIfLinkDead()'s own well-tested
+// shape) is unverified by a regression test.
+
 // Not tested directly: the "IAC DO NAWS sent from Server::onNewConnection()"
 // trigger itself. onNewConnection() is private, deliberately outside this
 // driver's established test seam (Server::dispatchLine()/
@@ -5813,6 +5873,101 @@ static void testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives() {
 // triggers are fully covered by the Connection-level tests above; only the
 // one-line call site in Server.cpp itself is unverified by a regression
 // test.
+
+// --- terminal_colour() (Phase 0.8, net/instruct.md item 4) --------------
+// Algorithm grounded against real daemon/terminal.c's no_colours() and
+// std/user.c's message() (both explode(str, "%^") and substitute/strip
+// per-segment) -- see EfunTable.cpp's own comment on the efun registration
+// for the full citation trail; terminal_colour() itself has no reference
+// C implementation anywhere in the vendored fluffos-2.9-ds2.08 tree.
+
+static void testTerminalColourSubstitutesRecognizedTokensWithMaxColorsOn() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tcolour1.c",
+        "string probe() {\n"
+        "    mapping colours = ([ \"RED\": \"\x1b[31m\", \"RESET\": \"\x1b[0m\" ]);\n"
+        "    return terminal_colour(\"%^RED%^hello%^RESET%^\", colours, 1);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/tcolour1");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<std::string>(r.data) == "\x1b[31mhello\x1b[0m");
+
+    std::cout << "testTerminalColourSubstitutesRecognizedTokensWithMaxColorsOn OK\n";
+}
+
+static void testTerminalColourStripsRecognizedTokensWithMaxColorsOff() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tcolour2.c",
+        "string probe() {\n"
+        "    mapping colours = ([ \"RED\": \"\x1b[31m\", \"RESET\": \"\x1b[0m\" ]);\n"
+        "    return terminal_colour(\"%^RED%^hello%^RESET%^\", colours, 0);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/tcolour2");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<std::string>(r.data) == "hello");
+
+    std::cout << "testTerminalColourStripsRecognizedTokensWithMaxColorsOff OK\n";
+}
+
+static void testTerminalColourLeavesUnrecognizedTokensAndPlainTextAsIs() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tcolour3.c",
+        "string probe() {\n"
+        "    mapping colours = ([ \"RED\": \"\x1b[31m\" ]);\n"
+        "    return terminal_colour(\"plain %^BOGUS%^ text\", colours, 1);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/tcolour3");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r = harness.vm.callFunction(ob, "probe", {});
+    // "BOGUS" is not a key in colours at all -- left exactly as literal
+    // text, same as real no_colours()/message() leave any unrecognized
+    // segment (including ordinary plain text) completely untouched.
+    assert(std::get<std::string>(r.data) == "plain BOGUS text");
+
+    std::cout << "testTerminalColourLeavesUnrecognizedTokensAndPlainTextAsIs OK\n";
+}
+
+static void testTerminalColourWithNoMarkupReturnsStringUnchanged() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tcolour4.c",
+        "string probe() {\n"
+        "    mapping colours = ([ \"RED\": \"\x1b[31m\" ]);\n"
+        "    return terminal_colour(\"just plain text\", colours, 1);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/tcolour4");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<std::string>(r.data) == "just plain text");
+
+    std::cout << "testTerminalColourWithNoMarkupReturnsStringUnchanged OK\n";
+}
+
+static void testTerminalColourMultipleRealCodesInOneString() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tcolour5.c",
+        "string probe() {\n"
+        "    mapping colours = ([\n"
+        "        \"BOLD\": \"\x1b[1m\", \"GREEN\": \"\x1b[32m\",\n"
+        "        \"CYAN\": \"\x1b[36m\", \"RESET\": \"\x1b[0m\"\n"
+        "    ]);\n"
+        "    return terminal_colour(\"%^BOLD%^%^GREEN%^ok%^RESET%^ %^CYAN%^bye%^RESET%^\",\n"
+        "                           colours, 1);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/tcolour5");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<std::string>(r.data) ==
+           "\x1b[1m\x1b[32mok\x1b[0m \x1b[36mbye\x1b[0m");
+
+    std::cout << "testTerminalColourMultipleRealCodesInOneString OK\n";
+}
 
 static void testSqrtNegativeArgThrows() {
     // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
@@ -12266,6 +12421,13 @@ int main() {
     testQueryScreenWidthAndHeightReturnNegotiatedValues();
     testInputToNoEchoFlagSendsIacWillEchoImmediately();
     testEchoReenabledWithIacWontEchoWhenAwaitedLineArrives();
+    testWindowSizeUpdateFlagSetOnNawsAndConsumedOnce();
+    testWindowSizeUpdateFlagNotSetByPlainDataLines();
+    testTerminalColourSubstitutesRecognizedTokensWithMaxColorsOn();
+    testTerminalColourStripsRecognizedTokensWithMaxColorsOff();
+    testTerminalColourLeavesUnrecognizedTokensAndPlainTextAsIs();
+    testTerminalColourWithNoMarkupReturnsStringUnchanged();
+    testTerminalColourMultipleRealCodesInOneString();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();

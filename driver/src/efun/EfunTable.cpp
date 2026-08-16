@@ -3384,6 +3384,111 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(conn->terminalHeight()));
     });
 
+    // string terminal_colour(string str, mapping colours, void|int
+    // max_colors, void|int indent) -- Phase 0.8's own item 4 (net/
+    // instruct.md). Real signature confirmed against efun_defs.c ground
+    // truth ("terminal_colour",F_TERMINAL_COLOUR,...,T_STRING,T_MAPPING,
+    // T_NUMBER,T_NUMBER,...,2,4 min/max args) since neither func_spec.c's
+    // text nor any .c file in the vendored tree carries an actual
+    // f_terminal_colour() body -- another real gap in this specific
+    // archived copy, same situation as debug_info/base_name/pluralize.
+    // net/instruct.md's own citation for this item ("comm.c's telnet_neg()")
+    // is the same already-disproven function name from row 0.8's NAWS
+    // item, and doesn't actually describe terminal_colour() at all --
+    // %^ colour markup is not a telnet/RFC concern, it is a mudlib-level
+    // string convention.
+    //
+    // Not guessed at despite the missing driver-side reference: this
+    // exact mudlib has real, load-bearing, live code implementing the
+    // identical operation twice -- daemon/terminal.c's own no_colours()
+    // ("explode(str, \"%^\"); if (term_info[\"unknown\"][bits[i]])
+    // bits[i] = \"\";") and std/user.c's own message() colourizing step
+    // ("explode(msg, \"%^\"); if (term_info[words[i]]) words[i] =
+    // term_info[words[i]];"). Both split on the literal two-character
+    // delimiter "%^" (not a paired "%^TOKEN%^" wrapper parse), then for
+    // each resulting segment: if it is a truthy key in the caller-
+    // supplied colour mapping, substitute (or, for the "no colour"
+    // case, strip to empty); otherwise the segment is left exactly as
+    // it was, matching real plain text passing through untouched.
+    // Implemented as one unified version of both real functions,
+    // parameterized on max_colors exactly as the real signature implies:
+    // max_colors > 0 substitutes a recognized token with the mapping's
+    // own string value (user.c's own real behavior); max_colors <= 0
+    // (or omitted -- default 1, "on", since a caller who bothered to
+    // pass a real colours mapping is not typically asking for it to be
+    // discarded) strips a recognized token to nothing (no_colours()'s
+    // own real behavior).
+    //
+    // "Truthy" here follows this driver's own established isTruthy()
+    // (an empty string counts as falsy), not real LPC's own "any string
+    // reference, even empty, is truthy" rule -- a genuine, pre-existing
+    // divergence in this driver's own Value semantics (confirmed
+    // directly in Value.cpp, not new to this efun), so a colour mapping
+    // whose own values are empty strings (real terminal.c's own
+    // "unknown" variant, used for clients with no colour support) would
+    // leave recognized tokens as literal un-stripped text here rather
+    // than genuinely stripping them the way real no_colours() does.
+    // Flagged rather than silently diverging unnoticed; not fixed, since
+    // isTruthy()'s own string-emptiness rule is used everywhere else in
+    // this driver and changing it is far outside this row's own scope.
+    // indent (the 4th argument) is accepted for signature compatibility
+    // only, not implemented -- no reference for its real line-wrapping
+    // behavior exists anywhere in the vendored tree, and nothing
+    // confirmed live in this mudlib calls terminal_colour() at all (zero
+    // real call sites found by grep; only the %^ markup convention
+    // itself is real and load-bearing, always processed by this
+    // mudlib's own inline code, never by calling this efun).
+    t.registerEfun("terminal_colour", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::shared_ptr<Mapping>>(args[1].data)) {
+            throw LpcRuntimeError("terminal_colour: expected (string, mapping, void|int, void|int)");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        auto colours = std::get<std::shared_ptr<Mapping>>(args[1].data);
+        int64_t maxColors = 1;
+        if (args.size() > 2 && std::holds_alternative<int64_t>(args[2].data)) {
+            maxColors = std::get<int64_t>(args[2].data);
+        }
+
+        std::vector<std::string> parts;
+        size_t pos = 0;
+        for (;;) {
+            size_t next = str.find("%^", pos);
+            if (next == std::string::npos) {
+                parts.push_back(str.substr(pos));
+                break;
+            }
+            parts.push_back(str.substr(pos, next - pos));
+            pos = next + 2;
+        }
+
+        auto lookup = [&](const std::string& key) -> const Value* {
+            if (!colours) return nullptr;
+            for (const auto& entry : colours->entries) {
+                if (std::holds_alternative<std::string>(entry.first.data) &&
+                    std::get<std::string>(entry.first.data) == key) {
+                    return &entry.second;
+                }
+            }
+            return nullptr;
+        };
+
+        std::string result;
+        for (const auto& part : parts) {
+            const Value* found = lookup(part);
+            if (found && isTruthy(*found)) {
+                if (maxColors > 0 && std::holds_alternative<std::string>(found->data)) {
+                    result += std::get<std::string>(found->data);
+                }
+                // else: no colour support, or a non-string mapping value
+                // -- strip the recognized token to nothing.
+            } else {
+                result += part;
+            }
+        }
+        return Value(result);
+    });
+
     // string query_ip_number(void|object ob) -- comm.c's real
     // query_ip_number(): "inet_ntoa(ob->interactive->addr.sin_addr)",
     // defaulting to command_giver when ob is omitted. This driver has
