@@ -18,7 +18,7 @@ complete and the full test suite is passing with no regressions.**
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
 | 0.1 | `throw()` efun — carry a Value to the nearest `catch()` | `src/efun` | [x] |
-| 0.2 | `sscanf` full format set: `%f`, `%x`, `%(regexp)`, adjacent `%s` | `src/efun` | [x] (partial: `%(regexp)` pending 0.11) |
+| 0.2 | `sscanf` full format set: `%f`, `%x`, `%(regexp)`, adjacent `%s` | `src/efun` | [x] (partial: `%(regexp)` still pending; 0.11's PCRE2 wrapper it depended on is now done) |
 | 0.3 | `sprintf` `%*` dynamic field width | `src/efun` | [x] |
 | 0.4 | `set_eval_limit` as a real accumulated-cost model (not no-op) | `src/vm` | [x] |
 | 0.5 | Full `O_DESTRUCTED` apply guards on every cross-object call | `src/object` | [x] |
@@ -27,7 +27,7 @@ complete and the full test suite is passing with no regressions.**
 | 0.8 | Full telnet IAC negotiation, echo suppression, NAWS | `src/net` | [ ] |
 | 0.9 | `map`/`filter`/`sort_array` as real closure consumers | `src/efun` | [x] (partial: all mudlib shapes covered) |
 | 0.10 | `socket_*` family basics (create/connect/write/read/close) | `src/net` + `src/efun` | [ ] |
-| 0.11 | `regexp`/`regexplode`/`reg_assoc` PCRE efuns | `src/efun` | [ ] |
+| 0.11 | `regexp`/`regexplode`/`reg_assoc` PCRE efuns | `src/efun` | [x] |
 | 0.12 | Every efun has at least one regression test | `tests` | [ ] (ongoing) |
 | 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: ~131 registered) |
 
@@ -133,7 +133,7 @@ cmake --build driver/build
 ctest --test-dir driver/build --output-on-failure
 ```
 
-Current baseline: **413 tests passing** (as of 2026-08-15). Every new slice
+Current baseline: **421 tests passing** (as of 2026-08-16). Every new slice
 must pass the full suite before merging.
 
 ---

@@ -3,6 +3,117 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**Known issue, not fixed this session:** `driver/tests/test_lexer.cpp` uses
+bare `assert()` for real test logic in places, not just sanity checks, for
+example `assert(harness.objects.loadSimulEfunObject())`. Building the tests
+target with `NDEBUG` defined (as `cmake -DCMAKE_BUILD_TYPE=Release` does)
+silently turns every one of those asserts into a no-op instead of failing,
+including the ones with a real side effect, so the whole test binary can
+report a false pass, or crash later on an unrelated symptom, while looking
+like a broken test suite passed. Confirmed directly this session: a Release
+build aborted partway through with "undefined function or efun: double_it"
+in `testSimulEfunResolvesUnknownBareCallToSimulEfunObject`, because the
+`assert()` that was supposed to call `loadSimulEfunObject()` never ran under
+`NDEBUG`. A Debug build (the project's own CMake default when no build type
+is given) ran the identical 413 tests clean. Flagging so this does not get
+missed later. Whoever picks this up can choose between forcing `-UNDEBUG` on
+the `lpcdriver_tests` target in `driver/tests/CMakeLists.txt`, or replacing
+the side-effecting asserts with real checks that fail independently of
+`NDEBUG`.
+
+**2026-08-16: PCRE2 `regexp`/`regexplode`/`reg_assoc` efuns implemented
+(Phase 0 row 0.11).** Added PCRE2 via `pkg_check_modules(PCRE2 REQUIRED
+libpcre2-8)` in `driver/src/efun/CMakeLists.txt`, linked privately into the
+`efun` target. Note up front: real `fluffos-2.9-ds2.08` implements its own
+regexp engine (Henry Spencer's, `regexp.c`), not PCRE. Wrapping PCRE2 here is
+the deliberate modern substitution this row's own `instruct.md`/`ROADMAP.md`
+text calls for, not a literal port of that engine. The efun-level contract
+below (what each efun selects, splits, or tokenizes, and in what order) is
+reproduced exactly from the real functions, confirmed by reading them
+directly; the underlying regex dialect is PCRE2's, not Spencer's, so
+mainstream constructs (character classes, alternation, quantifiers, anchors,
+groups) match, but exotic edge cases may not.
+
+`regexp()`: confirmed the real signature directly against `func_spec.c`
+(`mixed regexp(string | string *, string, void | int);`) and
+`efuns_main.c`'s `f_regexp()`, not assumed from this row's own simplified
+task description, which only covers the single-string case. The real efun is
+broader. A single-string subject returns plain int 1/0 via
+`match_single_regexp()`, and a third argument is an error in that form
+("3rd argument illegal for regexp(string, string)", reproduced verbatim). An
+array-of-strings subject returns the matching elements themselves, not a
+bool array, via `match_regexp()`: `flag&1` interleaves each match's own
+1-based index right after it (string, index, string, index, ..., confirmed
+by hand-tracing `match_regexp()`'s own backward-filling loop against a
+concrete example), `flag&2` inverts the selection to non-matching elements
+instead, and a non-string array element is never selected either way.
+Implemented the full real spec, not just the task's simplified subset.
+
+`reg_assoc()`: confirmed against `array.c`'s `reg_assoc()` directly,
+including its own worked example in a source comment
+(`reg_assoc("testhahatest", ({"haha","te"}), ({2,3}), 4)`), reproduced
+verbatim as a regression test. Scans the string left to right; at each
+position, tries every pattern and keeps whichever produces the
+earliest-starting match, ties going to the lower pattern index (matching the
+real `currstart < laststart` comparison exactly). Returns two same-length
+arrays: text segments alternating with matched substrings, and, in the same
+positions, each match's own token (or the default value between matches and
+at the end). Zero patterns is a real, explicit special case in the source,
+not an error: the whole string comes back unmatched, paired with one default
+token.
+
+`regexplode()`: checked directly against the vendored `fluffos-2.9-ds2.08`
+tree before implementing, not assumed. This is not a real FluffOS 2.9 efun.
+Grepped the entire tree (`func_spec.c`, `efun_defs.c`, `efunctions.h`,
+`opc.h`, `array.c`, `regexp.c`); the only hit anywhere is a comment inside
+`implode()`'s own loop-safety code crediting a zero-length-match guard to
+"regexplode", not a registered function in this reference build. Implemented
+anyway because this row's own `instruct.md`/`prompt.md` task text explicitly
+calls for it, and documented in the code itself as a driver addition rather
+than a ported FluffOS efun. Same shape as `reg_assoc()`'s own real output
+(alternating text and match, one more text segment than matches), using the
+identical zero-length-match guard `reg_assoc()`'s own real source documents.
+The `regexp_assoc` alias for `reg_assoc()` is likewise not a real FluffOS 2.9
+name (same grep sweep), added because the row's own `instruct.md` calls for
+it as a second name.
+
+8 new regression tests: single-string basic match and no-match, the
+third-argument-illegal error, the array form with both the index and invert
+flags, a malformed pattern throwing, `regexplode()`'s basic split, a
+`regexplode()` pattern that includes a capturing group (confirms the whole
+match is used to split, never just the captured subgroup text, since neither
+efun exposes captures), `reg_assoc()` matching its own real doc-comment
+example element for element, and `reg_assoc()` with zero patterns. Full
+suite: 421 tests passing, up from 413, no regressions.
+
+**2026-08-15: Phase 0.13 efun growth batch — 20 new core efuns implemented.**
+Grepped real call sites across `mudlib/nightmare3_fluffos_v2/lib/` to find
+the highest-usage missing efuns, then confirmed every spec against the
+FluffOS 2.9 reference source before implementing.
+
+Top picks by real call count: `to_float` (13 sites), `rename` (10), `typeof`
+(5), `sqrt` (5), `rmdir` (4). `abs`, `min`, `max` from `packages/contrib.c`.
+Full math package (`cos`/`sin`/`tan`/`asin`/`acos`/`atan`/`sqrt`/`log`/
+`log10`/`pow`/`exp`/`floor`/`ceil`) from `packages/math_spec.c`/`math.c`.
+
+Notable spec details confirmed directly from source: `rename()` returns 0
+on success and 1 on failure — the inverse of most file efuns — matching
+`do_rename()`'s own return convention confirmed in `efuns_main.c`. `typeof()`
+type-name strings lifted directly from `interpret.c`'s own `type_names[]`
+array (`"int"`, `"float"`, `"string"`, `"object"`, `"array"`, `"mapping"`,
+`"function"`). `abs()` preserves input type exactly (int in → int out, float
+in → float out), not a float-only function. `max()`/`min()` second arg → index
+rather than value, matching `contrib.c`'s own `push_number(max_index)` branch.
+`asin()`/`acos()` throw on `|x| > 1.0`, matching `f_asin()`'s real guard; all
+math efuns promote an int argument to float at the call site, matching real
+LPC's numeric coercion. `to_float()` uses `sscanf "%lf"` for strings,
+returning 0.0 for unparseable input, exactly as `f__to_float()` does.
+`log()`/`log10()` throw on `x <= 0.0`.
+
+11 new regression tests. Full suite: 413 tests passing, up from 403, no
+regressions. Also added `driver/build_debug/` to `.gitignore` (the debug
+build directory created this session was accidentally untracked).
+
 **2026-08-09: `printf()` implemented, one tight pick from the
 efun-coverage survey's Tier 1 list.** Checked every named candidate
 (`function_exists`, `printf`, `query_idle`, `rusage`, `command`,

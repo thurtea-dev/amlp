@@ -4494,6 +4494,238 @@ static void testMathEfunsSqrtFloorCeilCosExpLog() {
     std::cout << "testMathEfunsSqrtFloorCeilCosExpLog OK\n";
 }
 
+// --- regexp / regexplode / reg_assoc (Phase 0 row 0.11, PCRE2-backed) ----
+
+static void testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero() {
+    // Single-string form: plain int 1/0, confirmed against
+    // efuns_main.c's f_regexp() -> match_single_regexp() (a bare
+    // regexec() truth value, not the array-of-strings form below).
+    ObjectVarHarness harness;
+    harness.writeFile("/regprobe.c",
+        "int probe(string s, string pat) { return regexp(s, pat); }\n");
+    auto ob = harness.objects.cloneObject("/regprobe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value matched = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("the quick brown fox")),
+         lpcdriver::Value(std::string("qu[a-z]+"))});
+    assert(std::holds_alternative<int64_t>(matched.data));
+    assert(std::get<int64_t>(matched.data) == 1);
+
+    lpcdriver::Value noMatch = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("the quick brown fox")),
+         lpcdriver::Value(std::string("^slow"))});
+    assert(std::holds_alternative<int64_t>(noMatch.data));
+    assert(std::get<int64_t>(noMatch.data) == 0);
+
+    std::cout << "testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero OK\n";
+}
+
+static void testRegexpThirdArgIllegalForStringFormThrows() {
+    // Real f_regexp(): "3rd argument illegal for regexp(string,
+    // string)" -- the flag argument only makes sense against the
+    // array-of-strings form below.
+    ObjectVarHarness harness;
+    harness.writeFile("/regflagerr.c",
+        "int probe() { return regexp(\"abc\", \"a\", 1); }\n");
+    auto ob = harness.objects.cloneObject("/regflagerr");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe", {});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testRegexpThirdArgIllegalForStringFormThrows OK\n";
+}
+
+static void testRegexpArrayFormSelectsMatchingLinesWithIndexAndInvertFlags() {
+    // Array-of-strings form: match_regexp() returns the MATCHING
+    // ELEMENTS themselves (not a bool array), in original order.
+    // flag&1 interleaves each match's own 1-based index right after
+    // it; flag&2 inverts the selection to non-matching elements.
+    // Confirmed by hand-tracing match_regexp()'s backward-filling loop
+    // in array.c against a concrete example.
+    ObjectVarHarness harness;
+    harness.writeFile("/regarr.c",
+        "mixed *plain(mixed *lines, string pat) { return regexp(lines, pat); }\n"
+        "mixed *withIndex(mixed *lines, string pat) { return regexp(lines, pat, 1); }\n"
+        "mixed *inverted(mixed *lines, string pat) { return regexp(lines, pat, 2); }\n");
+    auto ob = harness.objects.cloneObject("/regarr");
+    assert(ob != nullptr);
+
+    auto lines = std::make_shared<lpcdriver::Array>();
+    lines->items.push_back(lpcdriver::Value(std::string("apple")));
+    lines->items.push_back(lpcdriver::Value(std::string("banana")));
+    lines->items.push_back(lpcdriver::Value(std::string("cherry")));
+    lines->items.push_back(lpcdriver::Value(std::string("date")));
+
+    lpcdriver::Value plain = harness.vm.callFunction(ob, "plain",
+        {lpcdriver::Value(lines), lpcdriver::Value(std::string("an"))});
+    auto* plainArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&plain.data);
+    assert(plainArr != nullptr && (*plainArr)->items.size() == 1);
+    assert(std::get<std::string>((*plainArr)->items[0].data) == "banana");
+
+    lpcdriver::Value withIdx = harness.vm.callFunction(ob, "withIndex",
+        {lpcdriver::Value(lines), lpcdriver::Value(std::string("^[ab]"))});
+    auto* withIdxArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&withIdx.data);
+    assert(withIdxArr != nullptr && (*withIdxArr)->items.size() == 4);
+    assert(std::get<std::string>((*withIdxArr)->items[0].data) == "apple");
+    assert(std::get<int64_t>((*withIdxArr)->items[1].data) == 1);
+    assert(std::get<std::string>((*withIdxArr)->items[2].data) == "banana");
+    assert(std::get<int64_t>((*withIdxArr)->items[3].data) == 2);
+
+    lpcdriver::Value inv = harness.vm.callFunction(ob, "inverted",
+        {lpcdriver::Value(lines), lpcdriver::Value(std::string("^[ab]"))});
+    auto* invArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&inv.data);
+    assert(invArr != nullptr && (*invArr)->items.size() == 2);
+    assert(std::get<std::string>((*invArr)->items[0].data) == "cherry");
+    assert(std::get<std::string>((*invArr)->items[1].data) == "date");
+
+    std::cout << "testRegexpArrayFormSelectsMatchingLinesWithIndexAndInvertFlags OK\n";
+}
+
+static void testRegexpBadPatternThrows() {
+    ObjectVarHarness harness;
+    harness.writeFile("/regbadpat.c",
+        "int probe() { return regexp(\"abc\", \"[unterminated\"); }\n");
+    auto ob = harness.objects.cloneObject("/regbadpat");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe", {});
+    } catch (const lpcdriver::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testRegexpBadPatternThrows OK\n";
+}
+
+static void testRegexplodeSplitsStringOnPatternMatches() {
+    // string *regexplode(str, pat) -- alternating [text, match, text,
+    // match, ..., text], one more text segment than matches.
+    ObjectVarHarness harness;
+    harness.writeFile("/regexplodeprobe.c",
+        "mixed *probe(string s, string pat) { return regexplode(s, pat); }\n");
+    auto ob = harness.objects.cloneObject("/regexplodeprobe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("ab12cd34ef")),
+         lpcdriver::Value(std::string("[0-9]+"))});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 5);
+    assert(std::get<std::string>((*arr)->items[0].data) == "ab");
+    assert(std::get<std::string>((*arr)->items[1].data) == "12");
+    assert(std::get<std::string>((*arr)->items[2].data) == "cd");
+    assert(std::get<std::string>((*arr)->items[3].data) == "34");
+    assert(std::get<std::string>((*arr)->items[4].data) == "ef");
+
+    std::cout << "testRegexplodeSplitsStringOnPatternMatches OK\n";
+}
+
+static void testRegexplodeWithCaptureGroupPatternUsesFullMatchNotGroupText() {
+    // A pattern with a capturing group must still split on the WHOLE
+    // match, not just the captured subgroup text -- regexplode() has
+    // no capture-group output at all, matching reg_assoc()'s own
+    // real behavior below (neither efun exposes subgroups).
+    ObjectVarHarness harness;
+    harness.writeFile("/regexplodegroup.c",
+        "mixed *probe(string s, string pat) { return regexplode(s, pat); }\n");
+    auto ob = harness.objects.cloneObject("/regexplodegroup");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("xx[42]yy[7]zz")),
+         lpcdriver::Value(std::string("\\[([0-9]+)\\]"))});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 5);
+    assert(std::get<std::string>((*arr)->items[0].data) == "xx");
+    assert(std::get<std::string>((*arr)->items[1].data) == "[42]");
+    assert(std::get<std::string>((*arr)->items[2].data) == "yy");
+    assert(std::get<std::string>((*arr)->items[3].data) == "[7]");
+    assert(std::get<std::string>((*arr)->items[4].data) == "zz");
+
+    std::cout << "testRegexplodeWithCaptureGroupPatternUsesFullMatchNotGroupText OK\n";
+}
+
+static void testRegAssocMatchesRealDocCommentExample() {
+    // Reproduces array.c's own worked example verbatim, straight from
+    // reg_assoc()'s doc comment:
+    //   reg_assoc("testhahatest", ({"haha","te"}), ({2,3}), 4)
+    //   == ({({"","te","st","haha","","te","st"}),
+    //        ({  4,   3,   4,    2,  4,   3,   4})})
+    ObjectVarHarness harness;
+    harness.writeFile("/regassocprobe.c",
+        "mixed *probe(string s, mixed *pats, mixed *toks, mixed def) { "
+        "return reg_assoc(s, pats, toks, def); }\n");
+    auto ob = harness.objects.cloneObject("/regassocprobe");
+    assert(ob != nullptr);
+
+    auto pats = std::make_shared<lpcdriver::Array>();
+    pats->items.push_back(lpcdriver::Value(std::string("haha")));
+    pats->items.push_back(lpcdriver::Value(std::string("te")));
+    auto toks = std::make_shared<lpcdriver::Array>();
+    toks->items.push_back(lpcdriver::Value(int64_t{2}));
+    toks->items.push_back(lpcdriver::Value(int64_t{3}));
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("testhahatest")),
+         lpcdriver::Value(pats), lpcdriver::Value(toks), lpcdriver::Value(int64_t{4})});
+    auto* outer = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(outer != nullptr && (*outer)->items.size() == 2);
+
+    auto* texts = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*outer)->items[0].data);
+    assert(texts != nullptr && (*texts)->items.size() == 7);
+    const char* expectedTexts[7] = {"", "te", "st", "haha", "", "te", "st"};
+    for (int i = 0; i < 7; ++i) {
+        assert(std::get<std::string>((*texts)->items[i].data) == expectedTexts[i]);
+    }
+
+    auto* tokens = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*outer)->items[1].data);
+    assert(tokens != nullptr && (*tokens)->items.size() == 7);
+    const int64_t expectedTokens[7] = {4, 3, 4, 2, 4, 3, 4};
+    for (int i = 0; i < 7; ++i) {
+        assert(std::get<int64_t>((*tokens)->items[i].data) == expectedTokens[i]);
+    }
+
+    std::cout << "testRegAssocMatchesRealDocCommentExample OK\n";
+}
+
+static void testRegAssocZeroPatternsReturnsWholeStringWithDefaultToken() {
+    // Real array.c's own "else / Default match" branch: an empty
+    // pattern array is a real, explicit special case, not an error --
+    // the whole string comes back unmatched, paired with one default
+    // token.
+    ObjectVarHarness harness;
+    harness.writeFile("/regassocempty.c",
+        "mixed *probe(string s, mixed *pats, mixed *toks, mixed def) { "
+        "return reg_assoc(s, pats, toks, def); }\n");
+    auto ob = harness.objects.cloneObject("/regassocempty");
+    assert(ob != nullptr);
+
+    auto emptyArr = std::make_shared<lpcdriver::Array>();
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("untouched")),
+         lpcdriver::Value(emptyArr), lpcdriver::Value(emptyArr), lpcdriver::Value(int64_t{9})});
+    auto* outer = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(outer != nullptr && (*outer)->items.size() == 2);
+
+    auto* texts = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*outer)->items[0].data);
+    assert(texts != nullptr && (*texts)->items.size() == 1);
+    assert(std::get<std::string>((*texts)->items[0].data) == "untouched");
+
+    auto* tokens = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*outer)->items[1].data);
+    assert(tokens != nullptr && (*tokens)->items.size() == 1);
+    assert(std::get<int64_t>((*tokens)->items[0].data) == 9);
+
+    std::cout << "testRegAssocZeroPatternsReturnsWholeStringWithDefaultToken OK\n";
+}
+
 static void testSqrtNegativeArgThrows() {
     // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
     ObjectVarHarness harness;
@@ -10901,6 +11133,14 @@ int main() {
     testMaxAndMinReturnCorrectElementFromIntArray();
     testMathEfunsSqrtFloorCeilCosExpLog();
     testSqrtNegativeArgThrows();
+    testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero();
+    testRegexpThirdArgIllegalForStringFormThrows();
+    testRegexpArrayFormSelectsMatchingLinesWithIndexAndInvertFlags();
+    testRegexpBadPatternThrows();
+    testRegexplodeSplitsStringOnPatternMatches();
+    testRegexplodeWithCaptureGroupPatternUsesFullMatchNotGroupText();
+    testRegAssocMatchesRealDocCommentExample();
+    testRegAssocZeroPatternsReturnsWholeStringWithDefaultToken();
     testSimulEfunResolvesUnknownBareCallToSimulEfunObject();
     testLocalFunctionShadowsSimulEfunOfSameName();
     testHeredocTokenizesToStringWithLiteralContent();

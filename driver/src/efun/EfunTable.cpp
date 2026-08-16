@@ -19,7 +19,9 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <netinet/in.h>
+#include <pcre2.h>
 #include <random>
 #include <sstream>
 #include <sys/socket.h>
@@ -316,6 +318,61 @@ bool isVisibleToObserver(VM& vm, const std::shared_ptr<LpcObject>& ob) {
     if (observer && observer->isHidden()) return true;
     auto master = vm.masterObject();
     return master && isTruthy(vm.callFunction(master, "valid_hide", {Value(observer)}));
+}
+
+// PCRE2-backed regexp/regexplode/reg_assoc support (Phase 0 row 0.11).
+// The real fluffos-2.9-ds2.08 driver implements its own regexp() and
+// reg_assoc() (efuns_main.c f_regexp()/f_reg_assoc(), array.c
+// match_single_regexp()/match_regexp()/reg_assoc()) on top of a
+// bundled Henry Spencer regex engine (regexp.c), not PCRE -- the
+// PCRE2 wrapping directed by this row's own instruct.md/ROADMAP.md
+// text is a deliberate modern substitution for that engine, not a
+// literal port of it. The *behavioral* contract below (what each
+// efun selects/splits/tokenizes and in what order) is reproduced
+// exactly from those real functions, confirmed by reading them
+// directly rather than assumed.
+using Pcre2CodePtr = std::unique_ptr<pcre2_code, void (*)(pcre2_code*)>;
+
+Pcre2CodePtr compileRegex(const std::string& pattern) {
+    int errorcode = 0;
+    PCRE2_SIZE erroroffset = 0;
+    pcre2_code* code = pcre2_compile(
+        reinterpret_cast<PCRE2_SPTR>(pattern.data()),
+        static_cast<PCRE2_SIZE>(pattern.size()),
+        0, &errorcode, &erroroffset, nullptr);
+    if (!code) {
+        PCRE2_UCHAR msg[256];
+        pcre2_get_error_message(errorcode, msg, sizeof(msg) / sizeof(PCRE2_UCHAR));
+        throw LpcRuntimeError("regexp: bad pattern \"" + pattern + "\": " +
+                               reinterpret_cast<char*>(msg));
+    }
+    return Pcre2CodePtr(code, [](pcre2_code* c) { pcre2_code_free(c); });
+}
+
+// Finds the next match at or after byteOffset in subject (a plain
+// forward scan, not an anchored match at exactly byteOffset -- the
+// same "search the remainder of the string" semantics real
+// regexec(reg, tmp) has when tmp is a pointer into the middle of the
+// original string). Returns false with no match found.
+bool regexFindNext(pcre2_code* code, const std::string& subject, size_t byteOffset,
+                    size_t& matchStart, size_t& matchEnd) {
+    if (byteOffset > subject.size()) return false;
+    pcre2_match_data* md = pcre2_match_data_create_from_pattern(code, nullptr);
+    int rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(subject.data()),
+                          static_cast<PCRE2_SIZE>(subject.size()),
+                          static_cast<PCRE2_SIZE>(byteOffset), 0, md, nullptr);
+    bool found = false;
+    if (rc >= 0) {
+        PCRE2_SIZE* ov = pcre2_get_ovector_pointer(md);
+        matchStart = static_cast<size_t>(ov[0]);
+        matchEnd = static_cast<size_t>(ov[1]);
+        found = true;
+    } else if (rc != PCRE2_ERROR_NOMATCH) {
+        pcre2_match_data_free(md);
+        throw LpcRuntimeError("regexp: match error");
+    }
+    pcre2_match_data_free(md);
+    return found;
 }
 
 } // namespace
@@ -3583,6 +3640,230 @@ void registerCoreEfuns() {
         if (returnIndex) return Value(static_cast<int64_t>(minIdx));
         return arr[minIdx];
     });
+
+    // mixed regexp(string | string *, string pattern, void | int flag)
+    // -- Phase 0 row 0.11. Confirmed directly against func_spec.c's own
+    // signature and efuns_main.c's f_regexp(): a single-string subject
+    // returns plain int 1/0 (match_single_regexp() -- a 3rd argument is
+    // an error in this form, "3rd argument illegal for regexp(string,
+    // string)", real error text this driver reproduces verbatim); an
+    // array-of-strings subject returns the *matching* elements
+    // themselves (match_regexp()), not a bool array -- this is a much
+    // broader efun than "1 if matches, 0 if not" alone (the simplified
+    // description this row's own task prompt gives, which only covers
+    // the single-string form).
+    //
+    // flag is only meaningful for the array form: bit 0 (flag&1)
+    // interleaves each matching element's original 1-based index right
+    // after it in the result (string, index, string, index, ...,
+    // confirmed by hand-tracing match_regexp()'s own backward-filling
+    // loop against a concrete example -- string first, index second,
+    // ascending original order); bit 1 (flag&2) inverts the selection
+    // to non-matching elements instead ("match = !(flag & 2)" in the
+    // real source). A non-string array element is never selected
+    // either way, matching match_regexp()'s own "!(type == T_STRING)"
+    // short-circuit landing on the same res[size] = 0 branch regardless
+    // of invert.
+    t.registerEfun("regexp", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("regexp: expected a pattern string as the second argument");
+        }
+        const std::string& pattern = std::get<std::string>(args[1].data);
+
+        if (std::holds_alternative<std::string>(args[0].data)) {
+            if (args.size() > 2) {
+                throw LpcRuntimeError("3rd argument illegal for regexp(string, string)");
+            }
+            const std::string& subject = std::get<std::string>(args[0].data);
+            auto code = compileRegex(pattern);
+            size_t s = 0, e = 0;
+            bool matched = regexFindNext(code.get(), subject, 0, s, e);
+            return Value(static_cast<int64_t>(matched ? 1 : 0));
+        }
+
+        if (!std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("regexp: expected a string or an array of strings as the first argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        int64_t flag = 0;
+        if (args.size() > 2) {
+            if (!std::holds_alternative<int64_t>(args[2].data)) {
+                throw LpcRuntimeError("Bad argument 3 to regexp()");
+            }
+            flag = std::get<int64_t>(args[2].data);
+        }
+        bool invert = (flag & 2) != 0;
+        bool withIndex = (flag & 1) != 0;
+
+        auto code = compileRegex(pattern);
+        auto result = std::make_shared<Array>();
+        if (arr) {
+            for (size_t i = 0; i < arr->items.size(); ++i) {
+                const Value& item = arr->items[i];
+                if (!std::holds_alternative<std::string>(item.data)) continue;
+                const std::string& line = std::get<std::string>(item.data);
+                size_t s = 0, e = 0;
+                bool matched = regexFindNext(code.get(), line, 0, s, e);
+                if (matched == invert) continue;
+                result->items.push_back(item);
+                if (withIndex) result->items.push_back(Value(static_cast<int64_t>(i + 1)));
+            }
+        }
+        return Value(result);
+    });
+
+    // string *regexplode(string str, string pattern) -- explodes str
+    // around every match of pattern, keeping the matched substrings in
+    // the result: an array alternating [text, match, text, match, ...,
+    // text], always one more text segment than there are matches (an
+    // unmatched string returns a single-element array holding the
+    // whole input, mirroring explode()'s own no-op-on-no-match shape).
+    // Checked directly against the vendored fluffos-2.9-ds2.08 source
+    // before implementing, not assumed: this is NOT a real FluffOS 2.9
+    // efun -- grepped the entire tree (func_spec.c, efun_defs.c,
+    // efunctions.h, opc.h, array.c, regexp.c) and the only hit anywhere
+    // is a comment inside implode()'s own loop-safety code ("The
+    // following is from regexplode, to prevent i guess infinite loops
+    // on \"\" patterns - Randor 5/29/94"), i.e. a MudOS-lineage efun
+    // implode() once borrowed a guard from, not a function this driver
+    // ever had a real spec for. Implemented anyway because this row's
+    // own instruct.md/prompt.md explicitly ask for it and the shape is
+    // a genuine, common LP-family convenience (LDMud and older MudOS
+    // trees have had it); the empty-match loop guard below is the
+    // exact same kludge reg_assoc()'s real implementation documents at
+    // that same 5/29/94 comment, reused here for the same reason.
+    t.registerEfun("regexplode", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("regexplode: expected (string, string pattern)");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        const std::string& pattern = std::get<std::string>(args[1].data);
+
+        auto code = compileRegex(pattern);
+        auto result = std::make_shared<Array>();
+
+        size_t cursor = 0, scan = 0;
+        while (scan < str.size()) {
+            size_t s = 0, e = 0;
+            if (!regexFindNext(code.get(), str, scan, s, e)) break;
+            result->items.push_back(Value(str.substr(cursor, s - cursor)));
+            result->items.push_back(Value(str.substr(s, e - s)));
+            cursor = e;
+            scan = e;
+            if (s == e) {
+                // Zero-length match (e.g. a pattern like "x*" matching
+                // the empty string) would otherwise loop forever at the
+                // same offset -- same guard reg_assoc() below uses.
+                if (scan >= str.size()) break;
+                ++scan;
+            }
+        }
+        result->items.push_back(Value(str.substr(cursor)));
+        return Value(result);
+    });
+
+    // mixed *reg_assoc(string str, string *patterns, mixed *tokens,
+    // mixed | void default) -- Phase 0 row 0.11. Confirmed directly
+    // against array.c's own reg_assoc(), including its own worked
+    // example in a comment right above the function
+    // (reg_assoc("testhahatest", ({"haha","te"}), ({2,3}), 4) ==
+    // ({({"","te","st","haha","","te","st"}), ({4,3,4,2,4,3,4})})),
+    // reproduced verbatim as this efun's own regression test below.
+    // Scans str left to right; at each position, tries every pattern
+    // and keeps whichever produces the earliest-starting match (ties
+    // go to the lower pattern index, via strict "<", matching the real
+    // "if (!laststart || currstart < laststart)" comparison exactly --
+    // real regexp.c's own immediate break on a zero-offset match is
+    // just a shortcut for the same outcome, not a different rule).
+    // Returns two same-length arrays: alternating [text-before-match,
+    // matched-substring, text-before-next-match, ...,
+    // trailing-text] and, in the same positions, [default, that
+    // match's own token, default, ..., default] -- one more text/
+    // default slot than there are matches, exactly mirroring
+    // regexplode()'s own shape above (this is in fact the real,
+    // original regexplode() this driver's own regexplode() above is
+    // named after, per that function's own "from regexplode" comment).
+    // Zero patterns is a real, explicit special case in the source
+    // (the "else / Default match" branch): returns the whole string
+    // unmatched, paired with a single default token.
+    auto regAssocImpl = [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::shared_ptr<Array>>(args[1].data) ||
+            !std::holds_alternative<std::shared_ptr<Array>>(args[2].data)) {
+            throw LpcRuntimeError("reg_assoc: expected (string, string *patterns, mixed *tokens, mixed|void default)");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        auto patternsArr = std::get<std::shared_ptr<Array>>(args[1].data);
+        auto tokensArr = std::get<std::shared_ptr<Array>>(args[2].data);
+        Value defaultVal = args.size() > 3 ? args[3] : Value(int64_t{0});
+
+        const size_t size = patternsArr ? patternsArr->items.size() : 0;
+        if (size != (tokensArr ? tokensArr->items.size() : 0)) {
+            throw LpcRuntimeError("Pattern and token array sizes must be identical.");
+        }
+
+        auto textResult = std::make_shared<Array>();
+        auto tokenResult = std::make_shared<Array>();
+
+        if (size == 0) {
+            textResult->items.push_back(Value(str));
+            tokenResult->items.push_back(defaultVal);
+        } else {
+            std::vector<Pcre2CodePtr> codes;
+            codes.reserve(size);
+            for (size_t i = 0; i < size; ++i) {
+                if (!std::holds_alternative<std::string>(patternsArr->items[i].data)) {
+                    throw LpcRuntimeError("Non-string found in pattern array.");
+                }
+                codes.push_back(compileRegex(std::get<std::string>(patternsArr->items[i].data)));
+            }
+
+            struct Match { size_t begin, end, tokIdx; };
+            std::vector<Match> matches;
+            size_t scan = 0;
+            while (scan < str.size()) {
+                size_t bestStart = std::string::npos, bestEnd = 0, bestIdx = 0;
+                for (size_t i = 0; i < size; ++i) {
+                    size_t s = 0, e = 0;
+                    if (!regexFindNext(codes[i].get(), str, scan, s, e)) continue;
+                    if (bestStart == std::string::npos || s < bestStart) {
+                        bestStart = s; bestEnd = e; bestIdx = i;
+                    }
+                }
+                if (bestStart == std::string::npos) break;
+                matches.push_back({bestStart, bestEnd, bestIdx});
+                scan = bestEnd;
+                if (bestStart == bestEnd) {
+                    if (scan >= str.size()) break;
+                    ++scan;
+                }
+            }
+
+            size_t cursor = 0;
+            for (const auto& m : matches) {
+                textResult->items.push_back(Value(str.substr(cursor, m.begin - cursor)));
+                tokenResult->items.push_back(defaultVal);
+                textResult->items.push_back(Value(str.substr(m.begin, m.end - m.begin)));
+                tokenResult->items.push_back(tokensArr->items[m.tokIdx]);
+                cursor = m.end;
+            }
+            textResult->items.push_back(Value(str.substr(cursor)));
+            tokenResult->items.push_back(defaultVal);
+        }
+
+        auto outer = std::make_shared<Array>();
+        outer->items.push_back(Value(textResult));
+        outer->items.push_back(Value(tokenResult));
+        return Value(outer);
+    };
+    t.registerEfun("reg_assoc", regAssocImpl);
+    // "regexp_assoc" -- alias per this row's own instruct.md. Not a
+    // real FluffOS 2.9 name either (same grep sweep as regexplode()
+    // above found nothing), added for the same reason: the task's own
+    // spec explicitly calls for it as a second name for reg_assoc.
+    t.registerEfun("regexp_assoc", regAssocImpl);
 }
 
 } // namespace lpcdriver
