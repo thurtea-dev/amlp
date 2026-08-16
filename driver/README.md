@@ -1,18 +1,39 @@
 # lpcdriver
 
-A minimal, from-scratch LPC driver (LPMud-style game driver) written in
-modern C++20. It compiles a small subset of the LPC language to bytecode
-and executes it on a stack-based VM, with a TCP front end so a mudlib can
-be driven interactively over `telnet`/`nc`.
+A custom C++20 LPC driver (LPMud-style game driver): a hand-written lexer,
+recursive-descent parser, bytecode codegen, and stack-based VM, with a
+non-blocking TCP front end so a mudlib can be driven interactively over
+`telnet`/`nc`. It targets FluffOS-dialect LPC (the dialect this repo's own
+mudlib, `mudlib/nightmare3_fluffos_v2/`, is written in).
 
-This is a work-in-progress bring-up. Each development slice added one
-capability on top of a previously verified one; nothing below is
-aspirational -- everything listed as "supported" has been built, unit
-tested, and exercised over a live TCP connection.
+This snapshot is current as of 2026-08-17. For anything that changes more
+often than this file gets rewritten, prefer these over trusting a number
+here: `docs/ROADMAP.md` (per-row completion checkboxes), `docs/STATUS.md`
+(dated session log, the actual source of truth for what is done), and
+`driver/src/<module>/instruct.md` (per-subsystem task detail, but see the
+note below before trusting its framing).
 
-## Quick start
+Root `CLAUDE.md`'s "Driver orientation" section explains why `instruct.md`
+files and `driver/tests/instruct.md` in particular should not be read at
+face value; read that first if this is your first time in this directory.
+
+## Two ways to build and run
+
+Both are real, both are independently maintained, and neither is the
+"correct" one to prefer over the other. Pick based on what you're doing:
+exercising the driver itself against a small, fast, hand-written mudlib
+(sandbox), or running it against this repo's real game content (real
+mudlib).
+
+### Sandbox: `driver/mudlib_stub`, built from inside `driver/`
+
+The small hand-written mudlib under `driver/mudlib_stub/` (login flow, one
+player class, two rooms, a handful of commands) exists purely to exercise
+the driver end to end without needing the real mudlib's own size or
+dependencies.
 
 ```bash
+cd driver
 cmake -B build -S .
 cmake --build build -j4
 ctest --test-dir build --output-on-failure
@@ -25,96 +46,116 @@ Then, in another terminal:
 nc localhost 1129
 ```
 
-Type any line and press enter to see it echoed back. Type `quit` to see
-the driver take the alternate branch.
+Type a name at the prompt, then try `look`, `north`, `south`, `say
+<anything>`, and `boot <name>` (kicks another connected player, if one is
+in the room). Disconnecting (Ctrl-C, or closing the terminal) fires the
+real `net_dead()` apply on your player object, which announces the
+link-death to anyone else in the room, exactly like a real mudlib's
+disconnect handling. `driver/config/driver.cfg` points `mudlib_root` at
+`./mudlib_stub` and listens on port 1129.
 
-## Bring-up order (slices completed so far)
+### Real mudlib, built from the repo root
 
-1. **Hello-world compile/execute path** -- lexer, parser, codegen, and VM
-   skeleton; a `create()` function that calls `write()`.
-2. **`call_other()` and the `->` operator** -- cross-object calls, plus
-   `clone_object()` so objects can be instantiated from source files.
-3. **Networking** -- a non-blocking TCP server; `master->connect()` is
-   invoked per new connection and its return value (an object) is bound
-   to that connection; input lines are dispatched to `receive_message()`.
-4. **Variables, parameters, assignment** -- local variable declarations,
-   typed function parameters, the `=` operator, and using a variable as
-   an expression (so `write(msg)` echoes real client input).
-5. **Control flow** -- `if` / `else`, `while`, and the comparison
-   operators `== != < <= > >=`, backed by `Jump` / `JumpIfFalse` VM
-   opcodes with codegen backpatching. The mudlib demonstrates this with
-   an `if (msg == "quit") { ... } else { ... }` branch in
-   `receive_message()`.
+The same binary, pointed at this repo's actual game content
+(`mudlib/nightmare3_fluffos_v2/lib/`) instead of the sandbox.
+
+```bash
+cmake -B driver/build -S driver
+cmake --build driver/build -j4
+ctest --test-dir driver/build --output-on-failure
+driver/build/lpcdriver etc/driver.cfg
+```
+
+`etc/driver.cfg` (repo root) points `mudlib_root` at the real mudlib and
+listens on port 1122. Booting the real mudlib's own master object needs a
+local `mudlib/nightmare3_fluffos_v2/lib/secure/cfg/groups.cfg`, which is
+deliberately gitignored (only `groups.cfg.example` is checked in) since a
+real one carries real admin/wizard account data; create your own from the
+example file before expecting a full boot.
+
+Both paths build the identical `lpcdriver` binary and share the same test
+suite; only the config file and working directory differ.
 
 ## Supported LPC language features
 
-| Feature | Status |
-|---|---|
-| Function declarations (typed return, typed params) | Supported |
-| Local variable declarations | Supported (no globals yet) |
-| Assignment (`=`) | Supported |
-| Variable-as-expression | Supported |
-| String literals | Supported (with `\n`, `\t`, `\"`, `\\` escapes) |
-| Integer literals | Supported (pushed directly via `PushInt`) |
-| Comparison operators `== != < <= > >=` | Supported, on ints/floats and strings (`==`/`!=` only for strings) |
-| `if` / `else` | Supported (block or single-statement branches) |
-| `while` | Supported |
-| Function calls (efuns) | Supported |
-| `call_other()` | Supported |
-| `->` operator (call_other sugar) | Supported |
-| Arrays, mappings | **Not implemented** |
-| Global (object) variables | **Not implemented** |
-| `for`, `switch`, `break`, `continue` | **Not implemented** |
-| Short-circuit `&&` / `||` | **Not implemented** |
-| Floats as literals (float *values* exist in `Value`, no float literal syntax yet) | **Not implemented** |
+Full control flow: `if`/`else`, `while`, `do`/`while`, `for`, `foreach`
+(including the two-variable mapping form), `switch`/`case`/`default`,
+`break`, `continue`, ternary (`?:`), short-circuit `&&`/`||`. Arrays and
+mappings, with literal syntax, indexing (`arr[i]`, `map[k]`), range
+indexing (`arr[a..b]`), and compound/indexed assignment. Object (global)
+variables. String, int, float, and object value types. Closures
+(`(: name, bound_args... :)` and the `(*fp)(args)` dereference-call form).
+`catch`/`throw`. Inheritance, including `::`-qualified parent calls.
+`call_other()` and its `->` sugar. `clone_object()`, `destruct()`,
+`input_to()`, `add_action()`/`enable_commands()` command dispatch. A real
+`call_out()`/`heart_beat()` scheduler (see below), not a stub.
 
-## Supported efuns
+See `driver/src/compiler/instruct.md` and `driver/src/vm/instruct.md` for
+what is deliberately still out of scope (DGD/LDMud dialect syntax, `async`/
+`await`, and the rest of the Phase 1-3 work in `docs/ROADMAP.md`).
 
-| Efun | Behavior |
-|---|---|
-| `write(string)` | Sends text to the connection currently bound to the calling context (or stdout if none) |
-| `call_other(object, string, ...)` | Dispatches a function call to another object |
-| `clone_object(string filename)` | Compiles (or reuses cached bytecode for) a source file and instantiates a fresh object, running its `create()` |
-| `this_object()` | Stubbed -- always returns void this slice |
+## Efuns
+
+153 registered as of this writing (grep `registerEfun(` in
+`driver/src/efun/EfunTable.cpp` for the exact current count; it grows most
+sessions). Target is parity with FluffOS's own ~300 for the core efun set,
+with growth tracked in `docs/ROADMAP.md` row 0.13 and the corrected Tier 1
+priority list in `driver/src/efun/instruct.md`.
+
+## Scheduler: real, not a stub
+
+`driver/src/scheduler/Scheduler.cpp` runs a real `call_out()` and
+`heart_beat()` scheduler: pending call-outs fire on their own delay (by
+handle or by name), heartbeat-enabled objects get `heart_beat()` called on
+the configured interval, and a runtime error in one fired callback never
+stops the rest from running. See `driver/src/scheduler/instruct.md`.
 
 ## Driver applies (mudlib hooks)
 
-| Apply | Behavior |
+The full recognized-apply set lives in `driver/src/apply/ApplyTable.cpp`'s
+`known()`. As of this writing, the driver actually calls:
+
+| Apply | Fired by |
 |---|---|
-| `create()` | Called once per object load/clone |
-| `connect()` (on the master object) | Called per new TCP connection; must return an object, which is bound to that connection |
-| `receive_message(string)` | Called on the connection's bound object for every newline-terminated line of input |
+| `create()` | Every object load/clone |
+| `init()` | `move_object()`, both legs (destination's own actions offered to the mover, and vice versa for already-present command-enabled occupants) |
+| `connect()` (master) | Every new TCP connection; must return an object, bound to that connection |
+| `logon()` | Once, right after `connect()` binds the connection |
+| `process_input(string)` | Every input line, when nothing is currently claiming it via `input_to()` |
+| `net_dead()` | Link death (EOF/read error), before the connection is torn down |
+| `compile_object()` (master) | A virtual-object compile fallback, `ObjectManager::loadObject()` only |
+| `heart_beat()` | Every heartbeat-enabled object, each scheduler tick |
+| `id(string)` | Object-identification lookups (`present()`-style matching) |
 
-`ApplyTable::isKnownApply()` also recognizes (but the driver does not yet
-call) `init`, `clean_up`, `heart_beat`, `logon`, `disconnect`, `id`,
-`short`, `long`, `catch_tell`, `compile_object`, `valid_read`,
-`valid_write`, `valid_socket`, `get_root_uid`, `epilog`, `flag` --
-these are reserved apply names for future slices.
+Recognized but not yet called by any driver code path: `clean_up`,
+`receive_message` (superseded by `process_input` above; kept as a
+recognized name, not fired), `catch_tell`, `valid_read`, `valid_write`,
+`valid_socket`, `get_root_uid`, `epilog`, `flag`, `short`, `long`. These
+are reserved names for future work (several are Phase 3 security-model
+territory, `docs/ROADMAP.md` row 3.1), not silently-broken hooks.
 
-## What's stubbed / not yet real
+## Known stubs / scope limitations
 
-- **Heartbeats**: `LpcObject::hasHeartbeat()` / `setHeartbeat()` exist,
-  and `Scheduler::tickHeartbeats()` runs every poll loop, but it is
-  currently a no-op. No object's `heart_beat()` is ever called yet.
-- **Call-outs**: `Scheduler::addCallOut()` / `removeCallOut()` and the
-  `CallOutEntry` struct exist, but `tickCallOuts()` is a no-op. There is
-  no `call_out()` efun yet.
-- **Disconnect on quit**: typing `quit` prints "Goodbye." but the
-  connection is not closed by the driver; scope for this slice was
-  control flow only, not connection lifecycle changes.
-- **Arrays / mappings**: `Value` and `Array`/`Mapping` structs exist at
-  the VM level, but there is no array/mapping literal syntax, indexing,
-  or the `Index`/`IndexAssign`/`MakeArray`/`MakeMapping` opcodes are
-  declared but unimplemented in the VM.
-- **Object variables (globals)**: `LpcObject::variables()` exists as a
-  storage slot but nothing in the compiler ever declares or reads/writes
-  it yet.
-- **`this_object()`**: registered but always returns void.
+Kept in exactly one place so it cannot drift out of sync with itself:
+`docs/STATUS.md`'s own "Known stubs / scope limitations" section is the
+current, maintained list. Do not duplicate it here.
 
 ## Project layout
 
-See the file tree below. Source is organized by subsystem
-(`core`, `config`, `compiler`, `vm`, `object`, `efun`, `apply`, `net`,
-`scheduler`), each built as its own static library and linked into the
-`lpcdriver` executable. Unit tests live in `tests/` and cover the lexer,
-parser, and codegen for every feature listed as "Supported" above.
+Source is organized by subsystem (`core`, `config`, `compiler`, `vm`,
+`object`, `efun`, `apply`, `net`, `scheduler`), each built as its own CMake
+static library and linked into the `lpcdriver` executable. Headers live
+under `include/lpcdriver/<subsystem>/`, sources under `src/<subsystem>/`.
+Unit tests live in `tests/test_lexer.cpp`, a single hand-rolled file using
+bare `assert()`, not gtest (see `driver/tests/instruct.md` and root
+`CLAUDE.md` before trusting anything else that file's own text says about
+testing conventions).
+
+`src/dialect/`, `src/persist/`, `src/jit/`, `src/lsp/`, `src/gc/`,
+`src/security/`, and `src/proto/` are Phase 1-3 subsystems from
+`docs/ROADMAP.md`: each has an `instruct.md` describing the planned work,
+but none has any source yet, and none is wired into `CMakeLists.txt`.
+
+See `docs/ROADMAP.md` for the full phased plan with per-task status
+checkboxes, and `prompt.md` at the repo root for ready-to-run task prompts
+citing specific rows.

@@ -31,7 +31,7 @@ Current baseline: **440 tests passing**. Every change must keep this green.
 | `src/compiler/` | Lexer, Parser, CodeGen, AST | [link](src/compiler/instruct.md) |
 | `src/vm/` | VM interpreter, Value type, Bytecode | [link](src/vm/instruct.md) |
 | `src/object/` | LpcObject, ObjectManager, LivingNameRegistry | [link](src/object/instruct.md) |
-| `src/efun/` | EfunTable, all ~154 (target 300+) registered efuns | [link](src/efun/instruct.md) |
+| `src/efun/` | EfunTable, all ~153 (target 300+) registered efuns | [link](src/efun/instruct.md) |
 | `src/net/` | TCP server, Connection, telnet, sockets | [link](src/net/instruct.md) |
 | `src/scheduler/` | call_out, heart_beat, async tasks | [link](src/scheduler/instruct.md) |
 | `src/apply/` | ApplyTable, master/simul_efun apply dispatch | [link](src/apply/instruct.md) |
