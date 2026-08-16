@@ -190,6 +190,16 @@ public:
     std::weak_ptr<LpcObject> shadowing() const { return shadowing_; }
     void setShadowing(std::weak_ptr<LpcObject> ob) { shadowing_ = std::move(ob); }
 
+    // real object.h's O_VIRTUAL flag: set only by
+    // ObjectManager::loadVirtualObject()'s own construction path (an
+    // object returned by master()->compile_object() rather than compiled
+    // directly from an on-disk file), never cleared. Backs virtualp() --
+    // see EfunTable.cpp's own registration and std/virtual.c's real
+    // "if(virtualp(this_object())) return 0;" recursion guard, the one
+    // confirmed live call site.
+    bool isVirtual() const { return isVirtual_; }
+    void setIsVirtual(bool v) { isVirtual_ = v; }
+
 private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
@@ -206,6 +216,7 @@ private:
     std::string livingName_;
     std::weak_ptr<LpcObject> shadowedBy_;
     std::weak_ptr<LpcObject> shadowing_;
+    bool isVirtual_ = false;
 };
 
 } // namespace lpcdriver

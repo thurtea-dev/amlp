@@ -1,5 +1,6 @@
 add_library(object
     LivingNameRegistry.cpp
+    LiveObjectRegistry.cpp
     LpcObject.cpp
     ObjectManager.cpp
 )

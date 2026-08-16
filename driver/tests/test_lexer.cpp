@@ -6715,6 +6715,355 @@ static void testQueryOnceInteractiveAliasMatchesUserp() {
     std::cout << "testQueryOnceInteractiveAliasMatchesUserp OK\n";
 }
 
+// Phase 0 row 0.13 efun-growth batch (2026-08-20 corrected Tier 1 pass,
+// see src/efun/instruct.md): objects()/livings() needed a new
+// LiveObjectRegistry that did not exist before this batch.
+
+static void testObjectsReturnsEveryLiveObjectAndOmitsDestructedOnes() {
+    ObjectVarHarness harness;
+    harness.writeFile("/objs_probe.c",
+        "int contains(mixed *arr, object me) {\n"
+        "    int i;\n"
+        "    for (i = 0; i < sizeof(arr); i++) if (arr[i] == me) return 1;\n"
+        "    return 0;\n"
+        "}\n"
+        "mixed *probe() { return objects(); }\n");
+    auto probe = harness.objects.cloneObject("/objs_probe");
+    assert(probe != nullptr);
+    harness.writeFile("/objs_a.c", "void create() {}\n");
+    auto a = harness.objects.cloneObject("/objs_a");
+    assert(a != nullptr);
+
+    lpcdriver::Value all1 = harness.vm.callFunction(probe, "probe", {});
+    lpcdriver::Value hasA = harness.vm.callFunction(probe, "contains", {all1, lpcdriver::Value(a)});
+    assert(std::get<int64_t>(hasA.data) == 1);
+    lpcdriver::Value hasProbe = harness.vm.callFunction(probe, "contains", {all1, lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(hasProbe.data) == 1);
+
+    harness.objects.destructObject(a);
+    lpcdriver::Value all2 = harness.vm.callFunction(probe, "probe", {});
+    lpcdriver::Value hasADestructed = harness.vm.callFunction(probe, "contains", {all2, lpcdriver::Value(a)});
+    assert(std::get<int64_t>(hasADestructed.data) == 0);
+
+    std::cout << "testObjectsReturnsEveryLiveObjectAndOmitsDestructedOnes OK\n";
+}
+
+static void testObjectsWithStringFilterExcludesFalsyResultsAndAbortsOnMissingFunction() {
+    ObjectVarHarness harness;
+    harness.writeFile("/objsf_probe.c",
+        "int contains(mixed *arr, object me) {\n"
+        "    int i;\n"
+        "    for (i = 0; i < sizeof(arr); i++) if (arr[i] == me) return 1;\n"
+        "    return 0;\n"
+        "}\n"
+        "int keep(object candidate) { return candidate != this_object(); }\n"
+        "mixed *probe_filtered() { return objects(\"keep\"); }\n"
+        "mixed *probe_missing() { return objects(\"totally_undefined_objects_filter\"); }\n");
+    auto probe = harness.objects.cloneObject("/objsf_probe");
+    assert(probe != nullptr);
+
+    lpcdriver::Value filtered = harness.vm.callFunction(probe, "probe_filtered", {});
+    lpcdriver::Value hasSelf = harness.vm.callFunction(probe, "contains", {filtered, lpcdriver::Value(probe)});
+    assert(std::get<int64_t>(hasSelf.data) == 0);
+
+    // Real f_objects(): the callback itself failing to exist aborts the
+    // whole call to an empty array, not just a per-candidate exclusion.
+    lpcdriver::Value missing = harness.vm.callFunction(probe, "probe_missing", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&missing.data);
+    assert(arr != nullptr && (*arr)->items.empty());
+
+    std::cout << "testObjectsWithStringFilterExcludesFalsyResultsAndAbortsOnMissingFunction OK\n";
+}
+
+static void testLivingsReturnsOnlyObjectsWithCommandsEnabled() {
+    ObjectVarHarness harness;
+    harness.writeFile("/liv_enabled.c", "void create() { enable_commands(); }\n");
+    harness.writeFile("/liv_disabled.c", "void create() {}\n");
+    auto enabled = harness.objects.cloneObject("/liv_enabled");
+    auto disabled = harness.objects.cloneObject("/liv_disabled");
+    assert(enabled != nullptr && disabled != nullptr);
+
+    harness.writeFile("/liv_probe.c",
+        "int contains(mixed *arr, object me) {\n"
+        "    int i;\n"
+        "    for (i = 0; i < sizeof(arr); i++) if (arr[i] == me) return 1;\n"
+        "    return 0;\n"
+        "}\n"
+        "mixed *probe() { return livings(); }\n");
+    auto probe = harness.objects.cloneObject("/liv_probe");
+    assert(probe != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(probe, "probe", {});
+    lpcdriver::Value hasEnabled = harness.vm.callFunction(probe, "contains", {result, lpcdriver::Value(enabled)});
+    lpcdriver::Value hasDisabled = harness.vm.callFunction(probe, "contains", {result, lpcdriver::Value(disabled)});
+    assert(std::get<int64_t>(hasEnabled.data) == 1);
+    assert(std::get<int64_t>(hasDisabled.data) == 0);
+
+    std::cout << "testLivingsReturnsOnlyObjectsWithCommandsEnabled OK\n";
+}
+
+static void testShallowAndDeepInheritListWalkARealThreeLevelChain() {
+    ObjectVarHarness harness;
+    harness.writeFile("/gtest_base.c", "void create() {}\n");
+    harness.writeFile("/gtest_mid.c", "inherit \"/gtest_base\";\nvoid create() {}\n");
+    harness.writeFile("/gtest_top.c", "inherit \"/gtest_mid\";\nvoid create() {}\n");
+    auto top = harness.objects.cloneObject("/gtest_top");
+    assert(top != nullptr);
+
+    harness.writeFile("/gtest_probe.c",
+        "mixed *probe_shallow(object ob) { return shallow_inherit_list(ob); }\n"
+        "mixed *probe_alias(object ob) { return inherit_list(ob); }\n"
+        "mixed *probe_deep(object ob) { return deep_inherit_list(ob); }\n");
+    auto probe = harness.objects.cloneObject("/gtest_probe");
+    assert(probe != nullptr);
+
+    lpcdriver::Value shallow = harness.vm.callFunction(probe, "probe_shallow", {lpcdriver::Value(top)});
+    auto* shallowArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&shallow.data);
+    assert(shallowArr != nullptr && (*shallowArr)->items.size() == 1);
+    assert(std::get<std::string>((*shallowArr)->items[0].data) == "gtest_mid.c");
+
+    // Real inherit_list is the exact same efun as shallow_inherit_list
+    // (efun_defs.c's own F_ALIAS_FLAG), not a second implementation.
+    lpcdriver::Value alias = harness.vm.callFunction(probe, "probe_alias", {lpcdriver::Value(top)});
+    auto* aliasArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&alias.data);
+    assert(aliasArr != nullptr && (*aliasArr)->items.size() == 1);
+    assert(std::get<std::string>((*aliasArr)->items[0].data) == "gtest_mid.c");
+
+    lpcdriver::Value deep = harness.vm.callFunction(probe, "probe_deep", {lpcdriver::Value(top)});
+    auto* deepArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&deep.data);
+    assert(deepArr != nullptr && (*deepArr)->items.size() == 2);
+    assert(std::get<std::string>((*deepArr)->items[0].data) == "gtest_mid.c");
+    assert(std::get<std::string>((*deepArr)->items[1].data) == "gtest_base.c");
+
+    std::cout << "testShallowAndDeepInheritListWalkARealThreeLevelChain OK\n";
+}
+
+static void testClonepTrueForCloneFalseForBlueprintAndNonObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/cp_target.c", "void create() {}\n");
+    auto blueprint = harness.objects.loadObject("/cp_target");
+    assert(blueprint != nullptr);
+    auto clone = harness.objects.cloneObject("/cp_target");
+    assert(clone != nullptr);
+
+    harness.writeFile("/cp_probe.c", "int probe(mixed ob) { return clonep(ob); }\n");
+    auto probe = harness.objects.cloneObject("/cp_probe");
+    assert(probe != nullptr);
+
+    lpcdriver::Value cloneResult = harness.vm.callFunction(probe, "probe", {lpcdriver::Value(clone)});
+    assert(std::get<int64_t>(cloneResult.data) == 1);
+    lpcdriver::Value blueprintResult = harness.vm.callFunction(probe, "probe", {lpcdriver::Value(blueprint)});
+    assert(std::get<int64_t>(blueprintResult.data) == 0);
+    lpcdriver::Value nonObjectResult = harness.vm.callFunction(probe, "probe", {lpcdriver::Value(static_cast<int64_t>(5))});
+    assert(std::get<int64_t>(nonObjectResult.data) == 0);
+
+    std::cout << "testClonepTrueForCloneFalseForBlueprintAndNonObject OK\n";
+}
+
+static void testVirtualpTrueOnlyForACompileObjectResultAndDefaultsToThisObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "object compile_object(string str) { return clone_object(\"/vp_target\"); }\n");
+    harness.writeFile("/vp_target.c",
+        "void create() {}\n"
+        "int probe_self() { return virtualp(); }\n"
+        "int probe_arg(object ob) { return virtualp(ob); }\n");
+    bool masterLoaded = harness.objects.loadMasterObject();
+    assert(masterLoaded);
+
+    auto virtualOb = harness.objects.loadObject("/secure/save/users/t/vptestchar");
+    assert(virtualOb != nullptr);
+    auto realClone = harness.objects.cloneObject("/vp_target");
+    assert(realClone != nullptr);
+
+    lpcdriver::Value selfResult = harness.vm.callFunction(virtualOb, "probe_self", {});
+    assert(std::get<int64_t>(selfResult.data) == 1);
+    lpcdriver::Value notVirtual = harness.vm.callFunction(realClone, "probe_arg", {lpcdriver::Value(realClone)});
+    assert(std::get<int64_t>(notVirtual.data) == 0);
+
+    std::cout << "testVirtualpTrueOnlyForACompileObjectResultAndDefaultsToThisObject OK\n";
+}
+
+static void testCallStackMode1ReturnsObjectsCurrentFirstWalkingOutward() {
+    ObjectVarHarness harness;
+    harness.writeFile("/cs_callee.c",
+        "mixed *probe() { return call_stack(1); }\n"
+        "mixed *probe_filenames() { return call_stack(0); }\n");
+    harness.writeFile("/cs_caller.c",
+        "mixed *start(object callee) { return callee->probe(); }\n"
+        "mixed *start_filenames(object callee) { return callee->probe_filenames(); }\n");
+    auto callee = harness.objects.cloneObject("/cs_callee");
+    auto caller = harness.objects.cloneObject("/cs_caller");
+    assert(callee != nullptr && caller != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "start", {lpcdriver::Value(callee)});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    // Real call_stack(1): current frame (callee) first, walking outward
+    // (caller), then the test harness's own top-level dispatch frame.
+    assert(arr != nullptr && (*arr)->items.size() >= 2);
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>((*arr)->items[0].data) == callee);
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>((*arr)->items[1].data) == caller);
+
+    lpcdriver::Value fileResult = harness.vm.callFunction(caller, "start_filenames", {lpcdriver::Value(callee)});
+    auto* fileArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&fileResult.data);
+    assert(fileArr != nullptr && (*fileArr)->items.size() >= 2);
+    assert(std::get<std::string>((*fileArr)->items[0].data) == callee->filename());
+    assert(std::get<std::string>((*fileArr)->items[1].data) == caller->filename());
+
+    std::cout << "testCallStackMode1ReturnsObjectsCurrentFirstWalkingOutward OK\n";
+}
+
+static void testCallStackModes2And3ThrowNotImplementedButModesOutOfRangeAlsoThrow() {
+    ObjectVarHarness harness;
+    harness.writeFile("/cs_err.c",
+        "mixed *probe_fn() { return call_stack(2); }\n"
+        "mixed *probe_origin() { return call_stack(3); }\n"
+        "mixed *probe_bad() { return call_stack(9); }\n");
+    auto ob = harness.objects.cloneObject("/cs_err");
+    assert(ob != nullptr);
+
+    bool threwFn = false;
+    try { harness.vm.callFunction(ob, "probe_fn", {}); }
+    catch (const lpcdriver::LpcRuntimeError&) { threwFn = true; }
+    assert(threwFn);
+
+    bool threwOrigin = false;
+    try { harness.vm.callFunction(ob, "probe_origin", {}); }
+    catch (const lpcdriver::LpcRuntimeError&) { threwOrigin = true; }
+    assert(threwOrigin);
+
+    bool threwBad = false;
+    try { harness.vm.callFunction(ob, "probe_bad", {}); }
+    catch (const lpcdriver::LpcRuntimeError&) { threwBad = true; }
+    assert(threwBad);
+
+    std::cout << "testCallStackModes2And3ThrowNotImplementedButModesOutOfRangeAlsoThrow OK\n";
+}
+
+static void testCommandsReturnsRegisteredActionsOnTheCommandGiverItself() {
+    // Mirrors testAddActionExactVerbMatchDispatchesWithRemainderAsArgumentAndDeclinesUnknownVerbs's
+    // own setup exactly: real commands() reads current_object's own
+    // sentence list, which for a player is built by moveObject()'s own
+    // setup_new_commands() propagation, not the registering room's own
+    // action table directly.
+    ObjectVarHarness harness;
+    harness.writeFile("/cmds_room.c",
+        "void init() { add_action(\"cmd_look\", \"look\"); }\n"
+        "int cmd_look(string arg) { return 1; }\n");
+    harness.writeFile("/cmds_mover.c",
+        "void go(object dest) { enable_commands(); move_object(dest); }\n"
+        "mixed *get_commands() { return commands(); }\n");
+    auto room = harness.objects.cloneObject("/cmds_room");
+    auto mover = harness.objects.cloneObject("/cmds_mover");
+    assert(room != nullptr && mover != nullptr);
+    harness.vm.callFunction(mover, "go", {lpcdriver::Value(room)});
+
+    lpcdriver::Value result = harness.vm.callFunction(mover, "get_commands", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 1);
+    auto* entry = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*arr)->items[0].data);
+    assert(entry != nullptr && (*entry)->items.size() == 4);
+    assert(std::get<std::string>((*entry)->items[0].data) == "look");
+    assert(std::get<int64_t>((*entry)->items[1].data) == 0);
+    assert(std::get<std::shared_ptr<lpcdriver::LpcObject>>((*entry)->items[2].data) == room);
+    assert(std::get<std::string>((*entry)->items[3].data) == "cmd_look");
+
+    std::cout << "testCommandsReturnsRegisteredActionsOnTheCommandGiverItself OK\n";
+}
+
+static void testSocketAddressForInteractiveObjectReturnsPeerAddrAndPortOrZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sa_probe.c",
+        "string probe(object ob) { return socket_address(ob, 0); }\n");
+    auto ob = harness.objects.cloneObject("/sa_probe");
+    assert(ob != nullptr);
+
+    // Not (yet) interactive: real socket_address() returns 0/falsy.
+    lpcdriver::Value beforeAttach = harness.vm.callFunction(ob, "probe", {lpcdriver::Value(ob)});
+    assert(std::holds_alternative<int64_t>(beforeAttach.data) && std::get<int64_t>(beforeAttach.data) == 0);
+
+    int serverFd, clientFd;
+    makeLoopbackTcpPair(serverFd, clientFd);
+    lpcdriver::Connection conn(serverFd);
+    conn.attach(ob);
+
+    lpcdriver::Value afterAttach = harness.vm.callFunction(ob, "probe", {lpcdriver::Value(ob)});
+    assert(std::holds_alternative<std::string>(afterAttach.data));
+    const std::string& addr = std::get<std::string>(afterAttach.data);
+    assert(addr.rfind("127.0.0.1 ", 0) == 0);
+
+    ::close(clientFd);
+    std::cout << "testSocketAddressForInteractiveObjectReturnsPeerAddrAndPortOrZero OK\n";
+}
+
+static void testSocketAddressForHandleDistinguishesLocalFromRemote() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sa_sock_probe.c",
+        "int fd;\n"
+        "int make() { fd = socket_create(1, \"noop\", 0); return socket_bind(fd, 0, \"127.0.0.1\"); }\n"
+        "void noop(int f, string m) {}\n"
+        "string probe_local() { return socket_address(fd, 1); }\n"
+        "string probe_remote() { return socket_address(fd, 0); }\n"
+        "int probe_missing_local() { return sizeof(socket_address(99999, 1)); }\n");
+    auto ob = harness.objects.cloneObject("/sa_sock_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value bindResult = harness.vm.callFunction(ob, "make", {});
+    assert(std::get<int64_t>(bindResult.data) == lpcdriver::SocketErr::Success);
+
+    lpcdriver::Value local = harness.vm.callFunction(ob, "probe_local", {});
+    assert(std::holds_alternative<std::string>(local.data));
+    assert(std::get<std::string>(local.data).rfind("127.0.0.1 ", 0) == 0);
+
+    // Never connected: real remote/peer address is empty (this driver's
+    // own LpcSocket::remoteAddr default), matching an unbound peer side.
+    lpcdriver::Value remote = harness.vm.callFunction(ob, "probe_remote", {});
+    assert(std::holds_alternative<std::string>(remote.data));
+    assert(std::get<std::string>(remote.data).rfind(" 0", 0) == 0);
+
+    lpcdriver::Value missing = harness.vm.callFunction(ob, "probe_missing_local", {});
+    assert(std::get<int64_t>(missing.data) == 0);
+
+    std::cout << "testSocketAddressForHandleDistinguishesLocalFromRemote OK\n";
+}
+
+static void testQueryHostNameMatchesRealGethostname() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qhn_probe.c", "string probe() { return query_host_name(); }\n");
+    auto ob = harness.objects.cloneObject("/qhn_probe");
+    assert(ob != nullptr);
+
+    char buf[256];
+    assert(::gethostname(buf, sizeof(buf)) == 0);
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == std::string(buf));
+
+    std::cout << "testQueryHostNameMatchesRealGethostname OK\n";
+}
+
+static void testFlushMessagesIsANoOpThatNeverThrowsForEitherObjectKind() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fm_probe.c",
+        "void probe(object ob) { flush_messages(ob); }\n");
+    auto ob = harness.objects.cloneObject("/fm_probe");
+    assert(ob != nullptr);
+
+    // Not interactive at all -- real flush_message() silently does
+    // nothing for a non-interactive object.
+    harness.vm.callFunction(ob, "probe", {lpcdriver::Value(ob)});
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(ob);
+    harness.vm.callFunction(ob, "probe", {lpcdriver::Value(ob)});
+
+    ::close(fds[1]);
+    std::cout << "testFlushMessagesIsANoOpThatNeverThrowsForEitherObjectKind OK\n";
+}
+
 static void testSqrtNegativeArgThrows() {
     // sqrt(x < 0) must throw, matching real f_sqrt()'s own guard.
     ObjectVarHarness harness;
@@ -13260,6 +13609,19 @@ int main() {
     testSetEvalLimitActuallyChangesTheEnforcedCeiling();
     testMapAliasCallsMethodOnTargetForEachElementSameAsMapArray();
     testQueryOnceInteractiveAliasMatchesUserp();
+    testObjectsReturnsEveryLiveObjectAndOmitsDestructedOnes();
+    testObjectsWithStringFilterExcludesFalsyResultsAndAbortsOnMissingFunction();
+    testLivingsReturnsOnlyObjectsWithCommandsEnabled();
+    testShallowAndDeepInheritListWalkARealThreeLevelChain();
+    testClonepTrueForCloneFalseForBlueprintAndNonObject();
+    testVirtualpTrueOnlyForACompileObjectResultAndDefaultsToThisObject();
+    testCallStackMode1ReturnsObjectsCurrentFirstWalkingOutward();
+    testCallStackModes2And3ThrowNotImplementedButModesOutOfRangeAlsoThrow();
+    testCommandsReturnsRegisteredActionsOnTheCommandGiverItself();
+    testSocketAddressForInteractiveObjectReturnsPeerAddrAndPortOrZero();
+    testSocketAddressForHandleDistinguishesLocalFromRemote();
+    testQueryHostNameMatchesRealGethostname();
+    testFlushMessagesIsANoOpThatNeverThrowsForEitherObjectKind();
     testSqrtNegativeArgThrows();
     testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero();
     testRegexpThirdArgIllegalForStringFormThrows();

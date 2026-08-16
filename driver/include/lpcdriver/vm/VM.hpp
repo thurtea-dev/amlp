@@ -111,6 +111,21 @@ public:
     // do go through run(), so this is populated correctly there too).
     std::shared_ptr<LpcObject> currentObject() const;
 
+    // Real call_stack()'s own mode-1 data source (real csp, the control
+    // stack): every currently-active function-call frame's own object,
+    // innermost (currentObject(), matching real current_object) last --
+    // callers reverse-iterate for call_stack()'s own "current frame
+    // first, walking outward" ordering. A plain accessor over the exact
+    // same callStack_ currentObject() itself already reads from; not a
+    // separate tracking structure. Mode 0 (real per-frame program
+    // filenames) is derived from this same stack's own objects'
+    // filenames, since this driver has no separate per-frame program
+    // pointer distinct from "whichever object's function is running".
+    // Modes 2 (per-frame function name) and 3 (per-frame origin) have no
+    // backing data here at all -- see call_stack()'s own EfunTable.cpp
+    // registration comment for why those two are not implemented.
+    const std::vector<std::shared_ptr<LpcObject>>& callFrames() const { return callStack_; }
+
     // real FluffOS's previous_object(int idx = 0) (efuns_main.c's
     // f_previous_object()): the object idx object-changing calls back
     // up the chain from here (0 = whoever was current_object right

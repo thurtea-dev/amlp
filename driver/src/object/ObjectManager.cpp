@@ -1,5 +1,6 @@
 #include "lpcdriver/object/ObjectManager.hpp"
 #include "lpcdriver/object/LivingNameRegistry.hpp"
+#include "lpcdriver/object/LiveObjectRegistry.hpp"
 #include "lpcdriver/config/Config.hpp"
 #include "lpcdriver/core/Errors.hpp"
 #include "lpcdriver/compiler/Lexer.hpp"
@@ -567,6 +568,10 @@ std::shared_ptr<LpcObject> ObjectManager::loadVirtualObject(const std::string& f
     // compiled there directly.
     ob->rebindFilename(filename);
     loaded_[filename] = ob;
+    // real object.h O_VIRTUAL: set once an object is confirmed to have
+    // actually come back from compile_object() rather than a direct
+    // on-disk compile -- backs virtualp().
+    ob->setIsVirtual(true);
     return ob;
 }
 
@@ -589,6 +594,7 @@ std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& rawFilen
 
     auto obj = std::make_shared<LpcObject>(filename, program);
     loaded_[filename] = obj;
+    LiveObjectRegistry::add(obj);
     initPrivsForObject(obj, filename);
 
     // A runtime error thrown out of create() (a missing efun, a bad
@@ -627,6 +633,7 @@ std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFile
     if (!program) return nullptr;
 
     auto obj = std::make_shared<LpcObject>(filename, program);
+    LiveObjectRegistry::add(obj);
     initPrivsForObject(obj, filename);
 
     if (vm_) {
@@ -721,6 +728,17 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
     // second, redundant layer of defense for a stale weak_ptr entry that
     // is never cleaned up otherwise, not a substitute for this.
     LivingNameRegistry::remove(obj);
+
+    // Real obj_list unthreading (simulate.c's own destruct_object()):
+    // this driver's own LiveObjectRegistry equivalent -- objects()/
+    // livings() must stop returning this object the instant it is
+    // destructed, not merely once its last shared_ptr reference happens
+    // to drop. LiveObjectRegistry::all() also independently filters on
+    // isDestructed() (the same redundant-defense-for-a-stale-entry
+    // reasoning as LivingNameRegistry::find() above), so this call is
+    // an active cleanup, not the only thing standing between a
+    // destructed object and a false-positive match.
+    LiveObjectRegistry::remove(obj);
 
     // real destruct_object() (simulate.c): "ob->super = 0; ob->next_inv
     // = 0; ob->contains = 0;" -- unlinks the object from its environment

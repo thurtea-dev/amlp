@@ -2,6 +2,7 @@
 #include "lpcdriver/core/Errors.hpp"
 #include "lpcdriver/vm/VM.hpp"
 #include "lpcdriver/object/LivingNameRegistry.hpp"
+#include "lpcdriver/object/LiveObjectRegistry.hpp"
 #include "lpcdriver/object/LpcObject.hpp"
 #include "lpcdriver/net/OutputContext.hpp"
 #include "lpcdriver/net/Connection.hpp"
@@ -1904,6 +1905,50 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(0));
     });
 
+    // int clonep(mixed default: this_object()) -- real efuns_main.c's
+    // f_clonep(): true unless the argument is the master/blueprint
+    // object itself (real "!(ob->flags & O_CLONE)"); a non-object
+    // argument is always false (real arg type is T_ANY, not T_OBJECT,
+    // confirmed in efun_defs.c). This driver tracks no separate
+    // O_CLONE-equivalent flag -- needed none: ObjectManager::loadObject()
+    // is the only path that ever registers an object into its own
+    // `loaded_[filename]` blueprint slot, and clone_object()/new() never
+    // do, so comparing VM::lookupObject(ob->filename()) against ob
+    // itself already distinguishes "I am the registered blueprint for my
+    // own filename" from "I am not" (a fresh clone, or a blueprint whose
+    // own file was never separately load_object()'d) with no new state
+    // to track or keep in sync.
+    t.registerEfun("clonep", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else if (args.empty()) {
+            ob = vm.currentObject();
+        }
+        if (!ob) return Value(static_cast<int64_t>(0));
+        auto blueprint = vm.lookupObject(ob->filename());
+        bool isClone = (blueprint != ob);
+        return Value(static_cast<int64_t>(isClone ? 1 : 0));
+    });
+
+    // int virtualp(object default: this_object()) -- real object.h's
+    // O_VIRTUAL flag, set only for an object returned by
+    // master()->compile_object() rather than compiled directly from an
+    // on-disk file (ObjectManager::loadVirtualObject()'s own
+    // LpcObject::setIsVirtual(true) call, the only place this flag is
+    // ever set). Confirmed real, live-reachable: std/virtual.c's own
+    // "if(virtualp(this_object())) return 0;" recursion guard.
+    t.registerEfun("virtualp", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else if (args.empty()) {
+            ob = vm.currentObject();
+        }
+        if (!ob) return Value(static_cast<int64_t>(0));
+        return Value(static_cast<int64_t>(ob->isVirtual() ? 1 : 0));
+    });
+
     // mixed *allocate(int size, void|mixed initial) -- an array of size
     // elements, each set to initial (default int 0, real func_spec.c's
     // own default -- confirmed live: secure/SimulEfun/copy.c's own
@@ -1986,6 +2031,74 @@ void registerCoreEfuns() {
         }
         if (!ob) return Value{};
         return Value(ob->filename());
+    });
+
+    // string *shallow_inherit_list(object default: this_object()) /
+    // string *inherit_list(...) -- real efun_defs.c confirms
+    // inherit_list is a genuine alias (F_SHALLOW_INHERIT_LIST |
+    // F_ALIAS_FLAG, same F_CODE as shallow_inherit_list itself, not a
+    // separate implementation). Direct parents only, one level.
+    //
+    // string *deep_inherit_list(object default: this_object()) -- the
+    // full transitive closure, real array.c's own recursive walk.
+    // Confirmed real, live-reachable: cmds/creator/_acheck.c/_wcheck.c/
+    // _roomcheck.c all do "member_array(\"std/armour.c\",
+    // deep_inherit_list(ob)) == -1" style sanity checks, which is also
+    // the real output *format* this driver's own normalization below is
+    // matched against: no leading slash, always ".c"-suffixed.
+    //
+    // Real filenames come from each ancestor CompiledProgram's own
+    // canonical on-disk path; this driver's CompiledProgram carries no
+    // such field of its own (only the *raw*, as-written "inherit ...;"
+    // path text, CompiledProgram::inherits, parallel-indexed with the
+    // already-resolved CompiledProgram::inheritedPrograms) -- so the
+    // best-effort normalization here is: strip a leading '/' if present,
+    // append ".c" if not already there. This matches every real call
+    // site's own comparison string exactly for a plain, unmacro'd
+    // "inherit \"std/armour\";"-style path, but is not a full path-
+    // resolution pass (relative "../" segments, include-dir search
+    // order) the way ObjectManager::compile()'s own file-loading
+    // normalization is -- flagged here rather than silently assumed
+    // identical.
+    auto normalizeInheritPath = [](std::string path) -> std::string {
+        if (!path.empty() && path.front() == '/') path.erase(0, 1);
+        if (path.size() < 2 || path.substr(path.size() - 2) != ".c") path += ".c";
+        return path;
+    };
+    auto collectDeepInherits = [normalizeInheritPath](const CompiledProgram& prog, auto&& self,
+                                                        std::vector<Value>& out) -> void {
+        for (size_t i = 0; i < prog.inherits.size(); ++i) {
+            out.push_back(Value(normalizeInheritPath(prog.inherits[i])));
+            if (i < prog.inheritedPrograms.size() && prog.inheritedPrograms[i]) {
+                self(*prog.inheritedPrograms[i], self, out);
+            }
+        }
+    };
+    auto resolveInheritTarget = [](VM& vm, std::vector<Value>& args) -> std::shared_ptr<LpcObject> {
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            return std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        }
+        return vm.currentObject();
+    };
+    auto shallowInheritListImpl = [resolveInheritTarget, normalizeInheritPath](
+                                       VM& vm, std::vector<Value>& args) -> Value {
+        auto ob = resolveInheritTarget(vm, args);
+        auto result = std::make_shared<Array>();
+        if (!ob) return Value(result);
+        for (const auto& raw : ob->program().inherits) {
+            result->items.push_back(Value(normalizeInheritPath(raw)));
+        }
+        return Value(result);
+    };
+    t.registerEfun("shallow_inherit_list", shallowInheritListImpl);
+    t.registerEfun("inherit_list", shallowInheritListImpl);
+    t.registerEfun("deep_inherit_list", [resolveInheritTarget, collectDeepInherits](
+                                             VM& vm, std::vector<Value>& args) -> Value {
+        auto ob = resolveInheritTarget(vm, args);
+        auto result = std::make_shared<Array>();
+        if (!ob) return Value(result);
+        collectDeepInherits(ob->program(), collectDeepInherits, result->items);
+        return Value(result);
     });
 
     // string function_exists(string fun, void|object ob, void|int flag)
@@ -2123,6 +2236,58 @@ void registerCoreEfuns() {
         auto arr = std::make_shared<Array>();
         for (auto& o : objs) arr->items.emplace_back(o);
         return Value(arr);
+    });
+
+    // mixed *call_stack(int flag) -- real efuns_main.c's f_call_stack(),
+    // confirmed directly (not guessed): flag selects what each frame
+    // reports, current frame first (index 0), walking outward. Real
+    // modes: 0 = per-frame program filename, 1 = per-frame object, 2 =
+    // per-frame function name, 3 = per-frame origin. This driver's own
+    // VM::callFrames() (a plain accessor over the same callStack_
+    // currentObject() itself reads) only ever tracked *objects* per
+    // frame -- confirmed directly, not assumed -- so mode 1 is exactly
+    // real, and mode 0 is derived from those same objects' own
+    // filenames (this driver has no separate "program" identity from
+    // "the object currently running", unlike real FluffOS's own
+    // current_prog/csp->prog distinction, but every real call site this
+    // mudlib has -- secure/SimulEfun/misc.c's own get_stack() -- only
+    // ever indexes call_stack(0)/call_stack(2) results through
+    // identify(), which does not care about that distinction for a
+    // plain object). Modes 2 and 3 have no backing data anywhere in
+    // this driver (no per-frame function-name or origin tracking
+    // exists) and throw a clear error naming the gap, rather than
+    // guessing -- get_stack()'s own real use is a wizard debug tool,
+    // not gameplay logic, so a hard failure there is an acceptable,
+    // honest outcome versus silently returning wrong data.
+    t.registerEfun("call_stack", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("call_stack: expected an int argument");
+        }
+        int64_t mode = std::get<int64_t>(args[0].data);
+        if (mode < 0 || mode > 3) {
+            throw LpcRuntimeError("call_stack: first argument must be 0, 1, 2, or 3");
+        }
+        if (mode == 2 || mode == 3) {
+            throw LpcRuntimeError(
+                "call_stack: mode 2 (function names) and mode 3 (origin) are not "
+                "implemented -- this driver's call stack tracks per-frame objects "
+                "only, no per-frame function-name or origin tagging exists");
+        }
+        const auto& frames = vm.callFrames();
+        auto result = std::make_shared<Array>();
+        result->items.reserve(frames.size());
+        // frames.back() is the innermost/current frame (matches
+        // currentObject()'s own read) -- reverse-iterate for real
+        // call_stack()'s own "current first, walking outward" order.
+        for (auto it = frames.rbegin(); it != frames.rend(); ++it) {
+            const auto& ob = *it;
+            if (mode == 1) {
+                result->items.push_back(ob ? Value(ob) : Value{});
+            } else {
+                result->items.push_back(Value(ob ? ob->filename() : std::string()));
+            }
+        }
+        return Value(result);
     });
 
     // void error(string msg) -- raises a real runtime error carrying
@@ -2780,6 +2945,32 @@ void registerCoreEfuns() {
         bool removed = giver->removeAction(ob, std::get<std::string>(args[0].data),
                                             std::get<std::string>(args[1].data));
         return Value(static_cast<int64_t>(removed ? 1 : 0));
+    });
+
+    // mixed *commands(void) -- real array.c's own commands(ob) helper
+    // (called by f_commands() as "commands(current_object)", confirmed
+    // directly): current_object's own action table (the exact same
+    // LpcObject::actions() add_action()/remove_action() already use),
+    // one 4-element array per entry: ({verb, flags, owner, function_name}).
+    // Confirmed live-reachable: std/user.c's own local_commands()
+    // ("return commands();"). The unrelated "query_actions" this
+    // driver's own instruct.md previously claimed was "already done" is
+    // not a real efun in this reference build at all (zero hits in
+    // efun_defs.c) -- corrected, see instruct.md's own Tier 2 note.
+    t.registerEfun("commands", [](VM& vm, std::vector<Value>&) -> Value {
+        auto ob = vm.currentObject();
+        auto result = std::make_shared<Array>();
+        if (!ob) return Value(result);
+        for (auto& entry : ob->actions()) {
+            auto tuple = std::make_shared<Array>();
+            tuple->items.push_back(Value(entry.verb));
+            tuple->items.push_back(Value(static_cast<int64_t>(entry.flag)));
+            auto owner = entry.owner.lock();
+            tuple->items.push_back(owner && !owner->isDestructed() ? Value(owner) : Value(static_cast<int64_t>(0)));
+            tuple->items.push_back(Value(entry.functionName));
+            result->items.push_back(Value(tuple));
+        }
+        return Value(result);
     });
 
     // string query_verb() -- the full typed first word of the line
@@ -3692,12 +3883,187 @@ void registerCoreEfuns() {
         return Value(result);
     });
 
+    // string socket_address(int|object handle, void|int local) -- real
+    // packages/sockets.c's own f_socket_address(), confirmed directly:
+    // an object argument must be currently interactive (returns 0/falsy
+    // otherwise), and returns that connection's own real peer "addr
+    // port" string (real code reads straight off the interactive_t's own
+    // stored sockaddr_in, the same value getpeername() gives here). An
+    // int argument is a socket handle, and `local` (default 0) selects
+    // which of the two addresses SocketRegistry already tracks per
+    // LpcSocket: 0 = remote/peer (real "r_addr"), 1 = local/bound (real
+    // "l_addr") -- confirmed against real get_socket_address(fd, addr,
+    // port, local)'s own "(local ? &l_addr : &r_addr)" ternary.
+    t.registerEfun("socket_address", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("socket_address: expected (int|object, void|int)");
+        bool local = args.size() > 1 && std::holds_alternative<int64_t>(args[1].data) &&
+                     std::get<int64_t>(args[1].data) != 0;
+
+        if (auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&args[0].data)) {
+            Connection* conn = *obPtr ? InteractiveRegistry::find(*obPtr) : nullptr;
+            if (!conn) return Value(static_cast<int64_t>(0));
+            sockaddr_in addr{};
+            socklen_t len = sizeof(addr);
+            if (::getpeername(conn->fd(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+                return Value(static_cast<int64_t>(0));
+            }
+            char buf[INET_ADDRSTRLEN];
+            if (!::inet_ntop(AF_INET, &addr.sin_addr, buf, sizeof(buf))) {
+                return Value(static_cast<int64_t>(0));
+            }
+            return Value(std::string(buf) + " " + std::to_string(ntohs(addr.sin_port)));
+        }
+
+        if (std::holds_alternative<int64_t>(args[0].data)) {
+            int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+            auto sock = SocketRegistry::find(handle);
+            if (!sock) return Value(std::string());
+            const std::string& addr = local ? sock->localAddr : sock->remoteAddr;
+            int port = local ? sock->localPort : sock->remotePort;
+            return Value(addr + " " + std::to_string(port));
+        }
+
+        throw LpcRuntimeError("socket_address: expected (int|object, void|int)");
+    });
+
+    // string query_host_name() -- real efuns_main.c's own
+    // f_query_host_name(): the machine's own real system hostname
+    // (gethostname(), not this mudlib's configured mud_name()), 0 if
+    // unavailable. Genuinely real but marginal: its only hit in
+    // mudlib/nightmare3_fluffos_v2/lib/ is buried inside
+    // secure/include/network.h's own (UDP intermud) START_MSG macro,
+    // not a direct call site.
+    t.registerEfun("query_host_name", [](VM&, std::vector<Value>&) -> Value {
+        char buf[256];
+        if (::gethostname(buf, sizeof(buf)) != 0) return Value(static_cast<int64_t>(0));
+        buf[sizeof(buf) - 1] = '\0';
+        return Value(std::string(buf));
+    });
+
+    // void flush_messages(object ob) -- real comm.c's own
+    // flush_message()/add_message() buffering: forces any output queued
+    // for `ob`'s own connection out immediately rather than waiting for
+    // the current backend cycle's own automatic flush. This driver's
+    // Connection::send() already writes synchronously (a direct blocking
+    // ::write() loop, no output-buffering layer sitting in front of it
+    // at all -- confirmed directly in Connection.cpp), so the real
+    // *observable* effect ("nothing is left unsent") is already this
+    // driver's default for every write(), unconditionally. Implemented
+    // as a no-op beyond confirming `ob` is actually interactive (real
+    // flush_message() silently does nothing for a non-interactive
+    // object too), not a fabricated buffering mechanism. Confirmed
+    // real, live-reachable: secure/SimulEfun/misc.c's own tc()
+    // ("tell_object(dude, ...); if(dude) flush_messages(dude);").
+    t.registerEfun("flush_messages", [](VM&, std::vector<Value>& args) -> Value {
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+            (void)(ob ? InteractiveRegistry::find(ob) : nullptr);
+        }
+        return Value{};
+    });
+
     // object *users() -- every object currently bound to a live
     // connection (real array.c's f_users(), backed by all_users[]).
     t.registerEfun("users", [](VM&, std::vector<Value>&) -> Value {
         auto result = std::make_shared<Array>();
         for (auto& ob : InteractiveRegistry::all()) {
             result->items.emplace_back(ob);
+        }
+        return Value(result);
+    });
+
+    // object *objects(void|string|function filter) -- real array.c's
+    // f_objects(), confirmed directly: every loaded object (blueprints
+    // and clones alike), optionally narrowed by calling filter(candidate)
+    // -- a Closure is called directly, a string name is applied on
+    // current_object with the candidate as its one argument (real
+    // "apply(func, current_object, 1, ORIGIN_EFUN)"). Real semantics
+    // distinguish two very different failure modes, both matched here:
+    // the callback returning a plain falsy T_NUMBER 0 just excludes that
+    // one candidate, while the callback failing outright (function
+    // missing, or throwing) aborts the whole call to an empty array
+    // (real "if (!v ...) { ... push_refed_array(&the_null_array); }"),
+    // not merely a single exclusion.
+    //
+    // Needed a live-object registry that did not exist before this
+    // batch (InteractiveRegistry only ever covered connected players) --
+    // see LiveObjectRegistry.hpp's own comment and
+    // src/efun/instruct.md's corrected Tier 1 table.
+    t.registerEfun("objects", [](VM& vm, std::vector<Value>& args) -> Value {
+        auto all = LiveObjectRegistry::all();
+        if (args.empty() || std::holds_alternative<std::monostate>(args[0].data)) {
+            auto result = std::make_shared<Array>();
+            for (auto& ob : all) result->items.emplace_back(ob);
+            return Value(result);
+        }
+        auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[0].data);
+        std::string funcName;
+        bool isClosure = closurePtr && *closurePtr;
+        if (!isClosure) {
+            if (!std::holds_alternative<std::string>(args[0].data)) {
+                throw LpcRuntimeError("objects: filter must be a string or function");
+            }
+            funcName = std::get<std::string>(args[0].data);
+        }
+        auto current = vm.currentObject();
+        // Real "!v" (apply()/call_function_pointer() itself failing to
+        // find/run the callback at all) aborts the *whole* call to an
+        // empty array, not just a per-candidate exclusion. This driver's
+        // own VM::callFunction() cannot signal that distinctly from "the
+        // callback genuinely returned void" -- unlike real apply(), a
+        // missing function silently returns Value{} rather than
+        // throwing (the same established convention every other
+        // driver-invoked apply in this codebase already relies on, e.g.
+        // a missing logon()/heart_beat()) -- so the string-name form
+        // checks functionExists() explicitly up front instead of trying
+        // to catch a call that was never going to throw. The closure
+        // form does not need this: VM::callClosure() already throws for
+        // a closure whose bare name resolves to nothing (its own
+        // documented contract), which the catch below still handles.
+        if (!isClosure && (!current || !vm.functionExists(current, funcName))) {
+            return Value(std::make_shared<Array>());
+        }
+        auto result = std::make_shared<Array>();
+        for (auto& ob : all) {
+            Value verdict;
+            try {
+                if (isClosure) {
+                    verdict = vm.callClosure(*closurePtr, {Value(ob)});
+                } else {
+                    verdict = vm.callFunction(current, funcName, {Value(ob)});
+                }
+            } catch (const std::exception&) {
+                return Value(std::make_shared<Array>());
+            }
+            bool excluded = std::holds_alternative<int64_t>(verdict.data) &&
+                             std::get<int64_t>(verdict.data) == 0;
+            if (!excluded) result->items.emplace_back(ob);
+        }
+        return Value(result);
+    });
+
+    // object *livings() -- real array.c's own livings(): every loaded
+    // object with O_ENABLE_COMMANDS set (real livings_filter(): "return
+    // (ob->flags & O_ENABLE_COMMANDS);"), which is exactly
+    // LpcObject::commandsEnabled() in this driver, confirmed against
+    // enable_commands()/disable_commands()'s own registration.
+    //
+    // Bare livings() calls from mudlib code never reach this: this
+    // mudlib's own secure/SimulEfun/SimulEfun.c defines a real simul_efun
+    // of the same name ("object *livings() { return efun::livings() -
+    // (efun::livings() - objects()); }"), and this driver's tiered call
+    // resolution (local -> inherited -> simul_efun -> core efun) means
+    // that simul_efun always wins for a bare call, the same "unreachable
+    // core registration" situation as tell_object/say/shout/translate/
+    // event. This one is different in one respect, though: that simul_efun
+    // body itself calls efun::livings() explicitly (this driver's real,
+    // already-working "efun::name(...)" escape hatch -- Lexer.cpp/
+    // Parser.cpp), so the core registration below is genuinely
+    // load-bearing, just reached only from inside that one file.
+    t.registerEfun("livings", [](VM&, std::vector<Value>&) -> Value {
+        auto result = std::make_shared<Array>();
+        for (auto& ob : LiveObjectRegistry::all()) {
+            if (ob->commandsEnabled()) result->items.emplace_back(ob);
         }
         return Value(result);
     });
