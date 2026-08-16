@@ -24,6 +24,8 @@
 #include <cstdlib>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <sstream>
 #include <chrono>
@@ -4497,6 +4499,70 @@ static void testMathEfunsSqrtFloorCeilCosExpLog() {
     std::cout << "testMathEfunsSqrtFloorCeilCosExpLog OK\n";
 }
 
+// Phase 0 row 0.12 audit: sin/tan/asin/acos/atan/log10 were registered
+// (packages/math.c/math_spec.c) but never actually called by name
+// anywhere in this suite -- cos/exp/log/sqrt/pow above all had real
+// coverage, these six did not. Same checkApprox() shape as the test
+// just above, known exact values so no reference-implementation
+// re-verification is needed here.
+static void testTrigAndLog10EfunsMatchKnownExactValues() {
+    ObjectVarHarness harness;
+    harness.writeFile("/trigtest.c",
+        "float probe_sin()   { return sin(0.0); }\n"
+        "float probe_tan()   { return tan(0.0); }\n"
+        "float probe_atan()  { return atan(0.0); }\n"
+        "float probe_asin()  { return asin(0.0); }\n"
+        "float probe_acos()  { return acos(1.0); }\n"
+        "float probe_log10() { return log10(100.0); }\n");
+    auto obj = harness.objects.cloneObject("/trigtest");
+    assert(obj != nullptr);
+
+    auto checkApprox = [&](const std::string& fn, double expected) {
+        lpcdriver::Value r = harness.vm.callFunction(obj, fn, {});
+        assert(std::holds_alternative<double>(r.data));
+        double got = std::get<double>(r.data);
+        assert(got > expected - 1e-9 && got < expected + 1e-9);
+    };
+    checkApprox("probe_sin",   0.0);
+    checkApprox("probe_tan",   0.0);
+    checkApprox("probe_atan",  0.0);
+    checkApprox("probe_asin",  0.0);
+    checkApprox("probe_acos",  0.0);
+    checkApprox("probe_log10", 2.0);
+
+    std::cout << "testTrigAndLog10EfunsMatchKnownExactValues OK\n";
+}
+
+static void testAsinAcosThrowOutsideDomainButAtanDoesNot() {
+    // asin/acos guard |x| > 1.0 (EfunTable.cpp's own comment: "f_asin()
+    // and f_acos() throw if |x| > 1.0"); atan has no such guard anywhere
+    // in the real math package, matching testMathEfunsSqrtFloorCeilCosExpLog's
+    // own sibling sqrt-negative-throws test's style.
+    ObjectVarHarness harness;
+    harness.writeFile("/trigerr.c",
+        "float probe_asin_bad() { return asin(2.0); }\n"
+        "float probe_acos_bad() { return acos(-2.0); }\n"
+        "float probe_atan_big() { return atan(1000000.0); }\n");
+    auto obj = harness.objects.cloneObject("/trigerr");
+    assert(obj != nullptr);
+
+    bool asinThrew = false;
+    try { harness.vm.callFunction(obj, "probe_asin_bad", {}); }
+    catch (const lpcdriver::LpcRuntimeError&) { asinThrew = true; }
+    assert(asinThrew);
+
+    bool acosThrew = false;
+    try { harness.vm.callFunction(obj, "probe_acos_bad", {}); }
+    catch (const lpcdriver::LpcRuntimeError&) { acosThrew = true; }
+    assert(acosThrew);
+
+    // Must not throw: well within float range, no domain restriction.
+    lpcdriver::Value atanResult = harness.vm.callFunction(obj, "probe_atan_big", {});
+    assert(std::holds_alternative<double>(atanResult.data));
+
+    std::cout << "testAsinAcosThrowOutsideDomainButAtanDoesNot OK\n";
+}
+
 // --- regexp / regexplode / reg_assoc (Phase 0 row 0.11, PCRE2-backed) ----
 
 static void testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero() {
@@ -4764,6 +4830,76 @@ static void testMapDeleteAndMDeleteAliasBothRemoveTheKey() {
     std::cout << "testMapDeleteAndMDeleteAliasBothRemoveTheKey OK\n";
 }
 
+// Phase 0 row 0.12 audit: allocate/allocate_mapping/copy/values were all
+// registered but never called by name anywhere in this suite.
+static void testAllocateAllocateMappingCopyAndValues() {
+    ObjectVarHarness harness;
+    harness.writeFile("/alloc_probe.c",
+        "mixed *probe_allocate() { return allocate(3); }\n"
+        "mixed *probe_allocate_init() { return allocate(3, \"x\"); }\n"
+        "mapping probe_allocate_mapping() { return allocate_mapping(10); }\n"
+        "mixed *copy_and_mutate(mixed *src) {\n"
+        "    mixed *dup;\n"
+        "    dup = copy(src);\n"
+        "    dup[0] = 999;\n"
+        "    return ({ src, dup });\n"
+        "}\n"
+        "mixed *probe_values(mapping m) { return values(m); }\n");
+    auto ob = harness.objects.cloneObject("/alloc_probe");
+    assert(ob != nullptr);
+    auto& vm = harness.vm;
+
+    // allocate(3): three elements, each defaulting to int 0 (real
+    // func_spec.c's own default).
+    lpcdriver::Value a1 = vm.callFunction(ob, "probe_allocate", {});
+    auto* arr1 = std::get_if<std::shared_ptr<lpcdriver::Array>>(&a1.data);
+    assert(arr1 != nullptr && (*arr1)->items.size() == 3);
+    for (auto& item : (*arr1)->items) {
+        assert(std::holds_alternative<int64_t>(item.data) && std::get<int64_t>(item.data) == 0);
+    }
+
+    // allocate(3, "x"): every slot initialized to the given value instead.
+    lpcdriver::Value a2 = vm.callFunction(ob, "probe_allocate_init", {});
+    auto* arr2 = std::get_if<std::shared_ptr<lpcdriver::Array>>(&a2.data);
+    assert(arr2 != nullptr && (*arr2)->items.size() == 3);
+    for (auto& item : (*arr2)->items) {
+        assert(std::holds_alternative<std::string>(item.data) && std::get<std::string>(item.data) == "x");
+    }
+
+    // allocate_mapping(10): a real, empty mapping (the capacity hint has
+    // no observable effect on this driver's own Mapping, per
+    // EfunTable.cpp's own comment).
+    lpcdriver::Value m = vm.callFunction(ob, "probe_allocate_mapping", {});
+    auto* mapPtr = std::get_if<std::shared_ptr<lpcdriver::Mapping>>(&m.data);
+    assert(mapPtr != nullptr && *mapPtr != nullptr && (*mapPtr)->entries.empty());
+
+    // copy(): a real deep copy -- mutating the copy must not affect the
+    // original (the key behavior that distinguishes copy() from a plain
+    // reference/alias).
+    auto srcArr = std::make_shared<lpcdriver::Array>();
+    srcArr->items.push_back(lpcdriver::Value(static_cast<int64_t>(111)));
+    lpcdriver::Value copyResult = vm.callFunction(ob, "copy_and_mutate", {lpcdriver::Value(srcArr)});
+    auto* pair = std::get_if<std::shared_ptr<lpcdriver::Array>>(&copyResult.data);
+    assert(pair != nullptr && (*pair)->items.size() == 2);
+    auto* originalAfter = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*pair)->items[0].data);
+    auto* dupAfter = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*pair)->items[1].data);
+    assert(std::get<int64_t>((*originalAfter)->items[0].data) == 111);
+    assert(std::get<int64_t>((*dupAfter)->items[0].data) == 999);
+
+    // values(): every value in insertion order, matching keys()'s own
+    // already-tested ordering.
+    auto srcMap = std::make_shared<lpcdriver::Mapping>();
+    srcMap->entries.push_back({lpcdriver::Value(std::string("a")), lpcdriver::Value(static_cast<int64_t>(1))});
+    srcMap->entries.push_back({lpcdriver::Value(std::string("b")), lpcdriver::Value(static_cast<int64_t>(2))});
+    lpcdriver::Value valsResult = vm.callFunction(ob, "probe_values", {lpcdriver::Value(srcMap)});
+    auto* valsArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&valsResult.data);
+    assert(valsArr != nullptr && (*valsArr)->items.size() == 2);
+    assert(std::get<int64_t>((*valsArr)->items[0].data) == 1);
+    assert(std::get<int64_t>((*valsArr)->items[1].data) == 2);
+
+    std::cout << "testAllocateAllocateMappingCopyAndValues OK\n";
+}
+
 static void testClasspAlwaysReturnsFalseSinceNoClassTypeExists() {
     ObjectVarHarness harness;
     harness.writeFile("/classptest.c",
@@ -4838,6 +4974,39 @@ static void testLocaltimeReturnsElevenElementArrayMatchingKnownEpochInstant() {
     assert(std::holds_alternative<std::string>((*arr)->items[9].data));
 
     std::cout << "testLocaltimeReturnsElevenElementArrayMatchingKnownEpochInstant OK\n";
+}
+
+// Phase 0 row 0.12 audit: time()/ctime() were registered (localtime()
+// already had its own coverage just above) but never called by name
+// anywhere in this suite.
+static void testTimeReturnsPlausibleCurrentEpochAndCtimeFormatsAKnownInstant() {
+    ObjectVarHarness harness;
+    harness.writeFile("/timetest.c",
+        "int probe_time() { return time(); }\n"
+        "string probe_ctime(int clock) { return ctime(clock); }\n");
+    auto ob = harness.objects.cloneObject("/timetest");
+    assert(ob != nullptr);
+
+    std::time_t before = std::time(nullptr);
+    lpcdriver::Value t = harness.vm.callFunction(ob, "probe_time", {});
+    std::time_t after = std::time(nullptr);
+    assert(std::holds_alternative<int64_t>(t.data));
+    int64_t got = std::get<int64_t>(t.data);
+    assert(got >= static_cast<int64_t>(before) - 1 && got <= static_cast<int64_t>(after) + 1);
+
+    // Same known instant as testLocaltimeReturnsElevenElementArrayMatchingKnownEpochInstant
+    // (2005-03-18 01:58:31 UTC), safely mid-day-ish in every real timezone
+    // so the year digits below cannot roll to an adjacent year. Real
+    // ctime() format is always exactly 25 characters, trailing newline
+    // included ("Www Mmm dd hh:mm:ss yyyy\n").
+    lpcdriver::Value c = harness.vm.callFunction(ob, "probe_ctime", {lpcdriver::Value(int64_t{1111111111})});
+    assert(std::holds_alternative<std::string>(c.data));
+    const std::string& s = std::get<std::string>(c.data);
+    assert(s.size() == 25);
+    assert(s.back() == '\n');
+    assert(s.find("2005") != std::string::npos);
+
+    std::cout << "testTimeReturnsPlausibleCurrentEpochAndCtimeFormatsAKnownInstant OK\n";
 }
 
 static void testStatOnRegularFileReturnsSizeAndMtimeArray() {
@@ -5971,6 +6140,130 @@ static void testTerminalColourMultipleRealCodesInOneString() {
     std::cout << "testTerminalColourMultipleRealCodesInOneString OK\n";
 }
 
+// Phase 0 row 0.12 audit: query_ip_number/query_ip_name/socket_status
+// were all registered but never called by name anywhere in this suite.
+// query_ip_number()/query_ip_name() read OutputContext::current()'s own
+// fd via getpeername() (EfunTable.cpp's own comment), which needs a real
+// AF_INET peer -- the socketpair(AF_UNIX, ...) fd pairs every other net
+// test in this file uses will not produce a real IPv4 getpeername()
+// result, so this one small helper spins up a genuine loopback TCP pair
+// instead (synchronous/blocking is fine here, this is just test setup,
+// not exercising the non-blocking accept-loop machinery itself).
+static void makeLoopbackTcpPair(int& serverSide, int& clientSide) {
+    int listenFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(listenFd >= 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(::bind(listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    assert(::listen(listenFd, 1) == 0);
+    socklen_t len = sizeof(addr);
+    assert(::getsockname(listenFd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+    int port = ntohs(addr.sin_port);
+
+    clientSide = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(clientSide >= 0);
+    sockaddr_in caddr{};
+    caddr.sin_family = AF_INET;
+    caddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    caddr.sin_port = htons(static_cast<uint16_t>(port));
+    assert(::connect(clientSide, reinterpret_cast<sockaddr*>(&caddr), sizeof(caddr)) == 0);
+
+    serverSide = ::accept(listenFd, nullptr, nullptr);
+    assert(serverSide >= 0);
+    ::close(listenFd);
+}
+
+static void testQueryIpNumberAndQueryIpNameReturnLoopbackAddressForCurrentConnection() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ip_probe.c",
+        "string probe_num() { return query_ip_number(); }\n"
+        "string probe_name() { return query_ip_name(); }\n");
+    auto ob = harness.objects.cloneObject("/ip_probe");
+    assert(ob != nullptr);
+
+    int serverFd, clientFd;
+    makeLoopbackTcpPair(serverFd, clientFd);
+    lpcdriver::Connection conn(serverFd);
+    conn.attach(ob);
+
+    lpcdriver::OutputContext::set(&conn);
+    lpcdriver::Value numResult = harness.vm.callFunction(ob, "probe_num", {});
+    // No DNS resolution in this driver (a blocking reverse lookup would
+    // stall every other connection) -- query_ip_name() always falls back
+    // to the same numeric IP query_ip_number() returns, per its own
+    // EfunTable.cpp comment.
+    lpcdriver::Value nameResult = harness.vm.callFunction(ob, "probe_name", {});
+    lpcdriver::OutputContext::set(nullptr);
+
+    assert(std::get<std::string>(numResult.data) == "127.0.0.1");
+    assert(std::get<std::string>(nameResult.data) == "127.0.0.1");
+
+    ::close(clientFd);
+    std::cout << "testQueryIpNumberAndQueryIpNameReturnLoopbackAddressForCurrentConnection OK\n";
+}
+
+static void testQueryIpNumberReturnsZeroWithNoCurrentConnection() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ip_probe2.c", "mixed probe() { return query_ip_number(); }\n");
+    auto ob = harness.objects.cloneObject("/ip_probe2");
+    assert(ob != nullptr);
+
+    lpcdriver::OutputContext::set(nullptr);
+    lpcdriver::Value r = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::monostate>(r.data));
+
+    std::cout << "testQueryIpNumberReturnsZeroWithNoCurrentConnection OK\n";
+}
+
+static void testSocketStatusReturnsRealShapeArrayForKnownFdAndIncludesItInTheAllForm() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sockstatus_probe.c",
+        "int fd;\n"
+        "int make() { fd = socket_create(2, \"noop\", 0); return socket_bind(fd, 0); }\n"
+        "void noop(int f, string m, string a) {}\n"
+        "mixed *probe_one() { return socket_status(fd); }\n"
+        "mixed *probe_all() { return socket_status(); }\n"
+        "int get_fd() { return fd; }\n");
+    auto ob = harness.objects.cloneObject("/sockstatus_probe");
+    assert(ob != nullptr);
+    auto& vm = harness.vm;
+
+    lpcdriver::Value bindResult = vm.callFunction(ob, "make", {});
+    assert(std::get<int64_t>(bindResult.data) == lpcdriver::SocketErr::Success);
+    int fd = static_cast<int>(std::get<int64_t>(vm.callFunction(ob, "get_fd", {}).data));
+
+    // Real shape (lib/packages/sockets_spec.c's own doc comment):
+    // [fd, state, mode, local addr, remote addr, owner].
+    lpcdriver::Value one = vm.callFunction(ob, "probe_one", {});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&one.data);
+    assert(arr != nullptr && (*arr)->items.size() == 6);
+    assert(std::get<int64_t>((*arr)->items[0].data) == fd);
+    assert(std::get<std::string>((*arr)->items[1].data) == "BOUND");
+    assert(std::get<std::string>((*arr)->items[2].data) == "DATAGRAM");
+
+    lpcdriver::Value all = vm.callFunction(ob, "probe_all", {});
+    auto* allArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&all.data);
+    assert(allArr != nullptr);
+    bool found = false;
+    for (auto& entry : (*allArr)->items) {
+        auto* entryArr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&entry.data);
+        if (entryArr && *entryArr && !(*entryArr)->items.empty() &&
+            std::holds_alternative<int64_t>((*entryArr)->items[0].data) &&
+            std::get<int64_t>((*entryArr)->items[0].data) == fd) {
+            found = true;
+        }
+    }
+    assert(found);
+
+    // Cleanup: this socket must not linger in the global SocketRegistry
+    // (shared across every test in this binary) for later tests to trip
+    // over.
+    lpcdriver::SocketRegistry::forceRemove(fd);
+    std::cout << "testSocketStatusReturnsRealShapeArrayForKnownFdAndIncludesItInTheAllForm OK\n";
+}
+
 // --- socket_* efun family (ROADMAP row 0.10) -----------------------------
 // Real signatures/state machine/error codes/callback argument conventions
 // verified against fluffos-2.9-ds2.08/socket_efuns.c and socket_efuns.h --
@@ -6212,6 +6505,214 @@ static void testSocketDatagramWriteAndReadCallbackCarriesSenderAddress() {
     assert(from.rfind("127.0.0.1 ", 0) == 0);
 
     std::cout << "testSocketDatagramWriteAndReadCallbackCarriesSenderAddress OK\n";
+}
+
+// Phase 0 row 0.12 audit: regexp_assoc/remove_action/rm/set_eval_limit/
+// map/query_once_interactive were all registered but never called by
+// name anywhere in this suite.
+
+// regexp_assoc is a real registered alias of reg_assoc (EfunTable.cpp's
+// own comment: "added for the same reason: the task's own spec
+// explicitly calls for it as a second name for reg_assoc"), sharing the
+// exact same lambda -- reg_assoc's own algorithm already has full
+// coverage (testRegAssocMatchesRealDocCommentExample and its sibling),
+// so this only needs to confirm the alias name itself actually resolves
+// and produces the identical result, not a second full algorithm
+// re-verification.
+static void testRegexpAssocAliasProducesSameResultAsRegAssoc() {
+    ObjectVarHarness harness;
+    harness.writeFile("/regexpassocprobe.c",
+        "mixed *probe(string s, mixed *pats, mixed *toks, mixed def) { "
+        "return regexp_assoc(s, pats, toks, def); }\n");
+    auto ob = harness.objects.cloneObject("/regexpassocprobe");
+    assert(ob != nullptr);
+
+    auto pats = std::make_shared<lpcdriver::Array>();
+    pats->items.push_back(lpcdriver::Value(std::string("ha")));
+    auto toks = std::make_shared<lpcdriver::Array>();
+    toks->items.push_back(lpcdriver::Value(int64_t{1}));
+
+    // "xhax" against pattern "ha": exactly one match (position 1..3),
+    // giving a clean 3-element split (before/match/after) -- "haha"
+    // itself would match twice here (real reg_assoc's own genuinely
+    // global scan), which is already what
+    // testRegAssocMatchesRealDocCommentExample verifies in more depth.
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("xhax")), lpcdriver::Value(pats),
+         lpcdriver::Value(toks), lpcdriver::Value(int64_t{0})});
+    auto* outer = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(outer != nullptr && (*outer)->items.size() == 2);
+    auto* texts = std::get_if<std::shared_ptr<lpcdriver::Array>>(&(*outer)->items[0].data);
+    assert(texts != nullptr && (*texts)->items.size() == 3);
+    assert(std::get<std::string>((*texts)->items[0].data) == "x");
+    assert(std::get<std::string>((*texts)->items[1].data) == "ha");
+    assert(std::get<std::string>((*texts)->items[2].data) == "x");
+
+    std::cout << "testRegexpAssocAliasProducesSameResultAsRegAssoc OK\n";
+}
+
+// remove_action(act, verb): removes an action previously registered by
+// the calling object on the resolved command giver's own table (real
+// add_action.c's own remove_action()). Must run from the same "current
+// object that originally registered it, with the same command giver
+// resolution" context add_action itself needs (EfunTable.cpp's own
+// resolveCommandGiver() comment: VM::commandGiver() is set explicitly
+// during move_object()'s init()-calling sequence and during
+// dispatchCommand()'s own handler calls) -- so this test removes the
+// registration from inside a second dispatched command, not via a bare
+// vm.callFunction(), the same way add_action's own registration only
+// works from inside init().
+static void testRemoveActionRemovesPreviouslyAddedActionAndReturnsZeroWhenNothingToRemove() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ra_room.c",
+        "void init() {\n"
+        "    add_action(\"cmd_look\", \"look\");\n"
+        "    add_action(\"cmd_forget\", \"forget\");\n"
+        "}\n"
+        "int cmd_look(string arg) { return 1; }\n"
+        "int cmd_forget(string arg) { return remove_action(\"cmd_look\", \"look\"); }\n");
+    harness.writeFile("/ra_mover.c", "void go(object dest) { enable_commands(); move_object(dest); }\n");
+
+    auto room = harness.objects.cloneObject("/ra_room");
+    auto mover = harness.objects.cloneObject("/ra_mover");
+    assert(room != nullptr && mover != nullptr);
+    harness.vm.callFunction(mover, "go", {lpcdriver::Value(room)});
+
+    assert(harness.vm.dispatchCommand(mover, "look") == true);
+
+    // cmd_forget's own return value IS remove_action()'s return value
+    // (1 == removed) -- a truthy handler return is exactly what makes
+    // dispatchCommand() itself report "claimed" here.
+    assert(harness.vm.dispatchCommand(mover, "forget") == true);
+
+    // The removed action no longer matches anything.
+    assert(harness.vm.dispatchCommand(mover, "look") == false);
+
+    // A second remove_action() call for the same (act, verb) finds
+    // nothing left to remove -- cmd_forget returns the real 0, which
+    // is itself falsy, so this second "forget" dispatch is correctly
+    // reported as not claimed (no other handler answers "forget" either).
+    assert(harness.vm.dispatchCommand(mover, "forget") == false);
+
+    std::cout << "testRemoveActionRemovesPreviouslyAddedActionAndReturnsZeroWhenNothingToRemove OK\n";
+}
+
+// int rm(string path) -- 1 on success, 0 on failure (missing file),
+// mirroring testRenameFileAndVerifyViaReadFile's/
+// testRmdirRemovesEmptyDirectoryAndFailsOnNonEmpty's own established
+// style for this driver's file efuns.
+static void testRmDeletesFileAndReturnsZeroForMissingPath() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rm_target.txt", "delete me\n");
+    harness.writeFile("/rm_probe.c",
+        "int do_rm(string path) { return rm(path); }\n"
+        "mixed read_it() { return read_file(\"/rm_target.txt\"); }\n");
+    auto ob = harness.objects.cloneObject("/rm_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value before = harness.vm.callFunction(ob, "read_it", {});
+    assert(std::holds_alternative<std::string>(before.data));
+
+    lpcdriver::Value rmResult = harness.vm.callFunction(ob, "do_rm",
+        {lpcdriver::Value(std::string("/rm_target.txt"))});
+    assert(std::get<int64_t>(rmResult.data) == 1);
+
+    // Real read_file() on a now-missing path returns falsy (0), matching
+    // testReadFileReturnsFileContentAndFalsyForMissingFile's own
+    // established expectation.
+    lpcdriver::Value after = harness.vm.callFunction(ob, "read_it", {});
+    assert(std::holds_alternative<int64_t>(after.data) && std::get<int64_t>(after.data) == 0);
+
+    lpcdriver::Value rmMissing = harness.vm.callFunction(ob, "do_rm",
+        {lpcdriver::Value(std::string("/rm_target.txt"))});
+    assert(std::get<int64_t>(rmMissing.data) == 0);
+
+    std::cout << "testRmDeletesFileAndReturnsZeroForMissingPath OK\n";
+}
+
+// set_eval_limit(int): EfunTable.cpp's own comment says this driver
+// "applies the limit change immediately" (not a no-op the way an older
+// STATUS.md entry once described a different, earlier eval-cost model) --
+// verified here directly rather than trusted, by actually tripping a
+// very low limit against an infinite loop and confirming EvalCostError
+// fires, then confirming -1 restores the default (config's own ceiling,
+// high enough that the same kind of short loop completes normally).
+static void testSetEvalLimitActuallyChangesTheEnforcedCeiling() {
+    ObjectVarHarness harness;
+    harness.writeFile("/evallimit_probe.c",
+        "int spin() { while(1) {} return 1; }\n"
+        "int short_loop() { int i; for (i = 0; i < 5; i++) {} return i; }\n");
+    auto ob = harness.objects.cloneObject("/evallimit_probe");
+    assert(ob != nullptr);
+
+    harness.vm.resetEvalCost();
+    harness.vm.setMaxEvalCost(50);
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "spin", {});
+    } catch (const lpcdriver::EvalCostError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    // -1 restores the configured default -- high enough that this short,
+    // genuinely-terminating loop runs to completion without tripping it.
+    harness.vm.setMaxEvalCost(-1);
+    harness.vm.resetEvalCost();
+    lpcdriver::Value shortResult = harness.vm.callFunction(ob, "short_loop", {});
+    assert(std::get<int64_t>(shortResult.data) == 5);
+
+    std::cout << "testSetEvalLimitActuallyChangesTheEnforcedCeiling OK\n";
+}
+
+// map is a real registered alias of map_array (func_spec.c: "mixed
+// *map_array map(...)"), sharing the exact same lambda -- map_array's
+// own two call shapes already have full coverage, so this only needs to
+// confirm the bare "map" name itself resolves and works, not a second
+// full re-verification.
+static void testMapAliasCallsMethodOnTargetForEachElementSameAsMapArray() {
+    ObjectVarHarness harness;
+    harness.writeFile("/map_target.c",
+        "string shout(string s) { return s + \"!\"; }\n");
+    harness.writeFile("/map_caller.c",
+        "mixed probe(object target) { return map(({ \"a\", \"b\" }), \"shout\", target); }\n");
+    auto target = harness.objects.cloneObject("/map_target");
+    auto caller = harness.objects.cloneObject("/map_caller");
+    assert(target != nullptr && caller != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(caller, "probe", {lpcdriver::Value(target)});
+    auto* arr = std::get_if<std::shared_ptr<lpcdriver::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 2);
+    assert(std::get<std::string>((*arr)->items[0].data) == "a!");
+    assert(std::get<std::string>((*arr)->items[1].data) == "b!");
+
+    std::cout << "testMapAliasCallsMethodOnTargetForEachElementSameAsMapArray OK\n";
+}
+
+// query_once_interactive is a real registered alias of userp (real
+// O_ONCE_INTERACTIVE), sharing the exact same lambda -- userp()'s own
+// sticky-after-disconnect semantics already have coverage elsewhere;
+// this only confirms the alias name itself works.
+static void testQueryOnceInteractiveAliasMatchesUserp() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qoi_probe.c",
+        "int check(object ob) { return query_once_interactive(ob); }\n");
+    auto ob = harness.objects.cloneObject("/qoi_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value before = harness.vm.callFunction(ob, "check", {lpcdriver::Value(ob)});
+    assert(std::get<int64_t>(before.data) == 0);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    lpcdriver::Connection conn(fds[0]);
+    conn.attach(ob);
+
+    lpcdriver::Value after = harness.vm.callFunction(ob, "check", {lpcdriver::Value(ob)});
+    assert(std::get<int64_t>(after.data) == 1);
+
+    ::close(fds[1]);
+    std::cout << "testQueryOnceInteractiveAliasMatchesUserp OK\n";
 }
 
 static void testSqrtNegativeArgThrows() {
@@ -7712,6 +8213,86 @@ static void testUpperCaseThrowsOnNonStringArgument() {
     assert(threw);
 
     std::cout << "testUpperCaseThrowsOnNonStringArgument OK\n";
+}
+
+// Phase 0 row 0.12 audit: capitalize/strlen/strstr were registered but
+// never called by name anywhere in this suite. capitalize()'s own
+// EfunTable.cpp comment: only a currently-lowercase first character is
+// uppercased -- an already-uppercase or non-alphabetic first character is
+// left alone, both edge cases checked here alongside the happy path.
+static void testCapitalizeUppercasesOnlyALowercaseFirstCharacter() {
+    ObjectVarHarness harness;
+    harness.writeFile("/cap_probe.c",
+        "string probe_lower() { return capitalize(\"hello\"); }\n"
+        "string probe_upper() { return capitalize(\"Hello\"); }\n"
+        "string probe_digit() { return capitalize(\"7up\"); }\n"
+        "string probe_empty() { return capitalize(\"\"); }\n");
+    auto ob = harness.objects.cloneObject("/cap_probe");
+    assert(ob != nullptr);
+
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "probe_lower", {}).data) == "Hello");
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "probe_upper", {}).data) == "Hello");
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "probe_digit", {}).data) == "7up");
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "probe_empty", {}).data) == "");
+
+    std::cout << "testCapitalizeUppercasesOnlyALowercaseFirstCharacter OK\n";
+}
+
+// strlen (a real alias of sizeof on a string, EfunTable.cpp's own
+// "t.registerEfun(\"strlen\", sizeofImpl);") and strstr (a real alias of
+// strsrch, "int strstr strsrch(...)") -- both registered efuns, neither
+// name called directly anywhere else in this suite even though sizeof()
+// and strsrch() themselves each have their own separate coverage.
+static void testStrlenAndStrstrAliasesWorkByTheirOwnNames() {
+    ObjectVarHarness harness;
+    harness.writeFile("/strlen_probe.c",
+        "int probe_len() { return strlen(\"hello\"); }\n"
+        "int probe_find() { return strstr(\"hello world\", \"world\"); }\n"
+        "int probe_find_from() { return strstr(\"aXaXa\", \"a\", 1); }\n"
+        "int probe_not_found() { return strstr(\"hello\", \"xyz\"); }\n");
+    auto ob = harness.objects.cloneObject("/strlen_probe");
+    assert(ob != nullptr);
+
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_len", {}).data) == 5);
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_find", {}).data) == 6);
+    // strsrch/strstr's own "start" argument: first match at or after
+    // index 1 -- the 'a' at index 0 must be skipped.
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_find_from", {}).data) == 2);
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "probe_not_found", {}).data) == -1);
+
+    std::cout << "testStrlenAndStrstrAliasesWorkByTheirOwnNames OK\n";
+}
+
+// string crypt(string str, string|int salt) -- confirmed live in
+// secure/std/login.c's own confirm_password() (EfunTable.cpp's own
+// comment). Happy path: a fixed >=2-char salt makes the result
+// deterministic and reproducible (real crypt(3) semantics -- the salt is
+// also always the output's own prefix). Edge case: an omitted/too-short
+// salt still produces *some* valid hash rather than throwing (this
+// driver generates a random one instead), covering the other real branch
+// of the same efun.
+static void testCryptWithExplicitSaltIsDeterministicAndSaltIsThePrefix() {
+    ObjectVarHarness harness;
+    harness.writeFile("/crypt_probe.c",
+        "string probe(string pw, string salt) { return crypt(pw, salt); }\n"
+        "string probe_no_salt(string pw) { return crypt(pw, 0); }\n");
+    auto ob = harness.objects.cloneObject("/crypt_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value r1 = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("hunter2")), lpcdriver::Value(std::string("ab"))});
+    lpcdriver::Value r2 = harness.vm.callFunction(ob, "probe",
+        {lpcdriver::Value(std::string("hunter2")), lpcdriver::Value(std::string("ab"))});
+    const std::string& hash1 = std::get<std::string>(r1.data);
+    const std::string& hash2 = std::get<std::string>(r2.data);
+    assert(hash1 == hash2);
+    assert(hash1.rfind("ab", 0) == 0);
+
+    lpcdriver::Value r3 = harness.vm.callFunction(ob, "probe_no_salt", {lpcdriver::Value(std::string("hunter2"))});
+    assert(std::holds_alternative<std::string>(r3.data));
+    assert(!std::get<std::string>(r3.data).empty());
+
+    std::cout << "testCryptWithExplicitSaltIsDeterministicAndSaltIsThePrefix OK\n";
 }
 
 // ---------------------------------------------------------------------
@@ -10110,6 +10691,57 @@ static void testFloatpTrueOnlyForFloatNotIntOrString() {
     assert(std::get<int64_t>(isStr.data) == 0);
 
     std::cout << "testFloatpTrueOnlyForFloatNotIntOrString OK\n";
+}
+
+// Phase 0 row 0.12 audit: arrayp/functionp/mapp/objectp/pointerp were all
+// registered but never called by name anywhere in this suite (stringp,
+// intp, floatp, undefinedp, nullp, classp already had real coverage).
+// arrayp and pointerp are real aliases of the same lambda (EfunTable.cpp's
+// own "int pointerp(mixed) / int arrayp(mixed)" comment) -- both names
+// exercised here, not just one.
+static void testArrayFunctionMapObjectPointerPredicatesEachTrueOnlyForOwnKind() {
+    ObjectVarHarness harness;
+    harness.writeFile("/predicate_probe.c",
+        "mixed *arr; mapping m; function fn;\n"
+        "void create() { arr = ({1,2}); m = ([\"a\":1]); fn = (: lower_case, \"X\" :); }\n"
+        "int is_arr(mixed v)  { return arrayp(v); }\n"
+        "int is_ptr(mixed v)  { return pointerp(v); }\n"
+        "int is_fn(mixed v)   { return functionp(v); }\n"
+        "int is_map(mixed v)  { return mapp(v); }\n"
+        "int is_obj(mixed v)  { return objectp(v); }\n"
+        "mixed get_arr() { return arr; }\n"
+        "mixed get_fn()  { return fn; }\n"
+        "mixed get_map() { return m; }\n"
+        "object get_self() { return this_object(); }\n");
+    auto ob = harness.objects.cloneObject("/predicate_probe");
+    assert(ob != nullptr);
+    auto& vm = harness.vm;
+
+    lpcdriver::Value arr = vm.callFunction(ob, "get_arr", {});
+    lpcdriver::Value fn = vm.callFunction(ob, "get_fn", {});
+    lpcdriver::Value map = vm.callFunction(ob, "get_map", {});
+    lpcdriver::Value self = vm.callFunction(ob, "get_self", {});
+    lpcdriver::Value number(static_cast<int64_t>(5));
+
+    // arrayp/pointerp: true for the array, false for everything else.
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_arr", {arr}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_ptr", {arr}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_arr", {number}).data) == 0);
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_ptr", {map}).data) == 0);
+
+    // functionp: true only for the closure.
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_fn", {fn}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_fn", {arr}).data) == 0);
+
+    // mapp: true only for the mapping.
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_map", {map}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_map", {arr}).data) == 0);
+
+    // objectp: true only for the real object reference.
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_obj", {self}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(ob, "is_obj", {number}).data) == 0);
+
+    std::cout << "testArrayFunctionMapObjectPointerPredicatesEachTrueOnlyForOwnKind OK\n";
 }
 
 // string repeat_string(string, int) -- real fluffos-2.9-ds2.08's own
@@ -12620,6 +13252,14 @@ int main() {
     testAbsReturnsPositiveForNegativeIntAndFloat();
     testMaxAndMinReturnCorrectElementFromIntArray();
     testMathEfunsSqrtFloorCeilCosExpLog();
+    testTrigAndLog10EfunsMatchKnownExactValues();
+    testAsinAcosThrowOutsideDomainButAtanDoesNot();
+    testRegexpAssocAliasProducesSameResultAsRegAssoc();
+    testRemoveActionRemovesPreviouslyAddedActionAndReturnsZeroWhenNothingToRemove();
+    testRmDeletesFileAndReturnsZeroForMissingPath();
+    testSetEvalLimitActuallyChangesTheEnforcedCeiling();
+    testMapAliasCallsMethodOnTargetForEachElementSameAsMapArray();
+    testQueryOnceInteractiveAliasMatchesUserp();
     testSqrtNegativeArgThrows();
     testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero();
     testRegexpThirdArgIllegalForStringFormThrows();
@@ -12630,9 +13270,11 @@ int main() {
     testRegAssocMatchesRealDocCommentExample();
     testRegAssocZeroPatternsReturnsWholeStringWithDefaultToken();
     testMapDeleteAndMDeleteAliasBothRemoveTheKey();
+    testAllocateAllocateMappingCopyAndValues();
     testClasspAlwaysReturnsFalseSinceNoClassTypeExists();
     testAllPreviousObjectsReturnsSameArrayAsPreviousObjectMinusOne();
     testLocaltimeReturnsElevenElementArrayMatchingKnownEpochInstant();
+    testTimeReturnsPlausibleCurrentEpochAndCtimeFormatsAKnownInstant();
     testStatOnRegularFileReturnsSizeAndMtimeArray();
     testReadBytesReadsSubrangeAndHandlesNegativeStartAndMissingFile();
     testWriteBytesOverwritesAtOffsetThenReadBytesConfirmsIt();
@@ -12673,6 +13315,9 @@ int main() {
     testTerminalColourLeavesUnrecognizedTokensAndPlainTextAsIs();
     testTerminalColourWithNoMarkupReturnsStringUnchanged();
     testTerminalColourMultipleRealCodesInOneString();
+    testQueryIpNumberAndQueryIpNameReturnLoopbackAddressForCurrentConnection();
+    testQueryIpNumberReturnsZeroWithNoCurrentConnection();
+    testSocketStatusReturnsRealShapeArrayForKnownFdAndIncludesItInTheAllForm();
     testSocketCreateRejectsUnsupportedModesAndReturnsIncreasingHandles();
     testSocketWriteOnUnknownHandleReturnsFdRangeAndErrorTextMatchesReal();
     testSocketStreamCreateBindListenAcceptConnectWriteReadCloseRoundTrip();
@@ -12735,6 +13380,9 @@ int main() {
     testUpperCaseFoldsLowercaseLettersAndLeavesEverythingElseUnchanged();
     testUpperCaseMatchesRealGuildTagUppercasingShape();
     testUpperCaseThrowsOnNonStringArgument();
+    testCapitalizeUppercasesOnlyALowercaseFirstCharacter();
+    testStrlenAndStrstrAliasesWorkByTheirOwnNames();
+    testCryptWithExplicitSaltIsDeterministicAndSaltIsThePrefix();
     testBareParentCallInvokesInheritedFunctionNotLocalOverride();
     testQualifiedParentCallMatchesInheritPathBasename();
     testParentCallOnFileWithNoInheritThrows();
@@ -12818,6 +13466,7 @@ int main() {
     testGetDirMatchesGlobPatternInFinalPathComponentOnly();
     testIntpTrueOnlyForIntNotStringObjectOrUnsetVariable();
     testFloatpTrueOnlyForFloatNotIntOrString();
+    testArrayFunctionMapObjectPointerPredicatesEachTrueOnlyForOwnKind();
     testRepeatStringConcatenatesNTimesAndEmptyForZeroOrNegative();
     testPresentFindsInventoryItemByIdApplyNotByOtherFunctions();
     testLivingReflectsEnableCommandsStateAndDefaultsToCurrentObject();
