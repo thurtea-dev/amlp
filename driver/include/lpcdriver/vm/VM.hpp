@@ -249,8 +249,9 @@ private:
     std::vector<std::shared_ptr<LpcObject>> commandGiverStack_;
     // See currentVerb(); pushed/popped alongside dispatchCommand()'s own
     // handler calls, a separate stack from commandGiverStack_ since a
-    // command() efun call (not yet implemented) would need to nest a
-    // new verb without necessarily changing the command_giver.
+    // command() efun call (implemented in EfunTable.cpp, reusing this
+    // same dispatchCommand() path) nests a new verb without necessarily
+    // changing the command_giver.
     std::vector<std::string> verbStack_;
 };
 

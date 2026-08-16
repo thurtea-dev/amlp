@@ -5,7 +5,7 @@
 | File | Role |
 |------|------|
 | `CMakeLists.txt` | Builds the test binary; links against all driver libs + gtest. |
-| `test_lexer.cpp` | Current primary test file — 374 tests as of 2026-08-09. |
+| `test_lexer.cpp` | Current primary (and only) test file, 440 tests as of 2026-08-16. |
 
 ## How to run
 
@@ -125,4 +125,4 @@ the VM to ensure the correct parser/runtime path is active.
   pointing to `driver/mudlib_stub`.
 - Tests that create files (save_object, write_file) must clean up in `TearDown()`.
 - Never remove or disable an existing test. A failing test is a blocking issue.
-- The 374-test baseline must remain green on every commit.
+- The 440-test baseline must remain green on every commit.

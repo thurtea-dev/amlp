@@ -1,4 +1,4 @@
-# driver/ — Top-Level Entry Point
+# driver/ - Top-Level Entry Point
 
 ## What this directory is
 
@@ -34,10 +34,10 @@ Current baseline: **440 tests passing**. Every change must keep this green.
 | `src/efun/` | EfunTable, all ~154 (target 300+) registered efuns | [link](src/efun/instruct.md) |
 | `src/net/` | TCP server, Connection, telnet, sockets | [link](src/net/instruct.md) |
 | `src/scheduler/` | call_out, heart_beat, async tasks | [link](src/scheduler/instruct.md) |
-| `src/apply/` | ApplyTable — master/simul_efun apply dispatch | [link](src/apply/instruct.md) |
-| `src/config/` | Config — driver.cfg parsing | [link](src/config/instruct.md) |
+| `src/apply/` | ApplyTable, master/simul_efun apply dispatch | [link](src/apply/instruct.md) |
+| `src/config/` | Config, driver.cfg parsing | [link](src/config/instruct.md) |
 | `src/core/` | Errors, LpcRuntimeError, LpcThrownValue | [link](src/core/instruct.md) |
-| `tests/` | gtest suite for all subsystems | [link](tests/instruct.md) |
+| `tests/` | hand-rolled assert()-based suite (single file, no gtest) for all subsystems | [link](tests/instruct.md) |
 | `src/dialect/` *(Phase 1)* | Dialect enum, dialect-aware dispatch | [link](src/dialect/instruct.md) |
 | `src/persist/` *(Phase 2a)* | Statedumps, hotboot, object swapout | [link](src/persist/instruct.md) |
 | `src/jit/` *(Phase 2c)* | LLVM JIT backend | [link](src/jit/instruct.md) |
@@ -57,7 +57,7 @@ per-task status checkboxes.
 - Headers live under `include/lpcdriver/<subsystem>/FileName.hpp`.
 - Sources live under `src/<subsystem>/FileName.cpp`.
 - Each subsystem is its own CMake library target; `CMakeLists.txt` links them.
-- Every new efun must have at least one gtest regression test.
+- Every new efun must have at least one regression test in `tests/test_lexer.cpp`.
 - Never break `O_DESTRUCTED` apply guards once implemented (Phase 0.5).
-- The four-tier call resolution order — local → inherited → simul_efun → efun
-  table — must be preserved in all VM changes.
+- The four-tier call resolution order (local, inherited, simul_efun, efun
+  table) must be preserved in all VM changes.
