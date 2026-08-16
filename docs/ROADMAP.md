@@ -28,7 +28,7 @@ complete and the full test suite is passing with no regressions.**
 | 0.9 | `map`/`filter`/`sort_array` as real closure consumers | `src/efun` | [x] (partial: all mudlib shapes covered) |
 | 0.10 | `socket_*` family basics (create/connect/write/read/close) | `src/net` + `src/efun` | [x] (partial: STREAM/DATAGRAM only, no MUD mode or binary modes; no `socket_read` efun -- real FluffOS has none, reads are callback-only) |
 | 0.11 | `regexp`/`regexplode`/`reg_assoc` PCRE efuns | `src/efun` | [x] |
-| 0.12 | Every efun has at least one regression test | `tests` | [ ] (ongoing) |
+| 0.12 | Every efun has at least one regression test | `tests` | [x] (audited 2026-08-20: all 167 then-registered efuns confirmed covered; a moving target as 0.13 grows the table, each new efun needs its own test at the time it's added) |
 | 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: 167 registered) |
 
 ---
@@ -122,6 +122,9 @@ complete and the full test suite is passing with no regressions.**
 | 3.5 | Conformance test suite (any driver can certify FluffOS/LDMud/DGD dialect) | `tests` | [ ] |
 | 3.6 | LPC language specification document | `docs` | [ ] |
 | 3.7 | Driver API reference + mudlib porting guide for each dialect | `docs` | [ ] |
+| 3.8 | Boot a real third-party FluffOS mudlib against this driver (dead-souls.net's TMI2, LPUniversity, or LIL) | `tests` | [ ] |
+
+**3.8 scope note:** a distinct compatibility test from `tests/test_lexer.cpp`'s own regression suite, not a replacement for it -- that suite exercises this driver's own AetherMUD-derived mudlib content; this row exercises an independently-written real-world mudlib this driver has never seen. Not started. Involves, roughly in order: download and unpack one of the three archives (dead-souls.net's `tmi2_fluffos_v3.zip`, `lpuni_fluffos_v1.zip`, or `lil_0.3.zip`); identify real mismatches against this driver's own current conventions (master-object apply table, simul_efun resolution, directory-layout/`#include` path assumptions, any efun that mudlib calls but this table doesn't register); then whatever driver-side compat work those actually-found gaps call for, scoped to what's found, not speculative. No work done yet -- filed as a row, per this session's own request, so it has a place to land rather than being reintroduced ad hoc later.
 
 ---
 
@@ -133,7 +136,7 @@ cmake --build driver/build
 ctest --test-dir driver/build --output-on-failure
 ```
 
-Current baseline: **469 tests passing** (as of 2026-08-19). Every new slice
+Current baseline: **486 tests passing** (as of 2026-08-20). Every new slice
 must pass the full suite before merging.
 
 ---

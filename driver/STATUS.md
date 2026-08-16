@@ -3,6 +3,58 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-20: Every registered efun now has at least one regression test
+(Phase 0 row 0.12), closed out via a real audit rather than a spot check.**
+Grepped every real `registerEfun("name", ...)` call in `EfunTable.cpp`
+(167 total, not `efun/instruct.md`'s own stale task-list framing) and
+cross-referenced each by name against `driver/tests/test_lexer.cpp`, then
+manually inspected every borderline match count (0 or 1) to separate
+genuine gaps from comment-only false positives (a name mentioned in a
+descriptive comment but never actually called) and from legitimate
+alternate-style coverage already present (a handful of combat-formula
+efuns and `file_size()` are exercised via the direct
+`EfunTable::instance().call("name", ...)` C++ API or via a bound closure
+rather than LPC call syntax -- both counted as real coverage).
+
+29 efuns came back genuinely untested: `sin`, `tan`, `asin`, `acos`,
+`atan`, `log10`, `arrayp`, `functionp`, `mapp`, `objectp`, `pointerp`,
+`capitalize`, `crypt`, `strlen`, `strstr`, `ctime`, `time`, `allocate`,
+`allocate_mapping`, `copy`, `values`, `query_ip_name`, `query_ip_number`,
+`socket_status`, `regexp_assoc`, `remove_action`, `rm`, `set_eval_limit`,
+`map`. A 30th, `query_once_interactive`, was not a real gap (it shares
+`userp`'s own already-tested implementation lambda) but got a direct-name
+test anyway for audit completeness. 17 new tests added across six
+batches, building and running the full suite after each batch rather
+than once at the end -- one real test-authoring mistake (a regexp_assoc
+alias test that miscounted how many times a repeating pattern matches)
+was caught and fixed within its own batch instead of surfacing later as
+an unexplained wall of failures.
+
+Two tests needed real infrastructure the existing suite didn't have yet:
+`query_ip_number()`/`query_ip_name()` read `OutputContext::current()`'s
+own fd via `getpeername()`, which needs a genuine `AF_INET` peer -- the
+`socketpair(AF_UNIX, ...)` convention every other net test in this file
+uses cannot produce a real IPv4 `getpeername()` result, so a small
+`makeLoopbackTcpPair()` helper (real `socket()`/`bind()`/`listen()`/
+`connect()`/`accept()`, synchronous, loopback-only) was added.
+`remove_action()` needed routing through a second dispatched command
+rather than a bare `vm.callFunction()`, since it requires the same
+`VM::commandGiver()` resolution context `add_action()` itself needs
+(only set explicitly during `move_object()`'s own init()-calling
+sequence or during `dispatchCommand()`'s own handler calls, confirmed
+directly in `EfunTable.cpp`'s `resolveCommandGiver()`).
+
+No real implementation bugs found -- every efun's actual behavior matched
+its own existing documentation/citation once actually exercised. Full
+suite: 486 tests passing, up from 469, no regressions across any of the
+six build-and-run batches.
+
+Also filed, not started: ROADMAP.md Phase 3 row 3.8, booting a real
+third-party FluffOS mudlib (dead-souls.net's TMI2, LPUniversity, or LIL)
+against this driver as a distinct compatibility test from this suite's
+own AetherMUD-derived regression coverage -- see ROADMAP.md's own 3.8
+scope note for what it would involve.
+
 **2026-08-19: `socket_*` efun family basics implemented (Phase 0 row 0.10).**
 `LpcSocket` (`include/lpcdriver/net/LpcSocket.hpp`), `SocketRegistry`
 (`src/net/SocketRegistry.cpp`), and `Server::pollSockets()` (a new static,
