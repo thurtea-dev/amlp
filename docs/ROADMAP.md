@@ -30,7 +30,35 @@ complete and the full test suite is passing with no regressions.**
 | 0.11 | `regexp`/`regexplode`/`reg_assoc` PCRE efuns | `src/efun` | [x] |
 | 0.12 | Every efun has at least one regression test | `tests` | [x] (audited 2026-08-20: all 167 then-registered efuns confirmed covered; a moving target as 0.13 grows the table, each new efun needs its own test at the time it's added) |
 | 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: 179 registered) |
-| 0.14 | `global include file` config support (auto-`#include` prepended to every compiled object) | `src/config` + `src/object` | [ ] |
+| 0.14 | `global include file` config support (auto-`#include` prepended to every compiled object) | `src/config` + `src/object` | [x] |
+| 0.15 | `ObjectManager::compile()`'s `programCache_` has no invalidation path -- a recompiled file's own new source is silently ignored | `src/object` | [ ] |
+
+**0.15 scope note:** found live (2026-08-21) while confirming `driver/lil`'s
+own `eval` command works end to end. `ObjectManager::compile(filename)`
+checks `programCache_` first and returns the cached `CompiledProgram` for
+any filename it has ever successfully compiled before, unconditionally,
+with no path anywhere that invalidates or replaces that entry -- confirmed
+directly by reading the function, not inferred from the symptom alone.
+Real, reproducible failure mode: `driver/lil/command/eval.c` writes a new
+`/tmp_eval_file.c`, destructs the previous `/tmp_eval_file` instance, then
+calls `"/tmp_eval_file"->eval()` again -- the destruct correctly clears
+the *instance*, but the *compiled program* for that filename is still
+sitting in `programCache_` from the first call, so every subsequent `eval`
+silently re-runs the first call's own stale bytecode against the new
+instance instead of the newly-written source. Confirmed live: three
+different real `eval` expressions in one session (`5+5`, an array
+literal, `this_player()`) all returned the first call's own cached result.
+Not fixed here, filed as its own row instead: a fix would likely mean a
+narrow, explicit cache-invalidation or force-recompile path (e.g. an
+`ObjectManager::recompile(filename)` that erases the matching
+`programCache_` entry before calling `compile()` again, triggered by
+`destruct()`-then-recompile on the same filename, or a dedicated
+`update_object()`-style efun/apply real FluffOS itself uses for this same
+purpose) -- scoped narrowly enough that the caching behavior every other
+compiled object correctly relies on (each file compiled once, reused by
+every later `inherit`/`clone_object()`/`call_other()` reaching that same
+filename) is not disturbed for the overwhelming majority of call sites
+that never rewrite their own source out from under a running driver.
 
 ---
 
