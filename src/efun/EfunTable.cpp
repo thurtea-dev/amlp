@@ -6107,6 +6107,317 @@ void registerCoreEfuns() {
         rebound->boundArgs = oldClosure->boundArgs;
         return Value(rebound);
     });
+
+    // -------------------------------------------------------------------------
+    // Phase 0.13 efun growth batch, continued (2026-08-22): tell_object,
+    // tell_room, shout, this_interactive/this_user, map_mapping,
+    // filter_mapping. Lil's own real efun conformance suite
+    // (mudlib/single/tests/efuns/*.c) is now exhausted as a ranking
+    // source -- diffing it against EfunTable's registered names this
+    // batch turned up nothing but already-documented architecture-
+    // mismatch exclusions, C-internal helper names that were never real
+    // LPC efuns (add_light, break_string), test-fixture files
+    // (badshad/goodshad/inh0-2/light/talker/unloaded), names confirmed
+    // absent from efun_defs.c's own ground-truth registration table
+    // (enable_wizard, query_ed_mode, function_profile, has_errors), and
+    // sscanf, which is already real and implemented -- just not through
+    // this table, matching real FluffOS's own special-cased lvalue-
+    // argument grammar handling (see ROADMAP row 0.2). Re-scoped this
+    // batch's ranking source back to real call-site frequency across the
+    // whole bundled Lil mudlib (mudlib/, not just tests/efuns/), diffed
+    // against efun_defs.c directly, the same methodology used before the
+    // conformance-suite pass started.
+    //
+    // void tell_object(object ob, string str) -- real object.c's own
+    // tell_object(): if ob has a live connection, the text is written
+    // straight to it (through this driver's existing add_message-
+    // equivalent chokepoint, deliverToConnection() -- so tell_object()
+    // output is correctly snoop-duplicated too, matching real add_message()
+    // being the one function both paths funnel through); otherwise the
+    // real driver calls catch_tell(string) on ob (an NPC-to-NPC/NPC-to-
+    // player communication channel, real APPLY_CATCH_TELL) instead of
+    // writing to a socket that doesn't exist. A destructed or null ob is
+    // a silent no-op, matching real "if (!ob || ob->flags&O_DESTRUCTED)"
+    // -- real add_message(0, ...) technically still writes to stderr
+    // under a debug build define this driver has no equivalent for, not
+    // implemented, matching this project's own "no fabricated driver-
+    // internal diagnostics" precedent.
+    t.registerEfun("tell_object", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("tell_object: expected (object, string) arguments");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        const std::string& text = std::get<std::string>(args[1].data);
+        if (!ob || ob->isDestructed()) return Value{};
+        if (Connection* conn = InteractiveRegistry::find(ob)) {
+            deliverToConnection(vm, conn, text);
+        } else {
+            vm.callFunction(ob, "catch_tell", {Value(text)});
+        }
+        return Value{};
+    });
+
+    // void tell_room(object|string room, string|object|int|float msg,
+    // void|object|object* avoid) -- real simulate.c's own tell_room():
+    // sends to every object in room's *direct* inventory (not recursive)
+    // that is currently interactive, skipping anything in avoid (a
+    // single object or an array, same shape as say()'s own avoid
+    // argument just above). room may be a string path instead of an
+    // object reference, resolved the same way call_other()'s own
+    // string-target form does (this driver's existing VM::findObject(),
+    // which compiles on a miss) -- real find_object() used internally
+    // here does not compile on a miss, a minor, documented divergence
+    // with no real call site in this mudlib to be wrong against either
+    // way. msg is polymorphic in real tell_room() (a legacy quirk, not
+    // this driver's invention): a plain string is sent as-is, an object
+    // is converted to its own filename string, a number is stringified --
+    // matched here for the two shapes this driver can express (string,
+    // object); the T_REAL (float) case real func_spec.c also lists has no
+    // real call site anywhere in this mudlib and is not implemented.
+    // Real code's own additional `!ob->interactive && !(ob->flags &
+    // O_LISTENER)` skip and `object_visible(ob)` gate are scoped down to
+    // "is ob currently interactive" here -- this driver tracks no
+    // O_LISTENER-equivalent flag at all (see shout()'s own comment just
+    // below for why that flag turns out to be real-world dead code in a
+    // normal, non-NO_ADD_ACTION build anyway) and has no hidden-from-
+    // room-broadcast visibility concept separate from set_hide()'s own
+    // already-implemented, differently-scoped mechanism.
+    t.registerEfun("tell_room", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2) {
+            throw LpcRuntimeError("tell_room: expected (object|string, mixed, ...) arguments");
+        }
+        std::shared_ptr<LpcObject> room;
+        if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&args[0].data)) {
+            room = *ob;
+        } else if (auto* path = std::get_if<std::string>(&args[0].data)) {
+            room = vm.findObject(*path);
+        } else {
+            throw LpcRuntimeError("tell_room: expected an object or string first argument");
+        }
+        if (!room || room->isDestructed()) return Value{};
+
+        std::string text;
+        if (auto* s = std::get_if<std::string>(&args[1].data)) {
+            text = *s;
+        } else if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&args[1].data)) {
+            text = *ob ? (*ob)->filename() : "0";
+        } else if (auto* n = std::get_if<int64_t>(&args[1].data)) {
+            text = std::to_string(*n);
+        } else {
+            throw LpcRuntimeError("tell_room: expected a string, object, or int second argument");
+        }
+
+        std::vector<std::shared_ptr<LpcObject>> avoid;
+        if (args.size() > 2) {
+            if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&args[2].data)) {
+                if (*ob) avoid.push_back(*ob);
+            } else if (auto* arr = std::get_if<std::shared_ptr<Array>>(&args[2].data)) {
+                if (*arr) {
+                    for (auto& item : (*arr)->items) {
+                        if (auto* o = std::get_if<std::shared_ptr<LpcObject>>(&item.data)) {
+                            if (*o) avoid.push_back(*o);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (auto& ob : room->inventory()) {
+            if (!ob || std::find(avoid.begin(), avoid.end(), ob) != avoid.end()) continue;
+            if (Connection* conn = InteractiveRegistry::find(ob)) {
+                deliverToConnection(vm, conn, text);
+            }
+        }
+        return Value{};
+    });
+
+    // void shout(string str) -- real simulate.c's own shout_string(),
+    // confirmed directly before implementing, not assumed from the
+    // efun's general reputation: it walks *every* object in the game
+    // (not just interactive ones) and sends to whichever ones have the
+    // O_LISTENER flag set, skipping command_giver and anything with no
+    // environment. Confirmed real, and confirmed dead in a normal build:
+    // O_LISTENER's only setter anywhere in this reference source
+    // (simulate.c's own init_object()) is itself gated behind "#ifdef
+    // NO_ADD_ACTION", and no efun exists anywhere in func_spec.c to set
+    // it from LPC either -- so in the actual build that generated this
+    // vendored efun_defs.c (which genuinely has add_action/commands/
+    // enable_commands/livings registered, proving NO_ADD_ACTION was NOT
+    // active for that generation, regardless of what the currently
+    // checked-in options.h happens to say -- see this row's own STATUS.md
+    // entry), O_LISTENER can never be set at all, and literal-real
+    // shout_string() broadcasts to nobody, ever. This is a real,
+    // confirmed architectural dead end in this exact reference
+    // configuration, not a misreading -- but this mudlib's own real,
+    // live call sites (command/say.c and command/quit.c both literally
+    // "#define say(x) shout(x)": the bundled say command's entire
+    // implementation *is* a call to this efun) obviously expect it to
+    // reach connected players, matching O_LISTENER's own doc comment
+    // ("can hear say(), etc", object.h) -- the flag's evident intent, not
+    // its dead-code letter. Implemented as "every currently-interactive
+    // object except command_giver" to match that intent and keep this
+    // mudlib's own say command actually working, a deliberate, documented
+    // departure from the literal (but provably unreachable) O_LISTENER
+    // condition rather than a faithful reproduction of dead code.
+    t.registerEfun("shout", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("shout: expected a string argument");
+        }
+        const std::string& text = std::get<std::string>(args[0].data);
+        auto giver = resolveCommandGiver(vm);
+        for (auto& ob : InteractiveRegistry::all()) {
+            if (ob == giver) continue;
+            if (Connection* conn = InteractiveRegistry::find(ob)) {
+                deliverToConnection(vm, conn, text);
+            }
+        }
+        return Value{};
+    });
+
+    // object this_interactive() / object this_user() -- real efun_defs.c:
+    // both F_THIS_PLAYER | F_ALIAS_FLAG, the exact same code as
+    // this_player(1) (confirmed directly, not two separate
+    // implementations -- same "alias shares the real efun's code" pattern
+    // already established for shallow_inherit_list/inherit_list and
+    // map_array/map). Real f_this_player()'s flag==1 branch returns
+    // current_interactive, not command_giver -- a real, load-bearing
+    // distinction this_player(0)'s own registration above does not
+    // capture: command_giver can be reassigned mid-dispatch (real
+    // set_this_player(), living.c-style code), while current_interactive
+    // stays fixed to whichever connection is actually driving this
+    // execution for its whole duration. This driver has no separate
+    // current_interactive tracking distinct from the commandGiverStack_
+    // this_player(0) reads (see resolveCommandGiver()'s own comment
+    // above), so this reads OutputContext::current()'s own bound object
+    // directly instead -- bypassing the command-giver stack entirely,
+    // the closest available proxy for "the literal connection driving
+    // this call, unaffected by any mid-dispatch reassignment". Real,
+    // confirmed live call site: mudlib/single/master.c's own
+    // error_handler(), "this_interactive() || this_player()".
+    auto thisInteractiveImpl = [](VM&, std::vector<Value>&) -> Value {
+        if (Connection* conn = OutputContext::current()) {
+            if (auto bound = conn->boundObject()) return Value(bound);
+        }
+        return Value{};
+    };
+    t.registerEfun("this_interactive", thisInteractiveImpl);
+    t.registerEfun("this_user", thisInteractiveImpl);
+
+    // mapping map_mapping(mapping m, string|function f, ...) -- real
+    // mapping.c's own map_mapping(): calls f(key, value, ...extra) for
+    // every entry and replaces that entry's *value* with the result,
+    // keys unchanged (confirmed directly against its own "push key; push
+    // value; call; assign result back into the value slot" body, not
+    // assumed from map_array's shape alone). Same alias-before-real
+    // naming and two call shapes (string-plus-target-object or Closure)
+    // as map_array/filter_array above; unlike those, this always returns
+    // a copy (real code copies the mapping first when its refcount is
+    // shared) rather than mutating the argument in place, which this
+    // driver's own copy-on-write-free Value model makes simpler, not
+    // harder, to get right: entries are copied up front, then each
+    // value is overwritten by the callback's result. Confirmed real,
+    // live call site: mudlib/single/simul_efun.c's own use of
+    // map_mapping() directly.
+    t.registerEfun("map_mapping", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data)) {
+            throw LpcRuntimeError("map_mapping: expected a mapping first argument");
+        }
+        auto m = std::get<std::shared_ptr<Mapping>>(args[0].data);
+        auto result = std::make_shared<Mapping>();
+        if (!m) return Value(result);
+        result->entries = m->entries;
+
+        if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
+            if (!*closurePtr) return Value(result);
+            std::vector<Value> extra(args.begin() + 2, args.end());
+            for (auto& entry : result->entries) {
+                std::vector<Value> callArgs;
+                callArgs.reserve(2 + extra.size());
+                callArgs.push_back(entry.first);
+                callArgs.push_back(entry.second);
+                callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+                entry.second = vm.callClosure(*closurePtr, std::move(callArgs));
+            }
+            return Value(result);
+        }
+
+        if (!std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("map_mapping: expected a string or function second argument");
+        }
+        if (args.size() < 3 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
+            throw LpcRuntimeError("map_mapping: string function name requires an object third argument");
+        }
+        const std::string& funcName = std::get<std::string>(args[1].data);
+        auto target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
+        std::vector<Value> extra(args.begin() + 3, args.end());
+        for (auto& entry : result->entries) {
+            std::vector<Value> callArgs;
+            callArgs.reserve(2 + extra.size());
+            callArgs.push_back(entry.first);
+            callArgs.push_back(entry.second);
+            callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+            entry.second = vm.callFunction(target, funcName, std::move(callArgs));
+        }
+        return Value(result);
+    });
+
+    // mapping filter_mapping(mapping m, string|function f, ...) -- real
+    // mapping.c's own filter_mapping(): same per-entry f(key, value,
+    // ...extra) call as map_mapping() just above, but keeps the whole
+    // entry (key and value both, unchanged) in a brand-new mapping only
+    // when the result is truthy, rather than overwriting the value in
+    // place -- confirmed directly against its own "if (!ret->type !=
+    // T_NUMBER || ret->u.number) { ...keep... }" body. No real call site
+    // in this mudlib (zero hits, confirmed by grep) -- implemented anyway
+    // alongside map_mapping() as the same real, complete mapping/string/
+    // function-callback triple func_spec.c defines together (map/filter/
+    // sort_array's own array-side precedent), not a driver invention.
+    t.registerEfun("filter_mapping", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data)) {
+            throw LpcRuntimeError("filter_mapping: expected a mapping first argument");
+        }
+        auto m = std::get<std::shared_ptr<Mapping>>(args[0].data);
+        auto result = std::make_shared<Mapping>();
+        if (!m) return Value(result);
+
+        if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
+            if (!*closurePtr) return Value(result);
+            std::vector<Value> extra(args.begin() + 2, args.end());
+            for (auto& entry : m->entries) {
+                std::vector<Value> callArgs;
+                callArgs.reserve(2 + extra.size());
+                callArgs.push_back(entry.first);
+                callArgs.push_back(entry.second);
+                callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+                if (isTruthy(vm.callClosure(*closurePtr, std::move(callArgs)))) {
+                    result->entries.push_back(entry);
+                }
+            }
+            return Value(result);
+        }
+
+        if (!std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("filter_mapping: expected a string or function second argument");
+        }
+        if (args.size() < 3 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
+            throw LpcRuntimeError("filter_mapping: string function name requires an object third argument");
+        }
+        const std::string& funcName = std::get<std::string>(args[1].data);
+        auto target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
+        std::vector<Value> extra(args.begin() + 3, args.end());
+        for (auto& entry : m->entries) {
+            std::vector<Value> callArgs;
+            callArgs.reserve(2 + extra.size());
+            callArgs.push_back(entry.first);
+            callArgs.push_back(entry.second);
+            callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+            if (isTruthy(vm.callFunction(target, funcName, std::move(callArgs)))) {
+                result->entries.push_back(entry);
+            }
+        }
+        return Value(result);
+    });
 }
 
 } // namespace amlp

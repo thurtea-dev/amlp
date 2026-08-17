@@ -14401,6 +14401,235 @@ static void testBindThrowsWhenNoMasterIsLoaded() {
     std::cout << "testBindThrowsWhenNoMasterIsLoaded OK\n";
 }
 
+// --- tell_object / tell_room / shout / this_interactive / this_user /
+// map_mapping / filter_mapping (Phase 0.13, batch continued 2026-08-22) --
+// Confirmed directly against fluffos-2.9-ds2.08's own object.c
+// (tell_object), simulate.c (tell_room, shout_string), efun_defs.c
+// (this_interactive/this_user as F_THIS_PLAYER|F_ALIAS_FLAG), and
+// mapping.c (map_mapping, filter_mapping) before writing any of this --
+// see EfunTable.cpp's own registrations for the full real-semantics
+// writeup, including shout()'s own documented, deliberate departure from
+// literal (but provably dead-in-this-build) O_LISTENER semantics.
+
+static void testTellObjectWritesToConnectionOrCallsCatchTellWhenNotInteractive() {
+    ObjectVarHarness harness;
+    harness.writeFile("/to1_interactive.c", "void create() {}\n");
+    harness.writeFile("/to1_npc.c",
+        "string got = \"\";\n"
+        "void catch_tell(string s) { got += s; }\n"
+        "string get_got() { return got; }\n");
+    harness.writeFile("/to1_caller.c",
+        "void ping(object target, string s) { tell_object(target, s); }\n");
+    auto interactiveOb = harness.objects.cloneObject("/to1_interactive");
+    auto npc = harness.objects.cloneObject("/to1_npc");
+    auto caller = harness.objects.cloneObject("/to1_caller");
+    assert(interactiveOb != nullptr && npc != nullptr && caller != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(interactiveOb);
+
+    harness.vm.callFunction(caller, "ping",
+        {amlp::Value(interactiveOb), amlp::Value(std::string("hi there\n"))});
+    char buf[64];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    assert(std::string(buf, static_cast<size_t>(n)) == "hi there\n");
+
+    harness.vm.callFunction(caller, "ping", {amlp::Value(npc), amlp::Value(std::string("npc msg\n"))});
+    amlp::Value got = harness.vm.callFunction(npc, "get_got", {});
+    assert(std::holds_alternative<std::string>(got.data));
+    assert(std::get<std::string>(got.data) == "npc msg\n");
+
+    ::close(fds[1]);
+    std::cout << "testTellObjectWritesToConnectionOrCallsCatchTellWhenNotInteractive OK\n";
+}
+
+static void testTellRoomBroadcastsToDirectInventoryExcludingAvoid() {
+    ObjectVarHarness harness;
+    harness.writeFile("/tr1_room.c", "void create() {}\n");
+    harness.writeFile("/tr1_a.c", "void create() {}\n");
+    harness.writeFile("/tr1_b.c", "void create() {}\n");
+    harness.writeFile("/tr1_c.c", "void create() {}\n");
+    harness.writeFile("/tr1_caller.c",
+        "void announce(object room, object avoidOb) { tell_room(room, \"hey\\n\", avoidOb); }\n");
+    auto room = harness.objects.cloneObject("/tr1_room");
+    auto a = harness.objects.cloneObject("/tr1_a");
+    auto b = harness.objects.cloneObject("/tr1_b");
+    auto c = harness.objects.cloneObject("/tr1_c");
+    auto caller = harness.objects.cloneObject("/tr1_caller");
+    assert(room && a && b && c && caller);
+
+    harness.vm.moveObject(a, room);
+    harness.vm.moveObject(b, room);
+    harness.vm.moveObject(c, room);
+
+    int fdsA[2], fdsB[2], fdsC[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsA) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsB) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsC) == 0);
+    amlp::Connection connA(fdsA[0]);
+    amlp::Connection connB(fdsB[0]);
+    amlp::Connection connC(fdsC[0]);
+    connA.attach(a);
+    connB.attach(b);
+    connC.attach(c);
+
+    harness.vm.callFunction(caller, "announce", {amlp::Value(room), amlp::Value(b)});
+
+    char buf[64];
+    ssize_t n = ::recv(fdsA[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    assert(std::string(buf, static_cast<size_t>(n)) == "hey\n");
+
+    n = ::recv(fdsB[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n < 0); // avoided -- nothing received
+
+    n = ::recv(fdsC[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    assert(std::string(buf, static_cast<size_t>(n)) == "hey\n");
+
+    ::close(fdsA[1]);
+    ::close(fdsB[1]);
+    ::close(fdsC[1]);
+    std::cout << "testTellRoomBroadcastsToDirectInventoryExcludingAvoid OK\n";
+}
+
+static void testShoutBroadcastsToEveryoneExceptCommandGiver() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sh_a.c", "void create() {}\n");
+    harness.writeFile("/sh_b.c", "void create() {}\n");
+    harness.writeFile("/sh_caller.c", "void yell(string s) { shout(s); }\n");
+    auto a = harness.objects.cloneObject("/sh_a");
+    auto b = harness.objects.cloneObject("/sh_b");
+    auto caller = harness.objects.cloneObject("/sh_caller");
+    assert(a && b && caller);
+
+    int fdsA[2], fdsB[2], fdsCaller[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsA) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsB) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsCaller) == 0);
+    amlp::Connection connA(fdsA[0]);
+    amlp::Connection connB(fdsB[0]);
+    amlp::Connection connCaller(fdsCaller[0]);
+    connA.attach(a);
+    connB.attach(b);
+    connCaller.attach(caller);
+
+    harness.vm.pushCommandGiver(caller);
+    harness.vm.callFunction(caller, "yell", {amlp::Value(std::string("hear ye\n"))});
+    harness.vm.popCommandGiver();
+
+    char buf[64];
+    ssize_t n = ::recv(fdsA[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    assert(std::string(buf, static_cast<size_t>(n)) == "hear ye\n");
+
+    n = ::recv(fdsB[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    assert(std::string(buf, static_cast<size_t>(n)) == "hear ye\n");
+
+    n = ::recv(fdsCaller[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n < 0); // command_giver excluded
+
+    ::close(fdsA[1]);
+    ::close(fdsB[1]);
+    ::close(fdsCaller[1]);
+    std::cout << "testShoutBroadcastsToEveryoneExceptCommandGiver OK\n";
+}
+
+static void testThisInteractiveAndThisUserReturnConnectionBoundObjectNotCommandGiver() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ti1_conn.c",
+        "mixed probe_player() { return this_player(); }\n"
+        "mixed probe_interactive() { return this_interactive(); }\n"
+        "mixed probe_user() { return this_user(); }\n");
+    harness.writeFile("/ti1_other.c", "void create() {}\n");
+    auto connOb = harness.objects.cloneObject("/ti1_conn");
+    auto otherOb = harness.objects.cloneObject("/ti1_other");
+    assert(connOb != nullptr && otherOb != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(connOb);
+
+    amlp::OutputContext::set(&conn);
+    // command_giver reassigned away from the connection's own bound
+    // object -- this_player() must follow the reassignment,
+    // this_interactive()/this_user() must not.
+    harness.vm.pushCommandGiver(otherOb);
+
+    amlp::Value playerResult = harness.vm.callFunction(connOb, "probe_player", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(playerResult.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(playerResult.data) == otherOb);
+
+    amlp::Value interactiveResult = harness.vm.callFunction(connOb, "probe_interactive", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(interactiveResult.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(interactiveResult.data) == connOb);
+
+    amlp::Value userResult = harness.vm.callFunction(connOb, "probe_user", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(userResult.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(userResult.data) == connOb);
+
+    harness.vm.popCommandGiver();
+    amlp::OutputContext::set(nullptr);
+    ::close(fds[1]);
+    std::cout << "testThisInteractiveAndThisUserReturnConnectionBoundObjectNotCommandGiver OK\n";
+}
+
+static void testMapMappingReplacesValuesKeepingKeysViaStringFunctionName() {
+    ObjectVarHarness harness;
+    harness.writeFile("/mm_target.c",
+        "int times_ten(string key, int value) { return value * 10; }\n");
+    harness.writeFile("/mm_caller.c",
+        "mixed probe(object target) {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2]);\n"
+        "    return map_mapping(m, \"times_ten\", target);\n"
+        "}\n");
+    auto target = harness.objects.cloneObject("/mm_target");
+    auto caller = harness.objects.cloneObject("/mm_caller");
+    assert(target != nullptr && caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {amlp::Value(target)});
+    auto* mapPtr = std::get_if<std::shared_ptr<amlp::Mapping>>(&result.data);
+    assert(mapPtr != nullptr && *mapPtr != nullptr);
+    assert((*mapPtr)->entries.size() == 2);
+    for (auto& entry : (*mapPtr)->entries) {
+        const std::string& key = std::get<std::string>(entry.first.data);
+        int64_t value = std::get<int64_t>(entry.second.data);
+        if (key == "a") assert(value == 10);
+        else if (key == "b") assert(value == 20);
+        else assert(false);
+    }
+    std::cout << "testMapMappingReplacesValuesKeepingKeysViaStringFunctionName OK\n";
+}
+
+static void testFilterMappingKeepsOnlyEntriesWhereCallbackIsTruthy() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fm_target.c",
+        "int value_over_one(string key, int value) { return value > 1; }\n");
+    harness.writeFile("/fm_caller.c",
+        "mixed probe(object target) {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2, \"c\": 3]);\n"
+        "    return filter_mapping(m, \"value_over_one\", target);\n"
+        "}\n");
+    auto target = harness.objects.cloneObject("/fm_target");
+    auto caller = harness.objects.cloneObject("/fm_caller");
+    assert(target != nullptr && caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {amlp::Value(target)});
+    auto* mapPtr = std::get_if<std::shared_ptr<amlp::Mapping>>(&result.data);
+    assert(mapPtr != nullptr && *mapPtr != nullptr);
+    assert((*mapPtr)->entries.size() == 2);
+    for (auto& entry : (*mapPtr)->entries) {
+        const std::string& key = std::get<std::string>(entry.first.data);
+        assert(key == "b" || key == "c");
+    }
+    std::cout << "testFilterMappingKeepsOnlyEntriesWhereCallbackIsTruthy OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -14943,6 +15172,12 @@ int main() {
     testBindRebindsClosureOwnerAndChangesResolution();
     testBindIsNoOpWhenNewOwnerMatchesCurrentOwner();
     testBindThrowsWhenNoMasterIsLoaded();
+    testTellObjectWritesToConnectionOrCallsCatchTellWhenNotInteractive();
+    testTellRoomBroadcastsToDirectInventoryExcludingAvoid();
+    testShoutBroadcastsToEveryoneExceptCommandGiver();
+    testThisInteractiveAndThisUserReturnConnectionBoundObjectNotCommandGiver();
+    testMapMappingReplacesValuesKeepingKeysViaStringFunctionName();
+    testFilterMappingKeepsOnlyEntriesWhereCallbackIsTruthy();
     std::cout << "all tests passed\n";
     return 0;
 }

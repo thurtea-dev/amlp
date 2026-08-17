@@ -3,6 +3,126 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): Phase 1 planning docs corrected, then 7 more
+efuns implemented (Phase 0 row 0.13: 204 registered, up from 197).**
+Two-part session. First part was documentation only, no Phase 1
+implementation: fixed `src/dialect/instruct.md` and `src/apply/instruct.md`
+with the corrections a prior report-only comparison session found against
+real `temp/ldmud` (3.6.8) and `temp/dgd` clones -- `get_root_uid` to
+`get_master_uid` (superseded since LDMud 3.2.1@40), `shadow(ob, flag)`
+corrected to real LDMud's one-argument `shadow(ob)` (that two-argument,
+object-returning form is FluffOS's real signature, misattributed to
+LDMud), `bind()` corrected to the real `bind_lambda(closure, object)`,
+the nonexistent `replaces` inherit directive replaced with a note that
+the real closest LDMud feature is `replace_program()` (a runtime efun,
+not a compile-time directive -- flagged that row 1.6 may need rescoping,
+not just a rename), `net_dead`/`disconnect` naming corrected for both
+LDMud (`disconnect(object, string)` is a real master apply there, not
+object-level, and not `net_dead`) and DGD (no `"disconnect"` callback of
+any name exists on DGD's driver object at all -- that name belongs to
+LDMud), DGD's driver-object apply surface replaced with the real 17-name
+list (plus `atomic_error`) confirmed by grepping every `callDriver`/
+`callCritical` call site, and `valid_snoop`/`valid_query_snoop` added as
+a newly-found real LDMud divergence directly relevant to Phase 0's own
+snoop work (FluffOS has no such gate; LDMud does). Added an explicit,
+unresolved open-design-note to `BootApi`'s connect/disconnect
+abstraction (§1.4 in both files): a single `std::string` per concept
+does not fit DGD's three-way connect fork or any dialect's mismatched
+master-vs-object-vs-driver-object dispatch target -- flagged for whoever
+implements 1.4/1.15/1.16, not resolved now. `temp/` (the three scratch
+comparison clones) added to `.gitignore` in the same session that
+produced the original comparison report, confirmed nothing from it was
+ever staged.
+
+Second part continued row 0.13. Lil's own real efun conformance suite
+(`mudlib/single/tests/efuns/*.c`) is now fully exhausted as a ranking
+source -- diffing it against `EfunTable.cpp`'s registered names turned up
+nothing but already-documented architecture-mismatch exclusions
+(`mud_status`/`cache_stats`/`malloc_status`/`dumpallobj`/`opcprof`,
+`allocate_buffer`/`read_buffer`, `get_char`/`ed`, `origin`), C-internal
+helper names that were never real LPC efuns (`add_light`, `break_string`
+-- both real-only as internal C functions, `simulate.c`/`parse.h`, never
+exposed to LPC), test-fixture files misread as efun names in earlier
+passes (`badshad`/`goodshad`/`inh0`-`inh2`/`light`/`talker`/`unloaded`),
+names confirmed absent from `efun_defs.c`'s own ground-truth registration
+table (`enable_wizard`, `query_ed_mode`, `function_profile`,
+`has_errors`, `generate_source` -- the last despite a real, `#ifdef
+F_GENERATE_SOURCE`-gated `f_generate_source()` existing in
+`efuns_main.c`, confirming that ifdef was inactive for this exact
+vendored build too), and `sscanf`, which is already real and implemented
+-- just not through this table, matching real FluffOS's own special-
+cased lvalue-argument grammar handling (ROADMAP row 0.2).
+
+Also found in passing, worth flagging: the vendored reference's own
+checked-in `options.h` cannot be trusted as a live indicator of what was
+actually compiled into the OTHER generated reference files in this same
+tree (`efun_defs.c`, `opcodes.h`, etc) -- it currently has both
+`NO_ADD_ACTION` and `NO_LIGHT` defined, yet `efun_defs.c` genuinely
+registers `add_action`/`commands`/`enable_commands`/`livings` (proving
+`NO_ADD_ACTION` was inactive for that generation) while genuinely
+omitting `set_light` (consistent with `NO_LIGHT` being active for it) --
+a real, inconsistent mix, not a copy-paste error in this project's own
+reading. `efun_defs.c` remains the correct ground truth per this
+project's own established methodology; `options.h`'s `#define`/`#undef`
+lines should not be trusted alone going forward without cross-checking
+`efun_defs.c` directly.
+
+Re-scoped this batch's ranking source back to real call-site frequency
+across the whole bundled Lil mudlib (`mudlib/`, not just `tests/efuns/`),
+diffed against `efun_defs.c` directly (276 real entries, 97 not yet
+registered), the same methodology used before the conformance-suite pass
+started. Implemented: `tell_object` (3 real call sites,
+`mudlib/single/master.c`), `tell_room` (found live-reachable via its own
+one real definition point, `mudlib/clone/user.c`), `shout` (2 real call
+sites -- `mudlib/command/say.c` and `quit.c` both literally `#define
+say(x) shout(x)`, the bundled say command's entire real implementation),
+`this_interactive`/`this_user` (aliases of `this_player(1)`, one real
+call site: `mudlib/single/master.c`'s own `error_handler()`, `"this_
+interactive() || this_player()"`), and `map_mapping`/`filter_mapping`
+(one real call site for `map_mapping`, `mudlib/single/simul_efun.c`;
+`filter_mapping` has none but is the same real, complete mapping/string/
+function-callback triple func_spec.c defines alongside it, implemented
+together the same way `query_shadowing`/`shallow_inherit_list` were
+alongside their own real-usage siblings in earlier batches).
+
+Real, confirmed-live finding worth flagging for any future dialect work,
+not acted on now: `shout()`'s real C implementation (`simulate.c`'s
+`shout_string()`) only ever reaches objects with the `O_LISTENER` flag
+set, never checks `->interactive` at all -- and `O_LISTENER`'s only
+setter anywhere in this vendored source is itself dead-gated behind
+`#ifdef NO_ADD_ACTION`, confirmed inactive for the build that generated
+`efun_defs.c` (see above), with no efun anywhere to set the flag from LPC
+either. Literal-real `shout()` therefore broadcasts to nobody, ever, in
+any normal build -- a genuine, confirmed architectural dead end in real
+FluffOS, not a misreading. Implemented here as "every currently-
+interactive object except command_giver" instead, matching `O_LISTENER`'s
+own doc comment ("can hear say(), etc") and keeping this mudlib's own
+real `say` command (which macro-expands directly to `shout()`) actually
+working -- a deliberate, documented departure from dead-code letter, not
+a faithful reproduction of it.
+
+6 new regression tests (`test/test_lexer.cpp`, one covering both
+`this_interactive`/`this_user` together): `tell_object` writing to a live
+connection versus calling `catch_tell()` on a non-interactive target,
+`tell_room` broadcasting to a room's direct inventory while excluding an
+avoided object, `shout` reaching every connected object except
+command_giver, `this_interactive`/`this_user` returning the connection's
+own bound object even when `command_giver` has been reassigned elsewhere
+(proving they do not just alias `this_player(0)`), `map_mapping`
+replacing values while keeping keys, and `filter_mapping` keeping only
+truthy-callback entries. Full suite: 541 tests passing, up from 535, no
+regressions, stable across three consecutive runs.
+
+Known gaps left open, all documented at the point implemented rather
+than silently dropped: `tell_room`'s string-room-name lookup form uses
+this driver's own compiling `VM::findObject()` rather than real
+`find_object()`'s non-compiling C-internal lookup (no real call site
+either way to be wrong against); `tell_room`'s `T_REAL` (float) message
+form is not implemented (func_spec.c lists it, zero real call sites);
+`tell_room`'s own `object_visible()` gate has no equivalent in this
+driver and is not implemented (no established hidden-from-broadcast
+concept separate from `set_hide()`'s own, differently-scoped mechanism).
+
 **2026-08-22 (continued): snoop family implemented (Phase 0 row 0.13:
 197 registered, up from 194).** The item the immediately-preceding entry
 flagged and deliberately left out ("sized more like its own row than a

@@ -57,22 +57,60 @@ name sets.
    `"heart_beat_error"`). `hasAutoObject()` → false.
 
 3. **`LdmudBootApi`**: LDMud apply names (`"connect"`, `"logon"`,
-   `"compile_object"`, `"valid_read"`, `"valid_write"`, `"get_root_uid"`,
+   `"compile_object"`, `"valid_read"`, `"valid_write"`, `"get_master_uid"`,
    `"get_bb_uid"`). Shadow policy applies (see `src/object`).
    `hasAutoObject()` → false (LDMud uses simul_efun differently).
+   **Corrected 2026-08-22** (report-only comparison session against a real
+   LDMud 3.6.8 clone, no code changes yet - see §1.16 below for full
+   citations): this used to say `"get_root_uid"`, which was renamed to
+   `"get_master_uid"` in LDMud 3.2.1@40 and no longer exists under the old
+   name.
 
 4. **`DgdBootApi`**: DGD has no master/simul_efun in the FluffOS sense.
-   Instead: **driver object** handles boot callbacks
-   (`"initialize"`, `"path_read"`, `"path_write"`, `"compile_object"`,
-   `"connect"`, `"disconnect"`) and **auto object** is implicitly inherited
-   by every other object. `hasAutoObject()` → true;
-   `autoObjectFile()` → `/kernel/auto` (configurable).
+   Instead: **driver object** handles boot callbacks and **auto object**
+   is implicitly inherited by every other object. `hasAutoObject()` →
+   true; `autoObjectFile()` → `/kernel/auto` (configurable).
+   **Corrected 2026-08-22** (report-only comparison session against a real
+   DGD clone, no code changes yet - see §1.15 below for the full grep
+   methodology and citations): this used to list the driver-object
+   callback set as `"initialize"`, `"path_read"`, `"path_write"`,
+   `"compile_object"`, `"connect"`, `"disconnect"` - three of those six are
+   wrong. There is no `"connect"` (real DGD forks by port type:
+   `"telnet_connect"` / `"binary_connect"` / `"datagram_connect"`), no
+   `"compile_object"` (DGD has no virtual-object concept; the nearest real
+   analog is `"call_object"`, fired from `call_other()`'s string-target
+   resolution, not a load-time fallback), and no `"disconnect"` under any
+   name (that name is LDMud's, not DGD's - DGD's real connection-loss
+   callback is `close(int destructing)`, called on the persistent user
+   object itself, not the driver object). See §1.15 for the full, real
+   17-name callback list plus `atomic_error`.
 
 5. **`ApplyTable`** takes a `const BootApi&` and routes all applies through
    it. `VM::applyMaster()` is unchanged - it just calls `ApplyTable`.
 
 6. **`src/dialect/instruct.md`** owns the code that constructs the right
    `BootApi` subclass based on the configured `LpcDialect`.
+
+**Open design note, added 2026-08-22, not resolved here - just flagged so
+it can't be missed when 1.4/1.15/1.16 are actually implemented:** the
+`BootApi` interface above returns a single `std::string` per concept
+(`connectApply()`, `netDeadApply()`). That shape does not fit any of the
+three dialects for connect/disconnect:
+- FluffOS: `connect` is one master apply; `net_dead` is one apply, but
+  called on the *player object*, not master.
+- DGD: connect is a **three-way fork by port type** (`telnet_connect` /
+  `binary_connect` / `datagram_connect`), each a driver-object callback;
+  the disconnect-equivalent (`close`) is called on the *persistent user
+  object*, not the driver.
+- LDMud: connect is one master apply; disconnect is one master apply
+  (`disconnect(object ob, string remaining)`), called on **master**, not
+  on the player object.
+"Connect" needs either a per-dialect dispatch strategy (not a plain
+string) to cover DGD's three-way fork, and "disconnect/net_dead" needs
+`BootApi` to also express *where* the apply is called (master vs
+driver-object vs the affected object itself) - a signature like
+`virtual std::string netDeadApply() const = 0;` has no way to say that.
+Resolve this before writing `ApplyTable`'s dispatch code, not after.
 
 ### 1.15 - DGD driver+auto object boot path
 
@@ -85,15 +123,109 @@ When `DgdBootApi` is active:
   prepends the inherit declaration when `DgdBootApi::hasAutoObject()` is true
   and the file is not the auto object itself.
 
+**Real driver-object apply surface, confirmed 2026-08-22** (report-only
+comparison session against a real DGD clone, `temp/dgd`; no code changes
+made) by grepping every `DGD::callDriver(...)` call site under `src/`,
+plus `callCritical(...)` for the one exception noted below:
+
+```
+binary_connect    call_object        compile_error     compile_rlimits
+datagram_connect  include_file       inherit_program   initialize
+interrupt         object_type        path_read         path_write
+recompile         restored           runtime_rlimits   telnet_connect
+touch             atomic_error (via callCritical, not callDriver)
+```
+
+Only `initialize`/`path_read`/`path_write` of the previously-documented
+six-name list were correct. The other three were wrong:
+- **No `"connect"`.** Real DGD forks by port type instead:
+  `telnet_connect(object)`, `binary_connect(object)`,
+  `datagram_connect(object)` (`src/comm.cpp`), each returning the
+  persistent object for that connection.
+- **No `"compile_object"`.** DGD has no virtual-object concept - every
+  object is compiled from a real, on-disk `.c` file. The nearest real
+  analog is `call_object(string path)`, fired specifically from
+  `call_other()`'s string-target resolution (`src/kfun/builtin.cpp`), not
+  a load-time missing-file fallback. Do not model this as
+  `compileObjectApply()`.
+- **No `"disconnect"`.** DGD's real connection-loss notification is
+  `close(int destructing)` (`src/comm.cpp`'s `Comm::close()`), called on
+  the **persistent user object itself**, architecturally like FluffOS's
+  object-level `net_dead()` - just under a different name. `"disconnect"`
+  is LDMud's real master-apply name (see §1.16), not DGD's; an earlier
+  draft of this file conflated the two.
+
+Two names in the real list above are the previously-undocumented hooks
+behind ROADMAP row 1.11's `rlimits` statement: `compile_rlimits` fires at
+compile time when the parser encounters an `rlimits` statement (validates/
+transforms the limit expressions), `runtime_rlimits` fires when a compiled
+`rlimits` scope is actually entered at runtime. Whoever implements 1.11
+needs both, not just VM-level checkpoint/rollback.
+
+See `src/dialect/instruct.md`'s own open design note (also referenced in
+§1.4 above) for why `connectApply()`/`netDeadApply()`'s current
+one-string-per-concept shape does not fit this three-way connect fork or
+the object-level (not driver-level) disconnect callback.
+
 ### 1.16 - LDMud master apply name table
 
 LDMud's master has a richer apply surface than FluffOS. The key additional
-applies beyond the FluffOS set:
-- `"get_root_uid"` - returns the root UID string
+applies beyond the FluffOS set, **corrected 2026-08-22** against a real
+LDMud 3.6.8 clone (`temp/ldmud`, report-only comparison session, no code
+changes made):
+- `"get_master_uid"` - returns the root UID string. **Not** `"get_root_uid"`
+  - that name was superseded in LDMud 3.2.1@40 (`doc/master/get_master_uid`'s
+    own HISTORY: "Introduced in 3.2.1@40 replacing get_root_uid()."); this
+    clone is 3.6.8, many releases past that rename, and `get_root_uid` no
+    longer exists.
 - `"get_bb_uid"` - returns the backbone (fallback) UID
 - `"valid_read"` / `"valid_write"` - path-level filesystem permission checks
 - `"make_path_absolute"` - resolve a relative path
-- `"query_allow_shadow"` - shadow permission check (see `src/object`)
+- `"query_allow_shadow"` - master-side shadow permission check (see
+  `src/object`), confirmed real and correctly named. Real LDMud shadow
+  permission is two-layered, though: this master apply is only the second
+  layer. The first is `query_prevent_shadow()`, defined **on the victim
+  object itself** (not a master apply at all) - an object that defines it
+  to return 1 cannot be shadowed regardless of what `query_allow_shadow()`
+  says. Also note real LDMud `shadow()` itself is `int shadow(object ob)`
+  - one argument, returns int 1/0 - not FluffOS's `shadow(ob, flag)`
+    two-argument, object-returning form; an earlier draft of this project's
+    own docs had attributed FluffOS's real signature to LDMud. `bind()`
+    does not exist as an LDMud efun either - the real name is
+    `bind_lambda(closure, object ob)` (`doc/efun/bind_lambda`), used both
+    to bind an unbound lambda and to rebind an efun/simul-efun/operator
+    closure to a different object. None of this is `src/apply`'s own
+    concern to fix (it's `src/object`/`src/vm`/`src/compiler` territory
+    for the actual Phase 1 rows), but it belongs here since this section
+    is the LDMud apply-surface reference other rows will read.
+- `"valid_snoop"` / `"valid_query_snoop"` - real LDMud master applies
+  (`doc/master/valid_snoop`, `doc/master/valid_query_snoop`), not
+  previously documented anywhere in this repo. Directly relevant: Phase
+  0's own snoop family work confirmed real FluffOS 2.9-ds2.08 has **no**
+  master-level snoop gate at all (no `APPLY_VALID_SNOOP` in `applies.h`) -
+  LDMud genuinely differs here, a real per-dialect divergence worth
+  carrying into whichever row eventually gives `snoop()` dialect-aware
+  behavior.
+- The `replaces` directive in `inherit` **does not exist anywhere in real
+  LDMud** - grepped the actual grammar (`src/prolang.y`'s
+  `inheritance_qualifier`/`inheritance_modifier` productions): the
+  complete modifier set is `static`/`private`/`public`/`protected`/
+  `nosave`/`nomask`/`deprecated`/`virtual`, no `replaces` token anywhere
+  in the source tree. The real, closest LDMud feature is
+  `replace_program()` (`doc/efun/replace_program`) - a **runtime efun**,
+  not a compile-time `inherit` modifier: it shrinks a live object down to
+  one of its already-inherited programs, deferred to the end of the
+  current backend cycle, and stops shadowing on the object when it takes
+  effect. **ROADMAP row 1.6 may need rescoping, not just a rename** - a
+  compiler-side `inherit` directive and a VM-side runtime efun are
+  different-shaped features; whoever picks up 1.6 should read
+  `doc/efun/replace_program` in full before deciding what the row is
+  actually asking for.
+- Link-death notification is `disconnect(object ob, string remaining)` - a
+  **master** apply (`callback_master(STR_DISCONNECT, 2)` in `src/comm.c`),
+  not an object-level one, and the name `net_dead` belongs to FluffOS
+  only. See the open design note under §1.4 above - this affects
+  `BootApi`'s whole connect/disconnect abstraction, not just a string.
 
 Add these to `LdmudBootApi` and wire them into `ApplyTable`'s apply-dispatch
 methods.
