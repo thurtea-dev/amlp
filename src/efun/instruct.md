@@ -602,6 +602,30 @@ individually cited there, not just assumed to fit the driver-internal-
 dump family by resemblance: `network_stats` (`packages/contrib.c`),
 `dump_prog` (`disassembler.c`), `memory_info` (`efuns_main.c`).
 
+**Correction, 2026-08-23 (continued): `reload_object` is done too --
+one dedicated-session candidate remains, not two.** Taken on the same
+session as the accounting note above. See STATUS.md's own entry for the
+complete real-step-by-step citation (every real `reload_object(obj)`
+step individually verified against `object.c`, not carried forward
+summarized); new `ObjectManager::reloadObject()`/`VM::reloadObject()`,
+`SocketRegistry::closeAllOwnedBy()` (the previously-missing piece,
+confirmed still the only one), and `Scheduler::removeAllCallOutsForObject()`.
+A real, separate, precisely-located gap was found while implementing
+this and left for a future session rather than fixed here or silently
+ignored: real `close_referencing_sockets()` (backing the new
+`closeAllOwnedBy()`) has a second real call site, `simulate.c`'s own
+`destruct_object()`, which this driver's own `ObjectManager::
+destructObject()` does not port -- a destructed object's own efun
+sockets currently linger rather than force-closing. Cited with its
+exact real source location in `SocketRegistry.hpp`'s own comment.
+
+With this, **the real `parse_*` package (`packages/parser.c`, 3419
+lines) is the one remaining dedicated-session candidate** -- by far the
+largest single item this row has ever considered, comparable to or
+larger than everything else implemented in this row combined. It should
+get its own explicit go-ahead before being taken on, not be assumed the
+automatic next step just because it is the only one left on this list.
+
 **Tier 2 (medium effort), corrected:** `query_actions` removed (not a
 real efun name, see `commands`'s own row above). Everything else in the
 first pass's Tier 2 list is now done: `add_action`, `remove_action`,

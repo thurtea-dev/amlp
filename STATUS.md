@@ -3,6 +3,125 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-23 (continued): `reload_object()` implemented in full, the
+smaller of the two remaining dedicated-session candidates, plus a real,
+precisely-located gap found in the process and left documented rather
+than silently expanded into (Phase 0 row 0.13: 234 registered, up from
+233, real gap against the 270 target now 54).**
+
+Re-verified both standing claims from the entry that first flagged this
+efun rather than trusting them unchanged: zero real call sites for
+`reload_object` across all six mudlib corpora, still true; the one
+missing piece (a socket-close-by-owner capability) still accurate, and
+still the only piece missing. Read the real `object.c`'s own
+`reload_object(obj)` in full before writing anything, confirming every
+real step precisely rather than the previous session's own higher-level
+summary: zero every object variable back to a real int 0
+(`free_svalue`/`const0u`); close every efun socket `obj` owns
+(`PACKAGE_SOCKETS`, active in this exact vendored build); the real
+shadow-chain cascade/splice (identical real semantics to `destruct()`'s
+own, confirmed by direct comparison, with one real difference -- `obj`
+itself is never destructed here, only spliced out or left as the
+surviving base once every object that was shadowing it is cascade-
+destructed); `remove_living_name(obj)`; `set_heart_beat(obj, 0)`;
+`remove_all_call_out(obj)`; a light-system total-light decrement (real,
+but `NO_LIGHT` is undefined and no light system exists here regardless
+-- already-excluded gap, not a new one); an `obj->euid = obj->uid;` reset
+(real, `PACKAGE_UIDS`+`AUTO_SETEUID` both confirmed active in this exact
+build's own `options.h`, but this driver has only a single `privs_`
+field, no separate uid/euid pair -- nothing observably different to
+reset back to); and finally real `call_create()`'s own full body --
+confirmed directly to be `call___INIT(ob)` (this driver's own
+synthesized `"$objvarinit"`) *then* `create()`, not create() alone, so a
+top-level `int x = 5;` declaration really does end up back at 5 after a
+reload, not merely 0.
+
+Implemented split across two layers by this driver's own existing
+module-dependency boundaries (`object` cannot depend on `net`/
+`scheduler`, both of which already depend on `object`), not real code's
+own single procedural body: new `ObjectManager::reloadObject(obj)`
+handles everything that stays within `object`'s own dependency envelope
+(variable-zeroing, the shadow cascade/splice reusing `destructObject()`
+recursively for each cascaded link, `LivingNameRegistry::remove()`, and
+the `runObjectVarInitializers()`-then-`create()` sequence, the same tail
+`cloneObject()` itself already uses for a fresh instance), reached via a
+new `VM::reloadObject()` thin wrapper matching `cloneObject()`/
+`destructObject()`'s own established shape; the `reload_object` efun
+itself (`EfunTable.cpp`) orchestrates socket-close and heart_beat/
+call_out removal directly (both needing `net`/`scheduler`) before
+calling into `vm.reloadObject()` for the rest. This reorders two
+independent real steps relative to their real position (socket-close is
+real step 2, heart_beat/call_out removal is real steps 5-6, both now
+run first) -- confirmed to have no observable effect: neither touches
+object variables, the shadow chain, or living-name state, and both
+still finish well before `create()` runs either way, the only real
+ordering constraint that actually matters.
+
+New capabilities added to back this: `SocketRegistry::closeAllOwnedBy()`
+(real `close_referencing_sockets()`, confirmed real `SC_FORCE`-without-
+`SC_DO_CALLBACK` semantics -- the socket is force-closed but no
+`close_callback` fires, matching `close()`'s own established no-callback
+behavior for a plain LPC-initiated close) and
+`Scheduler::removeAllCallOutsForObject()` (real `remove_all_call_out()`,
+matching both real forms -- a string-form entry whose own target is
+`obj`, or a closure-form entry whose own closure owner is `obj` -- and
+also opportunistically pruning any entry whose own target/owner is
+already gone or destructed while walking the list anyway, since that is
+the real function's own complete behavior, not an unrelated side effect
+layered on top).
+
+**A real, separate gap found and precisely located while implementing
+this, not fixed here -- flagged rather than silently expanded into:**
+real `close_referencing_sockets()` has a *second* real call site besides
+`reload_object()`'s own -- `simulate.c`'s own `destruct_object()`
+("`if (ob->flags & O_EFUN_SOCKET) close_referencing_sockets(ob);`",
+confirmed directly, sitting right alongside the same shadow/living-name
+handling this driver's own `ObjectManager::destructObject()` already
+ports). This driver's own `destructObject()` does not close a destructed
+object's own sockets at all -- a dangling `LpcSocket` whose owner has
+been destructed simply stops firing callbacks (`weak_ptr` lock failure)
+but lingers, fd still open, until something else removes it. Out of
+this session's own specific scope (`reload_object()`, not `destruct()`),
+recorded in `SocketRegistry.hpp`'s own comment with the exact real
+citation so it does not need re-finding from scratch.
+
+6 new test functions (`test/test_lexer.cpp`): the core reload test, the
+socket-close-in-isolation test, the call_out/heart_beat-removal test,
+two shadow-chain tests (cascade-destructs when `obj` is the base victim,
+splices out without destructing anything when `obj` is itself the
+shadow), and one confirming a snoop relationship survives a reload
+completely untouched (real `reload_object()` has no snoop-related line
+anywhere in its own body at all, confirmed directly by re-reading it --
+unlike `destruct_object()`'s own explicit snoop unlinking -- so this is
+the one real, verified place where "leaves it alone" is itself the
+correct, faithful behavior, not a gap). Two real test-authoring mistakes
+caught by running the suite rather than assumed correct, both fixed
+before landing: the core reload test's own `create_count` tracking
+variable was itself subject to the exact same zero-then-reinit step
+being tested, so it could never accumulate across a reload the way the
+first draft assumed -- fixed by corrupting it to an arbitrary value
+before reload and checking it reads back as a freshly-incremented 1,
+not the corrupted value and not a bare 0, the only way to tell "create()
+genuinely ran again" apart from "create() was skipped" once the counter
+itself is reset by the very same operation. The socket test's own first
+draft read the socket's handle back through the reloaded object's own
+(by-then-zeroed) `fd` variable, silently checking an unrelated leftover
+socket from a different, still-registered handle 0 instead of its own
+now-closed one -- fixed by capturing the real handle in a plain C++
+local before ever calling `reload_object()`. Full suite: 583 tests
+passing, up from 577 before this session, no regressions, stable across
+three consecutive runs plus a full `ctest` pass.
+
+With `origin()` and `reload_object()` both done, **the real `parse_*`
+package (`packages/parser.c`, 3419 lines) is the one remaining
+dedicated-session candidate** -- confirmed still the case, nothing in
+this session's own work changed that assessment. It should be next if
+row 0.13 continues past its current 54-name real gap, but given its
+size (by far the largest single item this row has ever considered,
+comparable to or larger than everything implemented in this row so far
+combined) it warrants its own explicit go-ahead before being taken on,
+not an assumed default.
+
 **2026-08-23: full 55-name gap accounting produced and cross-checked
 against STATUS.md/instruct.md's own written record, then `origin()`
 implemented in full -- real per-call-path tagging through every genuine

@@ -44,6 +44,37 @@ public:
 
     void destructObject(const std::shared_ptr<LpcObject>& obj);
 
+    // real object.c's own reload_object(obj): resets obj back to a
+    // freshly-cloned-looking state in place (same identity, same
+    // shared_ptr) rather than reconstructing it. Handles every real
+    // step that stays within this class's own dependency envelope --
+    // zeroing every object variable, the real shadow-chain cascade/
+    // splice (identical real semantics to destructObject()'s own, just
+    // never destructing obj itself), remove_living_name(), and finally
+    // re-running the synthesized "$objvarinit" initializers followed by
+    // create() (real call_create()'s own "call___INIT(ob); ...;
+    // apply(APPLY_CREATE, ob, 0, ORIGIN_DRIVER);", confirmed directly --
+    // not just create() alone, so a top-level "int x = 5;" declaration
+    // really does end up back at 5, not 0, after a reload). Two real
+    // steps skipped, both confirmed real in this exact vendored build's
+    // own options.h (`NO_LIGHT` undefined, `PACKAGE_UIDS`+`AUTO_SETEUID`
+    // both defined) but with no equivalent model in this driver:
+    // `add_light(obj, -(obj->total_light))` (no light-level system at
+    // all, same gap already excluded elsewhere) and `obj->euid =
+    // obj->uid;` (this driver has only a single `privs_` field, no
+    // separate uid/euid pair to reset one from the other -- privs_ is
+    // set once at construction and never diverges from it here anyway,
+    // so there is nothing observably different to reset back to).
+    // Socket-close and heart_beat/call_out removal are real steps too
+    // (`close_referencing_sockets`, `set_heart_beat(obj, 0)`,
+    // `remove_all_call_out(obj)`) but live outside this class's own
+    // dependency envelope (`object` cannot depend on `net`/`scheduler`,
+    // which both already depend on `object`) -- see
+    // EfunTable.cpp's own reload_object() registration for where those
+    // two run instead, and why doing them before this call rather than
+    // real code's own interleaved order has no observable effect.
+    void reloadObject(const std::shared_ptr<LpcObject>& obj);
+
     // Strips one trailing ".c" if present, so "id_card" and "id_card.c"
     // resolve to the exact same cache entry and object identity. Real
     // LPC object paths never carry the ".c" extension internally (this

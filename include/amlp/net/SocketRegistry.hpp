@@ -27,16 +27,23 @@ class LpcObject;
 // reuse would only reintroduce a stale-handle class of bug real FluffOS
 // itself has to guard against with owner_ob/state checks on every call.
 //
-// Known gap, not fixed this session: real close_referencing_sockets(ob)
-// (every socket a destructed object still owns force-closes when that
-// object is destructed) has no equivalent here. A dangling LpcSocket
-// whose owner has been destructed simply stops firing callbacks (its
+// closeAllOwnedBy() below is real close_referencing_sockets(ob) (added
+// for reload_object(), object.c's own real call site) -- found while
+// implementing that its real *other* call site is simulate.c's own
+// destruct_object() ("if (ob->flags & O_EFUN_SOCKET)
+// close_referencing_sockets(ob);", right alongside real destruct's own
+// shadow/living-name handling this driver's own ObjectManager::
+// destructObject() already ports). Not wired into destructObject()
+// itself this session -- out of the specific scope that added this
+// method -- so the same gap this comment used to describe still applies
+// there specifically: a dangling LpcSocket whose owner has been
+// destructed (not reloaded) simply stops firing callbacks (its
 // weak_ptr<LpcObject> lock() fails, matching PendingInputTo's own
 // established handling) but is not itself removed from this registry or
 // closed -- it lingers, still holding its fd open, until something else
 // (a peer disconnect, an explicit socket_close() from elsewhere, driver
-// shutdown) removes it. Flagged here rather than silently left
-// undocumented.
+// shutdown) removes it. A real, now precisely-located gap for a future
+// session, not a re-derivation from scratch.
 class SocketRegistry {
 public:
     // int socket_create(int mode, string|function read_callback,
@@ -121,6 +128,20 @@ public:
 
     static std::shared_ptr<LpcSocket> find(int handle);
     static std::vector<std::shared_ptr<LpcSocket>> all();
+
+    // real close_referencing_sockets(ob) (socket_efuns.c): "for (i...)
+    // if (lpc_socks[i].owner_ob == ob && state != CLOSED && state !=
+    // FLUSHING) socket_close(i, SC_FORCE);" -- SC_FORCE alone, without
+    // SC_DO_CALLBACK, so no close_callback fires (the same real no-
+    // callback behavior close() above already gives an ordinary LPC-
+    // initiated close) and SC_FORCE itself bypasses the ownership check
+    // close() above enforces (irrelevant here regardless, since every
+    // socket actually matched already has this exact owner). No
+    // STATE_FLUSHING equivalent to skip either -- see close()'s own
+    // comment on why that state does not exist in this driver at all.
+    // Backs reload_object() (EfunTable.cpp), the previously-missing
+    // piece flagged in this class's own header comment above.
+    static void closeAllOwnedBy(const std::shared_ptr<LpcObject>& owner);
 
     // Used only by Server::pollSockets()'s own poll-detected-failure
     // path (peer EOF, a read/write error, a partial write that can never

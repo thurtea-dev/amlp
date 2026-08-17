@@ -70,6 +70,20 @@ public:
     // return convention.
     int64_t removeCallOutByHandle(int64_t handle);
 
+    // Real remove_all_call_out(object_t*) (call_out.c): removes every
+    // pending entry targeting obj, both real forms -- a string-form
+    // entry whose own target is obj, or a closure-form entry whose own
+    // closure->owner is obj (real "(*copp)->function.f->hdr.owner ==
+    // obj", confirmed directly). Real code also opportunistically prunes
+    // any entry whose own target/owner is already destructed or gone
+    // while it is walking the list anyway ("|| (*copp)->ob->flags &
+    // O_DESTRUCTED" / "|| !(*copp)->function.f->hdr.owner ||
+    // ...->flags & O_DESTRUCTED"), matched here the same way rather than
+    // scoped narrowly to just obj, since that is the real function's own
+    // complete behavior, not an unrelated side effect layered on top.
+    // Backs reload_object() (EfunTable.cpp).
+    void removeAllCallOutsForObject(const std::shared_ptr<LpcObject>& obj);
+
     // Real find_call_out()/find_call_out_by_handle(): same lookup rules as
     // the two remove methods above, without removing anything.
     int64_t findCallOutByName(const std::shared_ptr<LpcObject>& owner, const std::string& function) const;

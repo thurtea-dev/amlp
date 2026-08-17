@@ -3308,6 +3308,60 @@ void registerCoreEfuns() {
         return Value{};
     });
 
+    // void reload_object(object ob) -- real object.c's own reload_object():
+    // resets ob back to a freshly-cloned-looking state in place (same
+    // identity, same shared_ptr) -- every object variable back to a real
+    // int 0, then re-initialized (the synthesized "$objvarinit" runs
+    // again before create(), confirmed directly against real
+    // call_create()'s own body, not just create() alone), every efun
+    // socket ob owns force-closed with no close_callback firing, ob's
+    // own shadow chain cascade-destructed or spliced out (identical real
+    // semantics to destruct()'s own, just never destructing ob itself),
+    // its living name removed, its heart_beat disabled, and every
+    // pending call_out targeting it removed -- confirmed genuinely real
+    // (efun_defs.c's own F_RELOAD_OBJECT) but zero real call sites
+    // across all six of this row's mudlib corpora, re-checked fresh
+    // rather than assumed unchanged from the previous pass that flagged
+    // this efun.
+    //
+    // Split across two layers by this driver's own existing module
+    // boundaries, not real code's own single procedural body: socket-
+    // close (real step 2) and heart_beat/call_out removal (real steps
+    // 5-6) run here, since `object` cannot depend on `net`/`scheduler`
+    // (both already depend on `object`); everything else --
+    // variable-zeroing (step 1), shadow-chain handling (step 3),
+    // living-name removal (step 4), and the re-init-then-create()
+    // sequence (step 9) -- runs inside VM::reloadObject()/
+    // ObjectManager::reloadObject() (see its own header comment for the
+    // full citation). Running the socket/scheduler cleanup *before*
+    // calling into ObjectManager here, rather than real code's own
+    // interleaved order, has no observable effect: neither touches
+    // object variables, the shadow chain, or living-name state, and
+    // both still finish well before create() runs either way. Two real
+    // steps have no equivalent and are skipped entirely (see
+    // ObjectManager::reloadObject()'s own comment for why): the real
+    // light-system total-light decrement (no light system exists at
+    // all) and the real euid-from-uid reset (this driver has only a
+    // single privs_ field, no separate uid/euid pair).
+    t.registerEfun("reload_object", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("reload_object: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob) return Value{};
+
+        SocketRegistry::closeAllOwnedBy(ob);
+        if (vm.scheduler()) {
+            vm.scheduler()->setHeartbeatInterval(ob, 0);
+            vm.scheduler()->removeAllCallOutsForObject(ob);
+        } else {
+            ob->setHeartbeatInterval(0);
+        }
+
+        vm.reloadObject(ob);
+        return Value{};
+    });
+
     // int remove_interactive(object ob) -- real packages/contrib.c's own
     // f_remove_interactive(): disconnects ob's connection without
     // destructing ob itself -- confirmed directly, the real intended use

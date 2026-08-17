@@ -126,6 +126,20 @@ int64_t Scheduler::removeCallOutByHandle(int64_t handle) {
     return -1;
 }
 
+void Scheduler::removeAllCallOutsForObject(const std::shared_ptr<LpcObject>& obj) {
+    for (auto it = callOuts_.begin(); it != callOuts_.end();) {
+        std::shared_ptr<LpcObject> owner =
+            it->closure ? it->closure->owner.lock() : it->target.lock();
+        bool matchesObj = obj && owner == obj;
+        bool ownerGone = !owner || owner->isDestructed();
+        if (matchesObj || ownerGone) {
+            it = callOuts_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 int64_t Scheduler::findCallOutByName(const std::shared_ptr<LpcObject>& owner, const std::string& function) const {
     if (!owner) return -1;
     for (const auto& entry : callOuts_) {

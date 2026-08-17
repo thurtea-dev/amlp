@@ -713,6 +713,10 @@ void VM::destructObject(const std::shared_ptr<LpcObject>& obj) {
     objects_.destructObject(obj);
 }
 
+void VM::reloadObject(const std::shared_ptr<LpcObject>& obj) {
+    objects_.reloadObject(obj);
+}
+
 std::shared_ptr<LpcObject> VM::masterObject() const {
     return objects_.masterObject();
 }

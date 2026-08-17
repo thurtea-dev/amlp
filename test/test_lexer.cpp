@@ -15976,6 +15976,237 @@ static void testOriginNameCoversAllEightRealValuesIncludingTheUnreachableFunctio
     std::cout << "testOriginNameCoversAllEightRealValuesIncludingTheUnreachableFunctionPointer OK\n";
 }
 
+// reload_object(): real object.c's own reload_object(), resetting an
+// object back to a freshly-cloned-looking state in place. Verified
+// against reference source in full before writing anything (see
+// EfunTable.cpp's own registration comment for the complete citation);
+// zero real call sites across all six of this row's mudlib corpora,
+// re-confirmed fresh rather than assumed unchanged. Each test below
+// targets one real, distinct piece of its behavior rather than one
+// broad smoke test.
+
+static void testReloadObjectResetsVariablesReinitializesAndCallsCreateAgain() {
+    ObjectVarHarness harness;
+    harness.writeFile("/reload_core.c",
+        "int plain;\n"
+        "int initialized = 5;\n"
+        "int create_count;\n"
+        "void create() { create_count = create_count + 1; }\n"
+        "void set_plain(int v) { plain = v; }\n"
+        "void set_initialized(int v) { initialized = v; }\n"
+        "int get_plain() { return plain; }\n"
+        "int get_initialized() { return initialized; }\n"
+        "int get_create_count() { return create_count; }\n"
+        "void set_create_count(int v) { create_count = v; }\n");
+    auto ob = harness.objects.cloneObject("/reload_core");
+    assert(ob != nullptr);
+
+    // Sanity: the fresh clone's own create() already ran once, and the
+    // real initializer already applied once.
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_create_count", {}).data) == 1);
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_initialized", {}).data) == 5);
+
+    harness.vm.callFunction(ob, "set_plain", {amlp::Value(int64_t{42})});
+    harness.vm.callFunction(ob, "set_initialized", {amlp::Value(int64_t{99})});
+    // create_count is itself an ordinary object variable, so it is
+    // subject to the exact same zero-then-reinit step everything else
+    // is -- it cannot be used to count *across* a reload by simply
+    // expecting it to keep incrementing (a real reload_object() zeroes
+    // it right along with everything else, the same fresh-slate
+    // guarantee that makes this whole efun meaningful in the first
+    // place). Corrupted to an arbitrary value here instead, specifically
+    // so "did create() genuinely run again" can still be told apart from
+    // "create() was skipped": skipped would leave it at 0 (the zero
+    // step's own result), genuinely re-run leaves it at 1.
+    harness.vm.callFunction(ob, "set_create_count", {amlp::Value(int64_t{777})});
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_plain", {}).data) == 42);
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_initialized", {}).data) == 99);
+
+    std::vector<amlp::Value> reloadArgs{amlp::Value(ob)};
+    amlp::EfunTable::instance().call("reload_object", harness.vm, reloadArgs);
+
+    // plain has no initializer -- zeroed, and create() does not set it,
+    // so it stays 0. initialized has a real initializer -- zeroed, then
+    // the real re-run "$objvarinit" puts it straight back to 5, not 0
+    // and not the 99 it was overwritten to (real call_create()'s own
+    // "call___INIT(ob); ...; apply(APPLY_CREATE, ...)" order, confirmed
+    // directly, not just create() alone). create_count reads back as 1,
+    // not the corrupted 777 and not the bare-zeroed 0 -- create()
+    // genuinely ran again, from the freshly-zeroed baseline, not skipped.
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_plain", {}).data) == 0);
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_initialized", {}).data) == 5);
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_create_count", {}).data) == 1);
+
+    std::cout << "testReloadObjectResetsVariablesReinitializesAndCallsCreateAgain OK\n";
+}
+
+static void testReloadObjectClosesOwnedSocketsWithNoCallbackFiring() {
+    ObjectVarHarness harness;
+    harness.writeFile("/reload_socket.c",
+        "int fd;\n"
+        "int close_fired;\n"
+        "int make() { fd = socket_create(2, \"on_read\", \"on_close\"); return fd; }\n"
+        "void on_read(int f, string m, string a) {}\n"
+        "void on_close(int f) { close_fired = 1; }\n"
+        "int get_close_fired() { return close_fired; }\n");
+    auto ob = harness.objects.cloneObject("/reload_socket");
+    assert(ob != nullptr);
+
+    amlp::Value madeFd = harness.vm.callFunction(ob, "make", {});
+    assert(std::get<int64_t>(madeFd.data) >= 0);
+    // Captured *before* reload zeroes ob's own "fd" variable -- reading
+    // socket_status() through ob's own (post-reload) fd afterward would
+    // check whatever that now-zeroed slot happens to read as instead
+    // (0, a handle some *other* still-open socket in this same global
+    // registry could easily own), not this test's own actual socket.
+    int handle = static_cast<int>(std::get<int64_t>(madeFd.data));
+
+    std::vector<amlp::Value> statusArgsBefore{amlp::Value(int64_t{handle})};
+    amlp::Value before = amlp::EfunTable::instance().call("socket_status", harness.vm, statusArgsBefore);
+    auto* beforeArr = std::get_if<std::shared_ptr<amlp::Array>>(&before.data);
+    assert(beforeArr != nullptr && !(*beforeArr)->items.empty());
+
+    std::vector<amlp::Value> reloadArgs{amlp::Value(ob)};
+    amlp::EfunTable::instance().call("reload_object", harness.vm, reloadArgs);
+
+    // Real close_referencing_sockets()'s own "socket_close(i, SC_FORCE)"
+    // -- SC_FORCE alone, without SC_DO_CALLBACK, so the socket is gone
+    // but on_close() never runs.
+    std::vector<amlp::Value> statusArgs{amlp::Value(int64_t{handle})};
+    amlp::Value after = amlp::EfunTable::instance().call("socket_status", harness.vm, statusArgs);
+    auto* afterArr = std::get_if<std::shared_ptr<amlp::Array>>(&after.data);
+    assert(afterArr != nullptr && (*afterArr)->items.empty());
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_close_fired", {}).data) == 0);
+
+    std::cout << "testReloadObjectClosesOwnedSocketsWithNoCallbackFiring OK\n";
+}
+
+static void testReloadObjectRemovesPendingCallOutsAndDisablesHeartbeat() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/reload_timers.c",
+        "int co_fired;\n"
+        "int hb_fired;\n"
+        "void go() { call_out(\"fire_co\", 0); set_heart_beat(1); }\n"
+        "void fire_co() { co_fired = 1; }\n"
+        "void heart_beat() { hb_fired = hb_fired + 1; }\n"
+        "int get_co_fired() { return co_fired; }\n"
+        "int get_hb_fired() { return hb_fired; }\n");
+    auto ob = harness.objects.cloneObject("/reload_timers");
+    assert(ob != nullptr);
+
+    harness.vm.callFunction(ob, "go", {});
+
+    std::vector<amlp::Value> reloadArgs{amlp::Value(ob)};
+    amlp::EfunTable::instance().call("reload_object", harness.vm, reloadArgs);
+
+    // Real "set_heart_beat(obj, 0); remove_all_call_out(obj);" -- neither
+    // the pending call_out nor the heartbeat should ever fire once
+    // ticked, proving both were genuinely removed, not merely masked.
+    scheduler.tickCallOuts();
+    scheduler.tickHeartbeats();
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_co_fired", {}).data) == 0);
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_hb_fired", {}).data) == 0);
+
+    std::cout << "testReloadObjectRemovesPendingCallOutsAndDisablesHeartbeat OK\n";
+}
+
+static void testReloadObjectCascadeDestructsObjectsThatWereShadowingIt() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/reload_sh_victim.c", "void create() {}\n");
+    harness.writeFile("/reload_sh_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+    auto victim = harness.objects.cloneObject("/reload_sh_victim");
+    auto shadowOb = harness.objects.cloneObject("/reload_sh_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+
+    harness.vm.callFunction(shadowOb, "attach", {amlp::Value(victim)});
+    assert(victim->shadowedBy().lock() == shadowOb);
+
+    // victim is the base of the chain (shadowed by shadowOb, shadowing
+    // nothing itself) -- real reload_object()'s own cascade destructs
+    // every object shadowing it, identical to destruct()'s own real
+    // cascade, but victim itself survives (it is being reloaded, not
+    // destructed).
+    std::vector<amlp::Value> reloadArgs{amlp::Value(victim)};
+    amlp::EfunTable::instance().call("reload_object", harness.vm, reloadArgs);
+
+    assert(shadowOb->isDestructed());
+    assert(!victim->isDestructed());
+    assert(!victim->shadowedBy().lock());
+
+    std::cout << "testReloadObjectCascadeDestructsObjectsThatWereShadowingIt OK\n";
+}
+
+static void testReloadObjectSplicesOutWithoutDestructingAnythingWhenItIsItselfTheShadow() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/reload_sp_victim.c", "void create() {}\n");
+    harness.writeFile("/reload_sp_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n");
+    auto victim = harness.objects.cloneObject("/reload_sp_victim");
+    auto shadowOb = harness.objects.cloneObject("/reload_sp_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+
+    harness.vm.callFunction(shadowOb, "attach", {amlp::Value(victim)});
+    assert(shadowOb->shadowing().lock() == victim);
+
+    // shadowOb is itself the shadow (shadowing victim, shadowed by
+    // nothing) -- real reload_object()'s own cascade condition
+    // ("obj->shadowed && !obj->shadowing") is false here, so this takes
+    // the splice branch instead: shadowOb's own shadowing relationship
+    // to victim is severed, and *neither* object gets destructed.
+    std::vector<amlp::Value> reloadArgs{amlp::Value(shadowOb)};
+    amlp::EfunTable::instance().call("reload_object", harness.vm, reloadArgs);
+
+    assert(!shadowOb->isDestructed());
+    assert(!victim->isDestructed());
+    assert(!shadowOb->shadowing().lock());
+    assert(!victim->shadowedBy().lock());
+
+    std::cout << "testReloadObjectSplicesOutWithoutDestructingAnythingWhenItIsItselfTheShadow OK\n";
+}
+
+static void testReloadObjectLeavesAnActiveSnoopRelationshipUntouched() {
+    // Real reload_object() (object.c) has no snoop-related line anywhere
+    // in its own body -- confirmed directly, unlike destruct_object()'s
+    // own explicit snoop unlinking (simulate.c). A snoop relationship
+    // involving the reloaded object must survive completely intact.
+    ObjectVarHarness harness;
+    harness.writeFile("/reload_sn_victim.c", "void create() {}\n");
+    harness.writeFile("/reload_sn_snooper.c",
+        "object start(object victim) { return snoop(this_object(), victim); }\n");
+    auto victim = harness.objects.cloneObject("/reload_sn_victim");
+    auto snooper = harness.objects.cloneObject("/reload_sn_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    assert(victim->snoopedBy().lock() == snooper);
+    assert(snooper->snooping().lock() == victim);
+
+    std::vector<amlp::Value> reloadArgs{amlp::Value(victim)};
+    amlp::EfunTable::instance().call("reload_object", harness.vm, reloadArgs);
+
+    assert(victim->snoopedBy().lock() == snooper);
+    assert(snooper->snooping().lock() == victim);
+
+    ::close(fds[1]);
+    std::cout << "testReloadObjectLeavesAnActiveSnoopRelationshipUntouched OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -16560,6 +16791,12 @@ int main() {
     testOriginReturnsFunctionalForAnInlineLambdaBody();
     testOriginReturnsDriverForTopLevelDispatchHeartBeatAndCommandDispatch();
     testOriginNameCoversAllEightRealValuesIncludingTheUnreachableFunctionPointer();
+    testReloadObjectResetsVariablesReinitializesAndCallsCreateAgain();
+    testReloadObjectClosesOwnedSocketsWithNoCallbackFiring();
+    testReloadObjectRemovesPendingCallOutsAndDisablesHeartbeat();
+    testReloadObjectCascadeDestructsObjectsThatWereShadowingIt();
+    testReloadObjectSplicesOutWithoutDestructingAnythingWhenItIsItselfTheShadow();
+    testReloadObjectLeavesAnActiveSnoopRelationshipUntouched();
     std::cout << "all tests passed\n";
     return 0;
 }

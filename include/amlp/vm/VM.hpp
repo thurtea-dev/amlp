@@ -129,6 +129,11 @@ public:
     // of this).
     void destructObject(const std::shared_ptr<LpcObject>& obj);
 
+    // Thin wrapper over ObjectManager::reloadObject(), matching
+    // cloneObject()/destructObject()'s own established shape -- see its
+    // own header comment for the full real reload_object() derivation.
+    void reloadObject(const std::shared_ptr<LpcObject>& obj);
+
     // real FluffOS's master() efun (func_spec.c: "object master();") --
     // just the already-loaded master object, no different from what
     // applyMaster() already dispatches against.

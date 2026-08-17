@@ -362,6 +362,21 @@ int SocketRegistry::close(int handle, const std::shared_ptr<LpcObject>& caller) 
     return SocketErr::Success;
 }
 
+void SocketRegistry::closeAllOwnedBy(const std::shared_ptr<LpcObject>& owner) {
+    if (!owner) return;
+    for (auto it = g_sockets.begin(); it != g_sockets.end();) {
+        if (it->second->owner.lock() == owner && it->second->state != SocketState::Closed) {
+            // erase() drops the last shared_ptr reference, running
+            // LpcSocket's own destructor (::close(fd)) -- the same real
+            // fd-close effect close() above gets from this identical
+            // erase(), no separate syscall needed here.
+            it = g_sockets.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 std::string SocketRegistry::errorString(int error) {
     int index = -(error + 1);
     if (index < 0 || index >= kErrorStringsCount) {

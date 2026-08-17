@@ -823,4 +823,79 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
     loaded_.erase(obj->filename());
 }
 
+void ObjectManager::reloadObject(const std::shared_ptr<LpcObject>& obj) {
+    // Real "if (!obj->prog) return;" -- a swapped-out object with no
+    // compiled program at all. This driver's LpcObject always has one
+    // (no swap concept), so the only real equivalent guard is a plain
+    // null check; deliberately no isDestructed() guard either, matching
+    // real reload_object()'s own lack of one (see this method's own
+    // header comment).
+    if (!obj) return;
+
+    // Real "for (i...) { free_svalue(&obj->variables[i]); obj->variables[i]
+    // = const0u; }" -- every object variable back to a real int 0, not
+    // this driver's own separate "declared but never assigned reads as
+    // void" convention (LpcObject.cpp), which is about initial
+    // declaration state, not what an explicit reload sets afterward.
+    for (auto& v : obj->variables()) {
+        v = Value(int64_t{0});
+    }
+
+    // Shadow chain: identical real semantics to destructObject()'s own
+    // two-branch handling just above (same real source citation), with
+    // one real difference -- obj itself is never destructed here, only
+    // spliced out of whatever chain it was part of (or has every object
+    // that was shadowing it destructed, if it was the base victim).
+    // Real code's own cascade loop pre-severs each shadowing link's own
+    // shadowed/shadowing fields *before* destructing it (so that
+    // destructObject()'s own shadow-handling becomes a no-op when it
+    // runs for that link), confirmed directly rather than assumed to
+    // match destructObject()'s own cascade shape.
+    auto shadowedBy = obj->shadowedBy().lock();
+    if (shadowedBy && !obj->shadowing().lock()) {
+        auto cur = shadowedBy;
+        while (cur) {
+            auto next = cur->shadowedBy().lock();
+            cur->setShadowing(std::weak_ptr<LpcObject>());
+            cur->setShadowedBy(std::weak_ptr<LpcObject>());
+            destructObject(cur);
+            cur = next;
+        }
+    } else {
+        if (auto shadowing = obj->shadowing().lock()) {
+            shadowing->setShadowedBy(shadowedBy);
+        }
+        if (shadowedBy) {
+            shadowedBy->setShadowing(obj->shadowing());
+        }
+    }
+    obj->setShadowing(std::weak_ptr<LpcObject>());
+    obj->setShadowedBy(std::weak_ptr<LpcObject>());
+
+    // real "remove_living_name(obj);" (object.c), alongside the shadow
+    // handling just above in the real source too.
+    LivingNameRegistry::remove(obj);
+
+    // real call_create()'s own real body: "call___INIT(ob); if (ob->flags
+    // & O_DESTRUCTED) { ...; return; } apply(APPLY_CREATE, ob, 0,
+    // ORIGIN_DRIVER);" -- confirmed directly, not just create() alone,
+    // so a top-level initialized variable declaration really does end up
+    // back at its own initializer value, not merely 0, after a reload.
+    // The real O_DESTRUCTED check only guards the trailing create() apply
+    // itself, not call___INIT -- that runs unconditionally, matched here
+    // by not gating runObjectVarInitializers on isDestructed() either,
+    // only the create() call below it.
+    if (vm_) {
+        try {
+            runObjectVarInitializers(obj, obj->program());
+            if (!obj->isDestructed()) {
+                vm_->callFunction(obj, "create", {});
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[object] reload_object: create() failed for "
+                       << obj->filename() << ": " << e.what() << "\n";
+        }
+    }
+}
+
 } // namespace amlp
