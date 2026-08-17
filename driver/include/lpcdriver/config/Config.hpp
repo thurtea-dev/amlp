@@ -27,6 +27,19 @@ public:
     // MUD_NAME; }".
     const std::string& mudName() const { return mudName_; }
 
+    // Real FluffOS/MudOS's own "global include file" runtime config
+    // option (rc.c's own CONFIG_STR(__GLOBAL_INCLUDE_FILE__), exposed as
+    // the GLOBAL_INCLUDE_FILE macro in config.h): when set, the named
+    // header is auto-#include'd into every compiled object, before that
+    // object's own source, matching real lex.c's own start_new_file()
+    // ("if (*GLOBAL_INCLUDE_FILE) { ...; handle_include(gifile, 1); }
+    // else refill_buffer();") -- confirmed directly, not guessed. Empty
+    // means "not configured" (real semantics too: the check is on the
+    // string's own first byte being non-null), a true no-op for any
+    // mudlib that never sets it, this repo's own bundled Rifts mudlib
+    // and mudlib_stub included.
+    const std::string& globalIncludeFile() const { return globalIncludeFile_; }
+
 private:
     std::string mudlibRoot_ = "./mudlib_stub";
     std::string masterFile_ = "/master";
@@ -36,6 +49,7 @@ private:
     std::string includeDir_ = "secure/include";
     std::string simulEfunFile_ = "";
     std::string mudName_ = "AetherMUD";
+    std::string globalIncludeFile_ = "";
 
     std::unordered_map<std::string, std::string> raw_;
 };

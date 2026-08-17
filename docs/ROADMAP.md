@@ -1,7 +1,7 @@
-# AetherMUD — World-Class LPC Driver Roadmap
+# AetherMUD - World-Class LPC Driver Roadmap
 
 Goal: transform AetherMUD from a single-mudlib FluffOS-targeting driver into
-the best LPC runtime available — meeting or exceeding FluffOS, LDMud, and DGD
+the best LPC runtime available - meeting or exceeding FluffOS, LDMud, and DGD
 on their own terms and surpassing all three on the dimensions none of them
 addressed.
 
@@ -10,14 +10,14 @@ list for that subsystem. This file is the master sequencing reference.
 
 ---
 
-## Phase 0 — Stabilize the current base
+## Phase 0 - Stabilize the current base
 
 **Prerequisite for everything else. Do not start Phase 1 until Phase 0 is
 complete and the full test suite is passing with no regressions.**
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
-| 0.1 | `throw()` efun — carry a Value to the nearest `catch()` | `src/efun` | [x] |
+| 0.1 | `throw()` efun - carry a Value to the nearest `catch()` | `src/efun` | [x] |
 | 0.2 | `sscanf` full format set: `%f`, `%x`, `%(regexp)`, adjacent `%s` | `src/efun` | [x] (partial: `%(regexp)` still pending; 0.11's PCRE2 wrapper it depended on is now done) |
 | 0.3 | `sprintf` `%*` dynamic field width | `src/efun` | [x] |
 | 0.4 | `set_eval_limit` as a real accumulated-cost model (not no-op) | `src/vm` | [x] |
@@ -29,13 +29,14 @@ complete and the full test suite is passing with no regressions.**
 | 0.10 | `socket_*` family basics (create/connect/write/read/close) | `src/net` + `src/efun` | [x] (partial: STREAM/DATAGRAM only, no MUD mode or binary modes; no `socket_read` efun -- real FluffOS has none, reads are callback-only) |
 | 0.11 | `regexp`/`regexplode`/`reg_assoc` PCRE efuns | `src/efun` | [x] |
 | 0.12 | Every efun has at least one regression test | `tests` | [x] (audited 2026-08-20: all 167 then-registered efuns confirmed covered; a moving target as 0.13 grows the table, each new efun needs its own test at the time it's added) |
-| 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: 167 registered) |
+| 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [ ] (in progress: 179 registered) |
+| 0.14 | `global include file` config support (auto-`#include` prepended to every compiled object) | `src/config` + `src/object` | [ ] |
 
 ---
 
-## Phase 1 — Dialect universality
+## Phase 1 - Dialect universality
 
-**Goal: one binary, three dialects — FluffOS/MudOS, LDMud, DGD.**
+**Goal: one binary, three dialects - FluffOS/MudOS, LDMud, DGD.**
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
@@ -58,11 +59,11 @@ complete and the full test suite is passing with no regressions.**
 
 ---
 
-## Phase 2 — Architecture differentiation
+## Phase 2 - Architecture differentiation
 
 **Goal: surpass all three drivers on the dimensions none of them addressed.**
 
-### 2a — Persistence
+### 2a - Persistence
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
@@ -71,16 +72,16 @@ complete and the full test suite is passing with no regressions.**
 | 2.3 | Hotboot: fd-passing exec into new binary without dropping connections | `src/persist` + `src/net` | [ ] |
 | 2.4 | Dual persistence: per-object `save_object` AND world snapshot coexist | `src/persist` + `src/efun` | [ ] |
 
-### 2b — Concurrency
+### 2b - Concurrency
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
 | 2.5 | C++20 coroutine scheduler: cooperative suspend/resume of LPC tasks | `src/scheduler` | [ ] |
 | 2.6 | LPC `async`/`await` keyword pair backed by coroutine scheduler | `src/compiler` + `src/vm` + `src/scheduler` | [ ] |
-| 2.7 | `call_out_future(delay)` — awaitable call_out | `src/efun` + `src/scheduler` | [ ] |
+| 2.7 | `call_out_future(delay)` - awaitable call_out | `src/efun` + `src/scheduler` | [ ] |
 | 2.8 | Open Hydra: speculative parallel tasks on disjoint object graphs | `src/scheduler` | [ ] |
 
-### 2c — Apply cache + JIT
+### 2c - Apply cache + JIT
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
@@ -88,11 +89,11 @@ complete and the full test suite is passing with no regressions.**
 | 2.10 | Closure bake-at-construction: resolve `FP_*` kind + index at bind time | `src/vm` + `src/compiler` | [ ] |
 | 2.11 | LLVM JIT backend: compile hot bytecode functions to native via LLVM IR | `src/jit` | [ ] |
 
-### 2d — Efun breadth beyond FluffOS
+### 2d - Efun breadth beyond FluffOS
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
-| 2.12 | Full PCRE regexp suite (already started in Phase 0 — extend) | `src/efun` | [ ] |
+| 2.12 | Full PCRE regexp suite (already started in Phase 0 - extend) | `src/efun` | [ ] |
 | 2.13 | TLS support (OpenSSL/BoringSSL) for game + MXP/WebSocket | `src/net` | [ ] |
 | 2.14 | WebSocket framing on top of TLS | `src/net` | [ ] |
 | 2.15 | SQLite built-in: `db_connect`/`db_exec`/`db_fetch`/`db_close` efuns | `src/efun` | [ ] |
@@ -100,7 +101,7 @@ complete and the full test suite is passing with no regressions.**
 | 2.17 | `json_encode`/`json_decode` efun pair | `src/efun` | [ ] |
 | 2.18 | `http_get`/`http_post` async efuns (non-blocking, via async scheduler) | `src/efun` + `src/scheduler` | [ ] |
 
-### 2e — Developer experience
+### 2e - Developer experience
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
@@ -111,7 +112,7 @@ complete and the full test suite is passing with no regressions.**
 
 ---
 
-## Phase 3 — Production hardening
+## Phase 3 - Production hardening
 
 | # | Task | Directory | Status |
 |---|------|-----------|--------|

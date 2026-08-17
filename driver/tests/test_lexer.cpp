@@ -2299,7 +2299,14 @@ struct ObjectVarHarness {
     lpcdriver::ObjectManager objects;
     lpcdriver::VM vm;
 
-    ObjectVarHarness() : objects(config), vm(objects, config) {
+    // extraConfigLines: raw "key: value\n" lines appended after the
+    // fixed defaults below, for the rare test that needs a config key
+    // none of the other ~500 tests using this same harness do (e.g.
+    // "global_include_file: <name.h>\n") -- empty by default, so every
+    // existing call site (ObjectVarHarness() with no arguments) is
+    // completely unaffected.
+    explicit ObjectVarHarness(const std::string& extraConfigLines = "")
+        : objects(config), vm(objects, config) {
         objects.setVM(&vm);
 
         char dirTemplate[] = "/tmp/lpcdriver_objvar_test_XXXXXX";
@@ -2316,6 +2323,7 @@ struct ObjectVarHarness {
         // Harmless when unused: only takes effect if a test explicitly
         // writes "/simul_efun.c" and calls objects.loadSimulEfunObject().
         cfg << "simul_efun_file: /simul_efun\n";
+        cfg << extraConfigLines;
         cfg.close();
 
         bool loaded = config.loadFromFile(cfgPath);
@@ -7062,6 +7070,72 @@ static void testFlushMessagesIsANoOpThatNeverThrowsForEitherObjectKind() {
 
     ::close(fds[1]);
     std::cout << "testFlushMessagesIsANoOpThatNeverThrowsForEitherObjectKind OK\n";
+}
+
+// ROADMAP row 0.14: "global include file" config support. Real lex.c's
+// own start_new_file(): "if (*GLOBAL_INCLUDE_FILE) { ...; handle_include
+// (gifile, 1); } else refill_buffer();" -- confirmed directly against
+// driver/reference/fluffos-2.9-ds2.08/lex.c before writing anything, not
+// assumed. MY_QUAL mirrors real Lil's own inherit/base.c shape exactly
+// (a bare macro, defined only in an auto-included header, used as an
+// object-variable modifier immediately before a real type keyword) --
+// the same real bug this row exists to close.
+
+static void testGlobalIncludeFileMacroResolvesWhenConfigured() {
+    ObjectVarHarness harness("global_include_file: <auto.h>\n");
+    harness.writeFile("/auto.h", "#define MY_QUAL static\n");
+    harness.writeFile("/gif_on.c",
+        "MY_QUAL int counter = 42;\n"
+        "int get_counter() { return counter; }\n");
+
+    auto ob = harness.objects.cloneObject("/gif_on");
+    assert(ob != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(ob, "get_counter", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 42);
+
+    std::cout << "testGlobalIncludeFileMacroResolvesWhenConfigured OK\n";
+}
+
+static void testGlobalIncludeFileMacroUnresolvedWhenNotConfigured() {
+    // Same MY_QUAL-dependent fixture, but the harness never sets
+    // global_include_file (its own established default, matching every
+    // other test in this file) -- MY_QUAL is genuinely undefined here,
+    // and this compile must fail the exact same way real Lil's own
+    // inherit/base.c failed against this driver before this row: an
+    // unrecognized bare identifier immediately before a real type
+    // keyword is parsed as the "type omitted" declaration shape (the
+    // identifier itself becomes the variable's own name), leaving the
+    // real type token stranded and triggering a clean parse error, not
+    // a crash.
+    ObjectVarHarness harness;
+    harness.writeFile("/gif_off.c",
+        "MY_QUAL int counter = 42;\n"
+        "int get_counter() { return counter; }\n");
+
+    auto ob = harness.objects.cloneObject("/gif_off");
+    assert(ob == nullptr);
+
+    std::cout << "testGlobalIncludeFileMacroUnresolvedWhenNotConfigured OK\n";
+}
+
+static void testGlobalIncludeFileIsANoOpForMudlibsThatNeverSetIt() {
+    // The default (unset) case must not alter compilation for a mudlib
+    // with no dependency on the feature at all -- true no-op, matching
+    // real "if (*GLOBAL_INCLUDE_FILE) ... else refill_buffer();"'s own
+    // else branch (nothing extra happens). This repo's own bundled Rifts
+    // mudlib and mudlib_stub both fall in this category: neither sets
+    // global_include_file, so this is exactly their own real-world path.
+    ObjectVarHarness harness;
+    harness.writeFile("/gif_unused.c",
+        "int probe() { return 7; }\n");
+
+    auto ob = harness.objects.cloneObject("/gif_unused");
+    assert(ob != nullptr);
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<int64_t>(result.data) == 7);
+
+    std::cout << "testGlobalIncludeFileIsANoOpForMudlibsThatNeverSetIt OK\n";
 }
 
 static void testSqrtNegativeArgThrows() {
@@ -13622,6 +13696,9 @@ int main() {
     testSocketAddressForHandleDistinguishesLocalFromRemote();
     testQueryHostNameMatchesRealGethostname();
     testFlushMessagesIsANoOpThatNeverThrowsForEitherObjectKind();
+    testGlobalIncludeFileMacroResolvesWhenConfigured();
+    testGlobalIncludeFileMacroUnresolvedWhenNotConfigured();
+    testGlobalIncludeFileIsANoOpForMudlibsThatNeverSetIt();
     testSqrtNegativeArgThrows();
     testRegexpBasicMatchReturnsOneAndNoMatchReturnsZero();
     testRegexpThirdArgIllegalForStringFormThrows();

@@ -38,6 +38,7 @@ bool Config::loadFromFile(const std::string& path) {
         else if (key == "include_dir") includeDir_ = val;
         else if (key == "simul_efun_file") simulEfunFile_ = val;
         else if (key == "mud_name") mudName_ = val;
+        else if (key == "global_include_file") globalIncludeFile_ = val;
     }
     return true;
 }

@@ -227,8 +227,35 @@ struct StagedSource {
 // source file, not the temp path -- otherwise this driver's own
 // compile-error messages (and any manual line-marker unwinding) would
 // point at a throwaway /tmp file instead of the real one.
+//
+// globalIncludeFile (real FluffOS/MudOS's own "global include file"
+// runtime config option, ROADMAP row 0.14): when non-empty, an
+// "#include " line built from it is emitted first, ahead of the real
+// file's own content -- matching real lex.c's own start_new_file()
+// exactly: "if (*GLOBAL_INCLUDE_FILE) { ...; handle_include(gifile, 1);
+// } else refill_buffer();" runs before a single byte of the object's
+// own real source is read, for every compiled object, no exceptions.
+// The configured value is used verbatim, delimiters included (real
+// GLOBAL_INCLUDE_FILE already stores the raw config text with its own
+// leading '"'/'<' -- confirmed directly against handle_include()'s own
+// "delim = *name++ == '\"' ? '\"' : '>';", which derives the include
+// style from the value's own first character, not a separate flag), so
+// a driver.cfg entry of "global_include_file: <config.h>" or
+// "global_include_file: \"/some/header.h\"" both work exactly as
+// configured. The include line's own "# 1 \"originalPath\"" marker is
+// emitted *after* it, not before -- cpp's own line-tracking naturally
+// attributes anything the auto-included header itself does to that
+// header's own file, and once it returns, this second marker resets
+// numbering back to a clean line 1 for the real object's own content,
+// so a compile error inside the object itself still reports the exact
+// real line number, undisturbed by the extra line this injects ahead
+// of it. Also run through rewriteAbsoluteIncludes() (same as the real
+// file's own body just below) so an absolute-quoted-path form gets the
+// identical mudlib-root rewrite every other #include in this driver
+// already gets, rather than a second, divergent code path.
 StagedSource stageSourceForPreprocessing(const std::string& originalPath,
-                                          const std::string& mudlibRoot) {
+                                          const std::string& mudlibRoot,
+                                          const std::string& globalIncludeFile) {
     StagedSource result;
 
     std::ifstream f(originalPath);
@@ -240,8 +267,13 @@ StagedSource stageSourceForPreprocessing(const std::string& originalPath,
     buf << f.rdbuf();
     f.close();
 
-    std::string rewritten =
-        "# 1 \"" + originalPath + "\"\n" + rewriteAbsoluteIncludes(buf.str(), mudlibRoot);
+    std::string prefix;
+    if (!globalIncludeFile.empty()) {
+        prefix = rewriteAbsoluteIncludes("#include " + globalIncludeFile + "\n", mudlibRoot);
+    }
+
+    std::string rewritten = prefix + "# 1 \"" + originalPath + "\"\n" +
+        rewriteAbsoluteIncludes(buf.str(), mudlibRoot);
 
     char tmpPathTemplate[] = "/tmp/lpcdriver_src_XXXXXX";
     int fd = mkstemp(tmpPathTemplate);
@@ -412,7 +444,8 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
 
     std::vector<std::string> includeDirs = splitIncludeDirs(config_.includeDir(), config_.mudlibRoot());
 
-    StagedSource staged = stageSourceForPreprocessing(path, config_.mudlibRoot());
+    StagedSource staged =
+        stageSourceForPreprocessing(path, config_.mudlibRoot(), config_.globalIncludeFile());
     if (!staged.ok) {
         std::cerr << "[object] " << staged.errorMessage << "\n";
         return nullptr;
