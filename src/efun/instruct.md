@@ -484,6 +484,44 @@ capability that does not exist yet) -- deferred rather than built
 speculatively against nothing real to validate against; the full real
 sequence above is recorded here so it does not need rediscovering.
 
+**Tier 1, seventh pass (2026-08-22):** `query_num` (real,
+`packages/contrib.c`) was the one remaining gap name never individually
+checked before -- carried forward across several passes only as "same
+large-algorithm category as `pluralize`," never actually read or
+call-site-verified on its own. Its own one real hit
+(`dead-souls/lib/secure/sefun/english.c`) needed the same false-positive
+diligence `set_author`'s own false hit needed the prior pass, since that
+exact file already shadows `pluralize()` too -- but checked out
+genuinely, deliberately real: `"#ifndef __FLUFFOS__ ... #else ...
+query_num(x) ... #endif"`, Dead Souls' own explicit "prefer the driver's
+real efun when it has one" branch, and this driver's compiler does
+define `__FLUFFOS__` (`ObjectManager.cpp`). Also resolved a real
+`efun_defs.c`-vs-real-callable-arity discrepancy before implementing:
+the generated table's own `2,2` looked like both arguments are required,
+which would make the real 1-arg call site invalid -- checked
+`packages/contrib_spec.c` directly and found the real
+`"int default:0"`, confirming the generated table shows post-default
+arity, not the real minimum (same trap this row's own `set_eval_limit()`
+fix already flagged once). Implemented as a faithful, line-by-line port
+of the real ~90-line body (see STATUS.md's own entry for the full
+derivation, including a genuine dead-code table slot kept as-is rather
+than trimmed).
+
+With this, every remaining name in the six-corpus ranking with real
+call-site weight is accounted for -- shadowed simul_efuns, architecture
+mismatches (buffer/reflection/driver-internal-dump families,
+`get_char`/`ed`, `resolve`), unverifiable no-body efuns (`debug_info`),
+or one of three real items intentionally left for their own dedicated
+sessions (`origin`, the real `parse_*` package, `reload_object`). Only
+0-call-site names remain unaccounted for from here -- whoever runs the
+next pass should expect the ranking's top rows to stay unchanged unless
+one of those three dedicated-session items gets taken on, and should
+look to the 0-weight tail (already individually surveyed in earlier
+passes: the VRML-pose family, `zonetime`/`is_daylight_savings_time`,
+`request_term_type`/`act_mxp`/`has_mxp`, `program_info`/
+`memory_summary`/`store_class_member`) only for anything a fresh read
+might have missed, not expect new real demand to appear there.
+
 **Tier 2 (medium effort), corrected:** `query_actions` removed (not a
 real efun name, see `commands`'s own row above). Everything else in the
 first pass's Tier 2 list is now done: `add_action`, `remove_action`,

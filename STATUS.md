@@ -3,6 +3,79 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): `query_num` implemented, the last real
+call-site-bearing item this row's six-corpus ranking still had left --
+everything else with real weight is now a previously-documented
+exclusion or dedicated-session deferral (Phase 0 row 0.13: 232
+registered, up from 231).** Re-ran the six-corpus ranking; unchanged in
+shape from the last several passes. `query_num` was the one real name
+never individually checked before -- previously only carried forward
+under "same large-algorithm category as `pluralize`," never actually
+read or call-site-verified on its own. Its own one raw hit
+(`dead-souls/lib/secure/sefun/english.c`) needed the same false-positive
+diligence `set_author` needed last session, since that exact same file
+already defines its own `pluralize()` shadowing the core efun -- but
+this one checked out genuinely real and, better than merely real,
+*deliberately* real: the call sits inside `"#ifndef __FLUFFOS__ ...
+#else string cardinal(int x){ ...; return sign+query_num(x); } #endif"`,
+Dead Souls' own explicit "prefer the driver's real efun over my own
+70-line hand-rolled fallback, when the driver actually has one" branch
+-- and confirmed this driver's own compiler genuinely defines
+`__FLUFFOS__` (`ObjectManager.cpp`'s preprocessor macro table), so this
+driver takes exactly that branch. Also resolved a real spec discrepancy
+before writing anything: `efun_defs.c`'s own raw arity field reads
+`2,2` (both arguments required), which would make the real 1-argument
+call site (`query_num(x)`, no explicit limit) invalid -- checked
+`packages/contrib_spec.c` directly rather than trusting the generated
+table alone and found the real default there, `"int default:0"`,
+confirming `efun_defs.c`'s numeric fields are the post-default-expansion
+arity, not the real callable minimum, the same category of trap this
+row's own `set_eval_limit()` fix already flagged once before.
+
+Ported the real ~90-line `query_num()`/`number_as_string()`
+(`packages/contrib.c`) mechanically, line by line, not from general
+English-number-formatting knowledge: units/teens/tens-with-optional-
+dash, then hundreds, then thousands, each stage's own real assembly
+quirks kept exactly as read rather than "cleaned up" -- a hundreds
+group gets a leading comma only when a thousands group already
+contributed (otherwise no separator at all), the final units group gets
+a leading "and" whenever anything higher-order did, a round hundred or
+thousand short-circuits before ever reaching the next lower stage
+instead of appending an empty tail, and `hi[1]` in the real tens-word
+table is genuine dead code (n/10 == 1 only ever happens for n in
+[10,19], already handled by the teens branch above it) kept as-is
+rather than trimmed. Ceiling behavior ported exactly too: "many" past a
+hard 99999, past an optional caller-supplied limit, or for a negative n
+-- the limit argument's own real default (0, meaning "no ceiling below
+99999") resolved from `contrib_spec.c` above.
+
+1 new test function (`test/test_lexer.cpp`), checking a representative
+slice through every stage of the real assembly (round vs dashed tens,
+a hundreds group with and without a trailing units group, a thousands
+group with and without a trailing hundreds group, the comma-vs-no-comma
+distinction, the 99999 ceiling and an explicit lower one, and a
+negative input) rather than exhaustive random-number testing -- passed
+on the first real run, every hand-derived trace correct. Full suite:
+569 tests passing, up from 568 before this session, no regressions,
+stable across three consecutive runs plus a full `ctest` pass.
+
+With this, the six-corpus ranking's entire real-call-site-bearing
+remainder is now accounted for: `translate`/`event` (shadowed
+simul_efuns), the buffer family (`TYPE_BUFFER` architecture mismatch),
+the reflection family (`variables`/`functions`/etc., unverifiable, no
+reference implementation exists), the driver-internal-dump family
+(`mud_status`/`cache_stats`/etc., architecture mismatch), `get_char`/`ed`
+(missing raw-input/editor infrastructure), `resolve` (missing async
+address-server infrastructure), `debug_info` (unverifiable), and three
+real, substantial items intentionally left for their own dedicated
+sessions rather than rushed into a shared batch: `origin()` (per-call
+origin tagging through the whole VM, with a documented `CallEfun`/
+`call_other` conflation seam), the real `parse_*` parser package
+(`packages/parser.c`, 3419 lines), and `reload_object()` (fully
+implementable, needs one new `SocketRegistry` capability, zero real
+call sites to validate against). Only 0-call-site names remain
+unaccounted for from here.
+
 **2026-08-22 (continued): a real implementation bug caught by its own
 test rather than shipped, 4 more efuns implemented, most of the
 remaining ranked gap resolved into concrete excluded/deferred

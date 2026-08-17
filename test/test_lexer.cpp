@@ -15675,6 +15675,68 @@ static void testReplaceableTrueOnlyWhenEveryLocalFunctionIsIgnorable() {
     std::cout << "testReplaceableTrueOnlyWhenEveryLocalFunctionIsIgnorable OK\n";
 }
 
+// query_num(): a mechanical port of packages/contrib.c's real
+// query_num()/number_as_string() (~90 lines), verified against a
+// representative slice covering every stage of the real assembly order
+// (units, teens, dashed and round tens, hundreds with and without a
+// trailing units group, thousands with and without a trailing hundreds
+// group, the comma-vs-no-comma distinction between a hundreds group
+// that followed thousands and one that didn't, the "many" ceiling at
+// 99999 and at an explicit lower limit, and a negative n) rather than
+// exhaustively random-number testing.
+static void testQueryNumMatchesRealAssemblyOrderAcrossRepresentativeInputsAndLimits() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qn_probe.c",
+        "string p(int n) { return query_num(n); }\n"
+        "string p_limit(int n, int limit) { return query_num(n, limit); }\n");
+    auto probe = harness.objects.cloneObject("/qn_probe");
+    assert(probe != nullptr);
+
+    auto p = [&](int64_t n) -> std::string {
+        amlp::Value r = harness.vm.callFunction(probe, "p", {amlp::Value(n)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+    auto pLimit = [&](int64_t n, int64_t limit) -> std::string {
+        amlp::Value r = harness.vm.callFunction(probe, "p_limit",
+            {amlp::Value(n), amlp::Value(limit)});
+        assert(std::holds_alternative<std::string>(r.data));
+        return std::get<std::string>(r.data);
+    };
+
+    assert(p(0) == "zero");
+    assert(p(5) == "five");
+    assert(p(15) == "fifteen");
+    assert(p(20) == "twenty");           // round ten: no trailing dash
+    assert(p(21) == "twenty-one");       // dashed ten
+    assert(p(100) == "one hundred");     // round hundred: no trailing units
+    assert(p(105) == "one hundred and five");
+    assert(p(1000) == "one thousand");   // round thousand: no trailing hundreds
+    // Thousands with a round-hundred remainder: real assembly still
+    // inserts "and" (from the thousands-then-hundreds "changed" branch),
+    // not a comma, since the hundreds group itself has no further units.
+    assert(p(1500) == "one thousand and five hundred");
+    // Thousands with a non-round-hundred remainder: a comma before the
+    // hundreds group, then "and" before the final units group.
+    assert(p(1250) == "one thousand, two hundred and fifty");
+    // Upper boundary, inclusive -- exercises every assembly stage at
+    // once (thousands, comma, hundreds, "and", dashed units).
+    assert(p(99999) == "ninety-nine thousand, nine hundred and ninety-nine");
+
+    // Past the real 99999 ceiling, or negative: "many" regardless of an
+    // explicit limit.
+    assert(p(100000) == "many");
+    assert(p(-5) == "many");
+
+    // Explicit limit: "many" once n exceeds it, a real conversion
+    // otherwise -- and the default (1-arg form, limit 0) never applies
+    // a ceiling below 99999 at all, already exercised by p(99999) above.
+    assert(pLimit(50, 10) == "many");
+    assert(pLimit(5, 10) == "five");
+
+    std::cout << "testQueryNumMatchesRealAssemblyOrderAcrossRepresentativeInputsAndLimits OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -16250,6 +16312,7 @@ int main() {
     testNumClassesAlwaysReturnsZeroSinceClassDeclarationsDoNotExist();
     testSetAuthorAcceptsStringReturnsVoidAndThrowsOnWrongType();
     testReplaceableTrueOnlyWhenEveryLocalFunctionIsIgnorable();
+    testQueryNumMatchesRealAssemblyOrderAcrossRepresentativeInputsAndLimits();
     std::cout << "all tests passed\n";
     return 0;
 }
