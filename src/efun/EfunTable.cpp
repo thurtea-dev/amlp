@@ -671,6 +671,275 @@ bool regexFindNext(pcre2_code* code, const std::string& subject, size_t byteOffs
     return found;
 }
 
+// Backs pluralize() below. Real strcasecmp(): a full-string,
+// case-insensitive equality check, not a prefix match.
+bool ciEquals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Mechanical, line-by-line port of packages/contrib.c's real pluralize()
+// (fluffos-2.9-ds2.08, ~440 lines: exception switch on the last word's
+// first letter, general suffix rules on its last letter, then chop-and-
+// append assembly) -- not a reimplementation from general English
+// pluralization knowledge. std::nullopt matches real "if (!sz) return 0"
+// (empty input).
+std::optional<std::string> pluralizeWord(const std::string& str) {
+    if (str.empty()) return std::nullopt;
+
+    // "X of Y" -> only pluralize X, the " of Y" tail rides along verbatim.
+    std::string ofSuffix;
+    size_t xLen = str.size();
+    if (auto pos = str.find(" of "); pos != std::string::npos) {
+        ofSuffix = str.substr(pos);
+        xLen = pos;
+    }
+
+    // Strip a leading "a "/"an " determiner (real code checks 'a'/'A'
+    // only, never "the"). Bounded to the X-part (xLen) here, unlike the
+    // real C body's own str[1]/str[2] reads against the full unbounded
+    // buffer -- that only differs from this bounded version for a
+    // degenerate X-part shorter than the determiner itself (e.g. the
+    // literal input "a of thing"), where the real C code's own plen
+    // computation goes negative: undefined behavior in the original, not
+    // a portable behavior to replicate, and not a shape any real call
+    // site across this row's six corpora ever produces.
+    std::string pre;
+    if (xLen > 0 && (str[0] == 'a' || str[0] == 'A')) {
+        if (xLen > 1 && str[1] == ' ') {
+            pre = str.substr(2, xLen - 2);
+        } else if (xLen > 2 && str[1] == 'n' && str[2] == ' ') {
+            pre = str.substr(3, xLen - 3);
+        } else {
+            pre = str.substr(0, xLen);
+        }
+    } else {
+        pre = str.substr(0, xLen);
+    }
+
+    // Only the last word is actually pluralized -- "lose adjectives".
+    std::string rel = pre;
+    if (auto sp = pre.rfind(' '); sp != std::string::npos) rel = pre.substr(sp + 1);
+
+    bool same = false;
+    bool found = false;
+    int chop = 0;
+    std::string suffix = "s";
+
+    if (!rel.empty()) {
+        std::string rest = rel.substr(1);
+        switch (rel[0]) {
+        case 'A': case 'a':
+            if (ciEquals(rest, "re")) { chop = 3; suffix = "is"; found = true; }
+            break;
+        case 'B': case 'b':
+            if (ciEquals(rest, "us")) { suffix = "es"; found = true; break; }
+            if (ciEquals(rest, "onus")) { suffix = "es"; found = true; }
+            break;
+        case 'C': case 'c':
+            if (ciEquals(rest, "hild")) { suffix = "ren"; found = true; break; }
+            if (ciEquals(rest, "liff")) { suffix = "s"; found = true; }
+            break;
+        case 'D': case 'd':
+            if (ciEquals(rest, "atum")) { chop = 2; suffix = "a"; found = true; break; }
+            if (ciEquals(rest, "ie")) { chop = 1; suffix = "ce"; found = true; break; }
+            if (ciEquals(rest, "eer")) { same = true; found = true; break; }
+            if (ciEquals(rest, "o")) { suffix = "es"; found = true; break; }
+            if (ciEquals(rest, "ynamo")) { found = true; }
+            break;
+        case 'F': case 'f':
+            if (ciEquals(rest, "oot")) { chop = 3; suffix = "eet"; found = true; break; }
+            if (ciEquals(rest, "ish")) { same = true; found = true; break; }
+            if (ciEquals(rest, "orum")) { chop = 2; suffix = "a"; found = true; break; }
+            if (ciEquals(rest, "ife")) { found = true; }
+            break;
+        case 'G': case 'g':
+            if (ciEquals(rest, "oose")) { chop = 4; suffix = "eese"; found = true; break; }
+            if (ciEquals(rest, "o")) { suffix = "es"; found = true; break; }
+            if (ciEquals(rest, "um")) { found = true; break; }
+            if (ciEquals(rest, "iraffe")) { suffix = "s"; found = true; }
+            break;
+        case 'H': case 'h':
+            if (ciEquals(rest, "uman")) { found = true; break; }
+            if (ciEquals(rest, "ave")) { chop = 2; suffix = "s"; found = true; }
+            break;
+        case 'I': case 'i':
+            if (ciEquals(rest, "ndex")) { chop = 2; suffix = "ices"; found = true; }
+            break;
+        case 'L': case 'l':
+            if (ciEquals(rest, "ouse")) { chop = 4; suffix = "ice"; found = true; break; }
+            if (ciEquals(rest, "otus")) { found = true; }
+            break;
+        case 'M': case 'm':
+            if (ciEquals(rest, "ackerel")) { same = true; found = true; break; }
+            if (ciEquals(rest, "oose")) { same = true; found = true; break; }
+            if (ciEquals(rest, "ouse")) { chop = 4; suffix = "ice"; found = true; break; }
+            if (ciEquals(rest, "atrix")) { chop = 1; suffix = "ces"; found = true; }
+            break;
+        case 'O': case 'o':
+            if (ciEquals(rest, "x")) { suffix = "en"; found = true; }
+            break;
+        case 'P': case 'p':
+            if (ciEquals(rest, "ants")) { same = true; found = true; }
+            break;
+        case 'Q': case 'q':
+            if (ciEquals(rest, "uaff")) { found = true; }
+            break;
+        case 'R': case 'r':
+            if (ciEquals(rest, "oof")) { found = true; }
+            break;
+        case 'S': case 's':
+            if (ciEquals(rest, "niff")) { found = true; break; }
+            if (ciEquals(rest, "heep")) { same = true; found = true; break; }
+            if (ciEquals(rest, "phinx")) { chop = 1; suffix = "ges"; found = true; break; }
+            if (ciEquals(rest, "taff")) { chop = 2; suffix = "ves"; found = true; break; }
+            if (ciEquals(rest, "afe")) { found = true; break; }
+            if (ciEquals(rest, "haman")) { found = true; }
+            break;
+        case 'T': case 't':
+            if (ciEquals(rest, "hief")) { chop = 1; suffix = "ves"; found = true; break; }
+            if (ciEquals(rest, "ooth")) { chop = 4; suffix = "eeth"; found = true; break; }
+            if (ciEquals(rest, "alisman")) { suffix = "s"; found = true; }
+            break;
+        case 'V': case 'v':
+            if (ciEquals(rest, "ax")) { suffix = "en"; found = true; break; }
+            if (ciEquals(rest, "irus")) { suffix = "es"; found = true; }
+            break;
+        case 'W': case 'w':
+            if (ciEquals(rest, "as")) { chop = 2; suffix = "ere"; found = true; }
+            break;
+        default:
+            break;
+        }
+    }
+
+    // General suffix rules on the last letter -- only when no exception
+    // above already matched, and pre is non-empty.
+    if (!found && !pre.empty()) {
+        size_t len = pre.size();
+        char last = pre[len - 1];
+        char c2 = len > 1 ? pre[len - 2] : '\0';
+        char c3 = len > 2 ? pre[len - 3] : '\0';
+        switch (last) {
+        case 'E': case 'e':
+            if (len > 1 && (c2 == 'f' || c2 == 'F')) { chop = 2; suffix = "ves"; }
+            break;
+        case 'F': case 'f':
+            if (len > 1 && (c2 == 'e' || c2 == 'E')) break;
+            chop = 1;
+            if (len > 1 && (c2 == 'f' || c2 == 'F')) chop++;
+            suffix = "ves";
+            break;
+        case 'H': case 'h':
+            if (len > 1 && (c2 == 'c' || c2 == 's')) suffix = "es";
+            break;
+        case 'N': case 'n':
+            if (len > 2 && c2 == 'a' && c3 == 'm') { chop = 3; suffix = "men"; }
+            break;
+        case 'O': case 'o':
+            if (len > 1 && c2 != 'o') suffix = "es";
+            break;
+        case 'S': case 's':
+            if (len > 1 && c2 == 'i') { chop = 2; suffix = "es"; break; }
+            if (len > 1 && c2 == 'u') { chop = 2; suffix = "i"; break; }
+            if (len > 1 && (c2 == 'a' || c2 == 'e' || c2 == 'o')) suffix = "ses";
+            else suffix = "es";
+            break;
+        case 'X': case 'x':
+            suffix = "es";
+            break;
+        case 'Y': case 'y':
+            if (len > 1 && c2 != 'a' && c2 != 'e' && c2 != 'i' && c2 != 'o' && c2 != 'u') {
+                chop = 1; suffix = "ies";
+            }
+            break;
+        case 'Z': case 'z':
+            if (len > 1 && (c2 == 'a' || c2 == 'e' || c2 == 'o' || c2 == 'i' || c2 == 'u')) {
+                suffix = "zes";
+            } else {
+                suffix = "es";
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (same) return pre + ofSuffix;
+
+    std::string base = pre;
+    if (chop > 0 && static_cast<size_t>(chop) <= base.size()) {
+        base = base.substr(0, base.size() - static_cast<size_t>(chop));
+    }
+    return base + suffix + ofSuffix;
+}
+
+// Backs reclaim_objects() below. Recursively walks a Value in place,
+// rewriting any reference to a now-destructed LpcObject to a plain int
+// 0 -- the same self-healing coercion VM.cpp's own coerceIfDestructed()
+// already applies lazily, one read at a time, at PushLocal/
+// PushObjectVar/Index (see that function's own comment); this instead
+// runs eagerly across an entire value graph, matching real
+// reclaim.c's own check_svalue()/gc_mapping() recursion (array/mapping/
+// closure-bound-args), not just this driver's four existing lazy read
+// points. A mapping whose own *key* is a destructed object reference is
+// a special case, matched exactly against real gc_mapping(): the whole
+// entry is erased (real map_delete()), not rewritten to a 0 key --
+// unlike this driver's Mapping (a plain vector<pair>, so an in-place key
+// rewrite would risk colliding with an already-present real 0 key,
+// which real FluffOS's own hash table structurally cannot produce
+// either). depth mirrors real check_svalue()'s own MAX_RECURSION (25)
+// guard against a pathological self-referential array/mapping.
+int reclaimSweepValue(Value& v, int depth) {
+    if (depth > 25) return 0;
+    if (auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&v.data)) {
+        if (*obPtr && (*obPtr)->isDestructed()) {
+            v = Value(int64_t{0});
+            return 1;
+        }
+        return 0;
+    }
+    if (auto* arrPtr = std::get_if<std::shared_ptr<Array>>(&v.data)) {
+        int cleaned = 0;
+        if (*arrPtr) {
+            for (auto& item : (*arrPtr)->items) cleaned += reclaimSweepValue(item, depth + 1);
+        }
+        return cleaned;
+    }
+    if (auto* mapPtr = std::get_if<std::shared_ptr<Mapping>>(&v.data)) {
+        int cleaned = 0;
+        if (*mapPtr) {
+            auto& entries = (*mapPtr)->entries;
+            for (size_t i = 0; i < entries.size();) {
+                auto* keyOb = std::get_if<std::shared_ptr<LpcObject>>(&entries[i].first.data);
+                if (keyOb && *keyOb && (*keyOb)->isDestructed()) {
+                    entries.erase(entries.begin() + static_cast<long>(i));
+                    ++cleaned;
+                    continue;
+                }
+                cleaned += reclaimSweepValue(entries[i].first, depth + 1);
+                cleaned += reclaimSweepValue(entries[i].second, depth + 1);
+                ++i;
+            }
+        }
+        return cleaned;
+    }
+    if (auto* closPtr = std::get_if<std::shared_ptr<Closure>>(&v.data)) {
+        int cleaned = 0;
+        if (*closPtr) {
+            for (auto& arg : (*closPtr)->boundArgs) cleaned += reclaimSweepValue(arg, depth + 1);
+        }
+        return cleaned;
+    }
+    return 0;
+}
+
 } // namespace
 
 void registerCoreEfuns() {
@@ -975,6 +1244,75 @@ void registerCoreEfuns() {
             groups[groupIdx]->items.push_back(item);
         }
         for (auto& g : groups) result->items.emplace_back(g);
+        return Value(result);
+    });
+
+    // mapping unique_mapping(mixed *arr, string | function fun, mixed
+    // extra_args...) -- confirmed against mapping.c's own
+    // f_unique_mapping(): groups arr's elements by fun(element,
+    // extra_args...)'s result into `([ key: ({ matching elements }) ])`,
+    // same shape and same callback conventions unique_array/filter_array
+    // above already establish (a Closure called directly, or a string
+    // function name requiring an explicit object third argument -- this
+    // driver's own established simplification of real
+    // process_efun_callback()'s "defaults to current_object" convenience
+    // form, matching filter_array's own scoping exactly, confirmed the
+    // only shape any of this row's six corpora actually use: dead-souls'
+    // own verbs/items/{get,wield,unwield}.c call sites all pass a bare
+    // closure, no string form observed anywhere). Real group order comes
+    // from mapping.c's own reverse-linked-list hash bucket construction
+    // (traced directly: elements are walked backward through the array
+    // during bucketing, so each group's own indices end up collected
+    // highest-original-index first, and are then re-emitted in that same
+    // reversed order) and is not documented as contractual anywhere --
+    // same non-issue unique_array's own comment above already settles
+    // for the identical real ambiguity: this implementation orders both
+    // the mapping's own keys and each group's elements by first
+    // appearance instead, a different but equally valid deterministic
+    // order, flagged here rather than silently assumed to match.
+    t.registerEfun("unique_mapping", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("unique_mapping: expected an array first argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        auto result = std::make_shared<Mapping>();
+        if (!arr || arr->items.empty()) return Value(result);
+
+        auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data);
+        const std::string* funcName = std::get_if<std::string>(&args[1].data);
+        if (!closurePtr && !funcName) {
+            throw LpcRuntimeError("unique_mapping: expected a string or function second argument");
+        }
+        std::shared_ptr<LpcObject> target;
+        size_t extraStart = 2;
+        if (funcName) {
+            if (args.size() < 3 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
+                throw LpcRuntimeError("unique_mapping: string function name requires an object third argument");
+            }
+            target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
+            extraStart = 3;
+        }
+        std::vector<Value> extra(args.begin() + static_cast<long>(extraStart), args.end());
+
+        std::vector<std::shared_ptr<Array>> groups;
+        for (const auto& item : arr->items) {
+            std::vector<Value> callArgs;
+            callArgs.reserve(1 + extra.size());
+            callArgs.push_back(item);
+            callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+            Value key = closurePtr ? vm.callClosure(*closurePtr, std::move(callArgs))
+                                    : vm.callFunction(target, *funcName, std::move(callArgs));
+
+            size_t entryIdx = result->entries.size();
+            for (size_t i = 0; i < result->entries.size(); ++i) {
+                if (valuesEqual(result->entries[i].first, key)) { entryIdx = i; break; }
+            }
+            if (entryIdx == result->entries.size()) {
+                result->entries.emplace_back(key, Value(std::make_shared<Array>()));
+                groups.push_back(std::get<std::shared_ptr<Array>>(result->entries.back().second.data));
+            }
+            groups[entryIdx]->items.push_back(item);
+        }
         return Value(result);
     });
 
@@ -1593,6 +1931,18 @@ void registerCoreEfuns() {
             s[0] = static_cast<char>(s[0] - 'a' + 'A');
         }
         return Value(s);
+    });
+
+    // string pluralize(string) -- see pluralizeWord()'s own comment
+    // above for the full derivation. Real 0 (not an error) on an empty
+    // input string.
+    t.registerEfun("pluralize", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("pluralize: expected a string argument");
+        }
+        auto result = pluralizeWord(std::get<std::string>(args[0].data));
+        if (!result) return Value(int64_t{0});
+        return Value(*result);
     });
 
     // string sprintf(string fmt, mixed args...) -- real FluffOS's
@@ -3563,6 +3913,27 @@ void registerCoreEfuns() {
         return Value{};
     });
 
+    // mixed query_notify_fail() -- real packages/contrib.c's own
+    // f_query_notify_fail(): "if (command_giver && command_giver->
+    // interactive)", the same guard notify_fail() above uses, then
+    // returns whatever is currently sitting in default_err_message (this
+    // driver's own pendingNotifyFail_) without consuming it -- a plain
+    // peek, not the one-shot take notify_no_command()'s own dispatch
+    // path uses (Server::dispatchLine() -> Connection::
+    // takePendingNotifyFail(), unaffected by this efun since it never
+    // runs). Returns 0 (real push_number(0)) when there is no
+    // interactive command_giver or nothing pending.
+    t.registerEfun("query_notify_fail", [](VM& vm, std::vector<Value>&) -> Value {
+        auto giver = resolveCommandGiver(vm);
+        if (!giver) return Value(int64_t{0});
+        if (Connection* conn = InteractiveRegistry::find(giver)) {
+            if (const auto& pending = conn->peekPendingNotifyFail(); pending.has_value()) {
+                return *pending;
+            }
+        }
+        return Value(int64_t{0});
+    });
+
     // int exec(object new_ob, object old_ob) -- real replace_interactive()
     // (efuns_main.c's f_exec(): "replace_interactive((sp-1)->u.ob,
     // sp->u.ob)"): rebinds the interactive connection currently driving
@@ -4201,6 +4572,27 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(conn->terminalHeight()));
     });
 
+    // void request_term_size() -- real comm.c's own f_request_term_size():
+    // "add_binary_message(command_giver, telnet_do_naws, ...)", a bare IAC
+    // DO NAWS with no reply expected inline (the client answers later with
+    // its own SB NAWS subnegotiation, already fully handled by
+    // handleSubnegotiation()/query_screen_width()/query_screen_height()
+    // just above -- this is the one missing half, the proactive request a
+    // client that has not already volunteered WILL NAWS unprompted needs).
+    // No-op (not an error) when there is no interactive command_giver,
+    // matching real f_request_term_size()'s implicit
+    // "command_giver->interactive" write target. Unlike
+    // query_screen_width/height above, this one *is* a real efun name
+    // (efun_defs.c: F_REQUEST_TERM_SIZE), not a driver-added convenience.
+    t.registerEfun("request_term_size", [](VM& vm, std::vector<Value>&) -> Value {
+        auto giver = resolveCommandGiver(vm);
+        if (!giver) return Value{};
+        if (Connection* conn = InteractiveRegistry::find(giver)) {
+            conn->requestWindowSize();
+        }
+        return Value{};
+    });
+
     // string terminal_colour(string str, mapping colours, void|int
     // max_colors, void|int indent) -- Phase 0.8's own item 4 (net/
     // instruct.md). Real signature confirmed against efun_defs.c ground
@@ -4715,6 +5107,65 @@ void registerCoreEfuns() {
             if (ob->commandsEnabled()) result->items.emplace_back(ob);
         }
         return Value(result);
+    });
+
+    // object *named_livings() -- real packages/contrib.c's own
+    // f_named_livings(): unlike livings() above (every O_ENABLE_COMMANDS
+    // object, found by walking the whole object list), this one walks
+    // only hashed_living[] -- objects that actually called
+    // set_living_name(), i.e. LivingNameRegistry -- which is why the
+    // real driver's own doc comment calls it "substantially faster."
+    // Also applies real object_visible()'s O_HIDDEN/valid_hide() gate
+    // (confirmed in the real source right alongside O_ENABLE_COMMANDS,
+    // both under the same "#ifdef F_SET_HIDE" as everywhere else this
+    // driver already applies isVisibleToObserver()), which
+    // LivingNameRegistry::allWithCommandsEnabled() itself cannot check
+    // without VM access -- applied here instead. Zero real call sites in
+    // this mudlib (this efun's own name is never called directly
+    // anywhere in mudlib/nightmare3/lib), implemented anyway as a small,
+    // self-contained completion of the already-real LivingNameRegistry
+    // rather than skipped for a missing-infra reason.
+    t.registerEfun("named_livings", [](VM& vm, std::vector<Value>&) -> Value {
+        auto result = std::make_shared<Array>();
+        for (auto& ob : LivingNameRegistry::allWithCommandsEnabled()) {
+            if (isVisibleToObserver(vm, ob)) result->items.emplace_back(ob);
+        }
+        return Value(result);
+    });
+
+    // int reclaim_objects() -- real reclaim.c's own reclaim_objects():
+    // walks every live object's own variables, recursing into arrays/
+    // mappings/closure-bound-args, rewriting any reference to a now-
+    // destructed object to plain int 0 and returning how many were
+    // found (see reclaimSweepValue()'s own comment for the exact
+    // recursion shape, including its real map_delete()-not-rekey
+    // handling of a destructed mapping *key*). Real reclaim_objects()
+    // also calls reclaim_call_outs() first, a separate internal pass
+    // that eagerly drops pending call_outs targeting a destructed
+    // object and does not itself contribute to the returned count
+    // (confirmed directly: that count is a call_out.c-local static,
+    // reclaim.c's own `cleaned` is unrelated) -- not ported here since
+    // this driver's Scheduler already reaches the same observable end
+    // state lazily instead (a call_out to a destructed target is
+    // already silently skipped at firing time rather than proactively
+    // removed early, confirmed by the existing
+    // testCallOutSkipsDestructedTargetSilently coverage), so there is
+    // nothing left to eagerly clean there. This driver's own
+    // shared_ptr-managed object lifetime means nothing here is actually
+    // needed to reclaim memory (a destructed object with no remaining
+    // references is already freed automatically) -- implemented anyway
+    // for the real, observable LPC-level effect: a variable/array
+    // element/mapping value still holding a stale reference reads back
+    // as int 0 proactively, without waiting for this driver's own
+    // lazy coerceIfDestructed() to be triggered by an actual read.
+    t.registerEfun("reclaim_objects", [](VM&, std::vector<Value>&) -> Value {
+        int64_t cleaned = 0;
+        for (auto& ob : LiveObjectRegistry::all()) {
+            for (auto& var : ob->variables()) {
+                cleaned += reclaimSweepValue(var, 0);
+            }
+        }
+        return Value(cleaned);
     });
 
     // object find_player(string name) / object find_living(string name)

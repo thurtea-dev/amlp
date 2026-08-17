@@ -69,6 +69,16 @@ public:
     // when this runs at all).
     void suppressEcho();
 
+    // Real f_request_term_size() (comm.c): "add_binary_message(command_giver,
+    // telnet_do_naws, sizeof(telnet_do_naws))" -- fires a bare IAC DO NAWS to
+    // prompt a client that has not already volunteered WILL NAWS to start
+    // sending window-size subnegotiations. This driver's own NAWS handling
+    // (handleNegotiation()'s silent WILL NAWS accept, handleSubnegotiation(),
+    // takeWindowSizeUpdate() below) already covers the receiving side in
+    // full; this is the one missing piece, the proactive request itself.
+    // No idempotency guard in the real efun either -- every call resends.
+    void requestWindowSize();
+
     int terminalWidth() const { return terminalWidth_; }
     int terminalHeight() const { return terminalHeight_; }
 
@@ -119,6 +129,14 @@ public:
         pendingNotifyFail_.reset();
         return result;
     }
+
+    // Real query_notify_fail() (packages/contrib.c): reads back whatever
+    // is currently sitting in interactive->default_err_message without
+    // consuming it -- notify_no_command() (the real consumer, matched by
+    // takePendingNotifyFail() above) still runs unaffected afterward. A
+    // plain non-consuming peek, deliberately separate from the one-shot
+    // take above rather than reusing it.
+    const std::optional<Value>& peekPendingNotifyFail() const { return pendingNotifyFail_; }
 
     // Real clear_notify(): called unconditionally at the very start of
     // every new input line's own dispatch (process_user_command(),

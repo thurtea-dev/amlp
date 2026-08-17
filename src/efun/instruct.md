@@ -237,6 +237,140 @@ already registers (`call_other`, `evaluate`, `new`, `this_object`,
 `to_float`, `to_int`), confirmed by identical `F_CODE` values in
 `efun_defs.c`.
 
+**Corpus note (2026-08-22, this pass):** `mudlib/nightmare3_fluffos_v2/lib/`,
+the directory every pass above cites, does not exist in this repo or on
+this machine -- the LDMud-style restructure (`7a4121c`) never vendored a
+gameplay mudlib at all, `mudlib/` here has only ever been the bundled Lil
+driver-tooling mudlib. Re-cloned the real corpus fresh from
+`github.com/fluffos/nightmare3` into `temp/nightmare3` (gitignored,
+matching the `temp/dgd`/`temp/fluffos`/`temp/ldmud` research-clone
+precedent) and confirmed it is the exact same version prior passes used
+(every count in the table above reproduces exactly against it, and the
+specific files those rows cite by path all exist in it). Whoever runs
+the next pass needs this clone present again first -- it is not tracked.
+
+**Tier 1, third pass (2026-08-22), re-scoped to the reconstructed
+`temp/nightmare3/lib/` corpus:** 51 gap efuns remained against
+`efun_defs.c`'s 270 real names (222 registered as of this pass). Top of
+the re-ranked list, `pluralize` (13 calls, 6 files), is a real efun with
+a large but fully self-contained implementation (`packages/contrib.c`,
+~440 lines, no missing infrastructure) -- but this exact mudlib's own
+`secure/SimulEfun/english.c` defines a complete, independently-written
+`pluralize()` simul_efun with no `efun::pluralize()` delegation
+anywhere in it, so every one of those 13 call sites (all bare
+`pluralize(...)` calls) resolves to the simul_efun, not the core efun.
+Same permanently-unreachable-core-registration category as
+`translate`/`event`/`tell_object`/bare `livings()` above, not a "someday,
+once there's time" deferral the way a previous pass's "similar scope to
+`query_num`" framing implied -- corrected here. **This verdict itself
+was reversed one pass later, see the fourth-pass section below**: it was
+only ever true against nightmare3 specifically, and a wider corpus
+turned up a real `efun::pluralize()` delegation elsewhere, the same
+"load-bearing shadow" exception bare `livings()` already gets a few
+lines up. `get_char` (8/1) and
+`ed` (4/3) remain excluded for their previously-documented reason (new
+raw single-character-delivery / stateful interactive-editor
+infrastructure `Server::dispatchLine()`'s line-buffered design has no
+path for). `origin` (2/1), `resolve` (1/1), and the driver-internal-dump
+family (`mud_status`, `cache_stats`, `malloc_status`,
+`dump_file_descriptors`, `dumpallobj`, `domain_stats`, `author_stats`,
+all 1/1) remain excluded for their own previously-documented reasons,
+re-verified accurate.
+
+With no call-site-bearing gap efun implementable this pass, picked from
+the 0-call-site remainder instead, on "real, self-contained, completes
+an already-real subsystem" rather than frequency -- the same bar
+`shallow_inherit_list`/`inherit_list` were included under above.
+Implemented: `named_livings` (real, walks the same set-living-name table
+`find_living()`/`find_player()` already use -- `LivingNameRegistry`,
+which needed exactly the enumeration capability this doc's own earlier
+note said it lacked; added `LivingNameRegistry::allWithCommandsEnabled()`),
+`query_notify_fail` (real, a non-consuming peek at `notify_fail()`'s
+pending message, distinct from `notify_no_command()`'s own one-shot
+take; added `Connection::peekPendingNotifyFail()`), and
+`request_term_size` (real, a bare IAC DO NAWS -- this driver's NAWS
+*receiving* side, `handleSubnegotiation()`/`query_screen_width()`/
+`query_screen_height()`, was already complete from row 0.8/an earlier
+0.13 pass; this was the missing proactive-request half; added
+`Connection::requestWindowSize()`). `request_term_type`/
+`start_request_term_type`/`act_mxp` considered and rejected alongside
+these: each would fire a real raw negotiation request this driver has
+zero downstream parsing for at all (no TTYPE/MXP subnegotiation handler,
+no stored field, no apply call) -- sending a request whose answer is
+silently dropped is a half-feature, not a faithful port, same reasoning
+`resolve()`'s own synchronous-stand-in rejection above already
+establishes. `unique_mapping`, `variables`/`functions`/`fetch_variable`/
+`store_variable`, and the `rotate_x`/`rotate_y`/`rotate_z`/`scale`/
+`lookat_rotate`/`id_matrix` VRML-pose family were all surveyed and left
+for a future pass: the first needs a nontrivial new hash-bucket grouping
+implementation with zero real call sites to validate against; the
+second is a real reflection API family of comparable scope to a fresh
+mini-subsystem; the third has zero real call sites anywhere in this
+corpus and no plausible use in a text-only MUD driver.
+
+**Corpus note (2026-08-22, fourth pass):** five more real, independently-
+maintained mudlibs are now available alongside `temp/nightmare3`:
+`temp/mudlib` (Genesis/CD, targets the CD gamedriver, not FluffOS),
+`temp/core-lib` (RealmsMUD, targets LDMud, not FluffOS), `temp/es2_mudlib`
+(ES2, targets Neolith -- documented as backward-compatible with
+MudOS-level LPC, the same lineage FluffOS itself descends from),
+`temp/lima` and `temp/dead-souls` (both explicitly FluffOS-targeted).
+The two non-MudOS-lineage ones (Genesis/CD, RealmsMUD) are weaker
+signal -- a shared efun name there is not guaranteed to mean the same
+thing semantically -- so treat hits concentrated only in those two with
+extra caution and lean harder on this row's own standing "verify
+against reference source" step before trusting them. All gitignored the
+same way, none tracked; re-clone before running the next pass.
+
+**Tier 1, fourth pass (2026-08-22), ranked across all six corpora
+combined:** `pluralize` (65: nightmare3 13, lima 19, dead-souls 33)
+topped the combined ranking, same as before -- but re-checking the
+shadow question against the wider corpus reversed the third pass's own
+verdict just above: lima's own `std/modules/m_grammar.c` wraps a small
+set of hardcoded exceptions around a direct `return
+efun::pluralize(str);` fallthrough for everything else, the exact
+load-bearing-shadow pattern bare `livings()` already established,
+simply never visible from nightmare3 alone. `translate` (56) stays
+excluded, re-confirmed the same way across all three shadowing corpora
+(nightmare3/lima/dead-souls all define their own, and none delegates to
+`efun::translate()` anywhere). Implemented: `pluralize`, ported
+mechanically from the real ~440-line `packages/contrib.c` body (see
+STATUS.md's own dated entry for the full derivation and one confirmed
+real quirk worth knowing about -- `pluralize("lotus")` produces
+`"lotuss"` in the real reference build itself, ported faithfully, not a
+typo).
+
+`replace_program` (33, es2 31) and `origin` (27, up from nightmare3's
+own 2) were investigated in real depth, not just re-flagged. Both are
+strong, concretely-scoped candidates for a dedicated future session --
+see STATUS.md's own entry for the full architecture notes (this
+driver's `CompiledProgram::inheritedPrograms`/`ancestorBaseOffsets`
+turned out to be a much closer match for `replace_program()` than
+expected, needing "only" a filename-keyed inherit search plus a
+deferred per-tick replace queue, not a ground-up new subsystem; `origin`
+still needs per-call origin tagging through the whole VM call-stack,
+and is used as a real security gate in `secure/daemon/chat.c`, so a
+rushed partial implementation was rejected as worse than none). Neither
+implemented this pass. `debug_info` (6: lima 4, dead-souls 2) re-checked
+given real cross-corpus demand -- both wrap `efun::debug_info()`, the
+same load-bearing-shadow shape `pluralize` turned out to have, but its
+real C implementation genuinely does not exist anywhere in this
+project's only reference source (prototype only, no body, in
+`packages/contrib.c` or anywhere else) -- stays excluded, now for an
+unverifiable-spec reason, not the previous architecture-mismatch
+framing.
+
+Also implemented: `unique_mapping` (real, `mapping.c`'s
+`f_unique_mapping()`, real call sites confirmed in
+`dead-souls/lib/verbs/items/{get,wield,unwield}.c`) and `reclaim_objects`
+(real, `reclaim.c`'s `reclaim_objects()` -- see STATUS.md's own entry
+for why this driver's existing lazy `coerceIfDestructed()` mechanism
+does not make this redundant: it never coerces a mapping's own *key*
+half, only its value half, a real gap only this efun's eager sweep
+closes). `get_char`/`ed`/`origin`/`resolve`/the driver-internal-dump
+family all re-verified excluded for their previously-documented reasons
+with the wider corpus behind them too.
+
 **Tier 2 (medium effort), corrected:** `query_actions` removed (not a
 real efun name, see `commands`'s own row above). Everything else in the
 first pass's Tier 2 list is now done: `add_action`, `remove_action`,

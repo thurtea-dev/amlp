@@ -3,6 +3,266 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): call-site ranking widened to six real mudlib
+corpora, `pluralize`'s previous "permanently shadowed" verdict reversed
+after finding a real load-bearing `efun::pluralize()` delegation, 3 more
+efuns implemented (Phase 0 row 0.13: 225 registered, up from 222).**
+`temp/nightmare3` alone was this row's whole corpus as of the previous
+entry; five more real, independently-maintained mudlibs are now
+available alongside it (`temp/mudlib` -- Genesis/CD, targets the CD
+gamedriver, not FluffOS; `temp/core-lib` -- RealmsMUD, targets LDMud,
+not FluffOS; `temp/es2_mudlib` -- ES2, targets Neolith, a MudOS-lineage
+driver documented as backward-compatible with MudOS-level LPC; `temp/lima`
+and `temp/dead-souls`, both explicitly FluffOS-targeted). All six are
+gitignored scratch clones (`temp/` covers the whole tree, confirmed via
+`git status` before touching anything), the same non-tracked-research-
+clone precedent `temp/dgd`/`temp/fluffos`/`temp/ldmud` already established
+for driver source rather than mudlib source. Re-ran the gap ranking
+(`\bname\(` word-boundary match, `/doc/`+`/documentation/` excluded, each
+corpus's own vendored driver submodule excluded by scoping to its actual
+lib root -- `nightmare3/lib`, `es2_mudlib/mudlib`, `dead-souls/lib`, the
+other three's own repo root) summed across all six.
+
+Top of the combined ranking: `pluralize` (65: nightmare3 13, lima 19,
+dead-souls 33) and `translate` (56: nightmare3 6, lima 23, dead-souls
+27). Re-checked both for the same "shadowed by a real simul_efun of the
+same name" pattern the previous entry already confirmed in nightmare3
+alone -- both lima and dead-souls also define their own `pluralize()`/
+`translate()` simul_efuns (`secure/sefun/english.c`/`translate.c` in
+dead-souls literally mirrors nightmare3's own `secure/SimulEfun/`
+layout, same NightmareIV lineage). `translate` stays excluded, confirmed
+the same way as before (grepped every shadowing file across all three
+corpora for an `efun::translate()` delegation -- none). `pluralize` does
+not: lima's own `std/modules/m_grammar.c` wraps a small, explicit set of
+hardcoded exceptions (`"were"`->`"was"`, `"staff"`->`"staves"`, etc)
+around a direct `return efun::pluralize(str);` fallthrough for every
+other input -- the same load-bearing-shadow pattern already established
+for bare `livings()`, missed for `pluralize` in the previous entry only
+because that entry's corpus (nightmare3 alone) never contained the one
+mudlib whose own wrapper actually reaches through. Corrected: `pluralize`
+is real and load-bearing after all, previous entry's "permanently
+excluded, same category as `translate`/`event`" verdict reversed for
+this specific efun (not for `translate`/`event`, which remain correctly
+excluded on their own, independently re-verified evidence).
+
+Read and mechanically ported the real ~440-line body
+(`packages/contrib.c`'s `pluralize()`/`f_pluralize()`) line by line
+rather than reimplemented from general English-pluralization knowledge:
+the exception switch on the last word's first letter (~50 hardcoded
+irregular forms), the general suffix rules on its last letter (x/y/f/z/
+s/o/h/n cases), and the chop-and-append final assembly, including one
+confirmed real quirk worth flagging for anyone who touches this again --
+`"lotus"` hits an exception-table branch that sets `found = PLURAL_SUFFIX`
+without ever reassigning `suffix` away from its default `"s"`, so real
+`pluralize("lotus")` produces `"lotuss"`, not the grammatically correct
+`"lotuses"` -- ported faithfully as-is, a real bug in the reference
+build's own table, not a typo introduced by this port. `query_num`
+(same large-algorithm category, still 0 real call sites across all six
+corpora) remains deferred.
+
+Also re-ranked and reconsidered against the widened corpus:
+`replace_program` (33, es2 31 concentrated -- real, genuine
+`replace_program(ROOM)`-style calls across many `es2_mudlib/mudlib/d/`
+area files, not simul_efun-shadowed) and `origin` (27 combined, up from
+nightmare3's own 2). Both investigated in real depth rather than
+carried forward on the previous entry's reasoning alone. `replace_program`:
+read the real ~200-line `replace_program.c` fully -- swaps an object's
+live `program_t*` to one of its own inherited programs (deferred to a
+`replace_programs()` pass run once per driver tick, after the current
+top-level dispatch finishes) plus a variable-slot remap between the old
+and new layouts. This driver's own `CompiledProgram` (`Bytecode.hpp`) is
+a genuinely closer architectural match than expected -- inheritance is
+kept as a real tree of separate `shared_ptr<CompiledProgram>` nodes
+(`inheritedPrograms`), not flattened at compile time, and
+`ancestorBaseOffsets` already maps every transitive ancestor to its own
+variable-slot base offset for a different reason (cross-inheritance
+object-variable resolution) that happens to be exactly what
+`replace_program()` also needs. Still not attempted this pass: a
+filename-keyed inherit-tree search still needs building (the existing
+map is pointer-keyed, and `CompiledProgram` does not yet carry its own
+source filename), a deferred-until-end-of-tick replace queue needs
+wiring into the event loop (`Server::dispatchLine()`/`Scheduler`, the
+same shape `call_out`/`heart_beat` already use), and the variable-array
+surgery itself needs to be gotten right with no real mudlib test
+coverage to fall back on if it's subtly wrong -- flagged as a strong,
+concretely-scoped candidate for its own dedicated session rather than
+one line item folded into this batch, not a "someday" deferral. `origin`:
+still needs per-call origin tagging (`LOCAL`/`CALL_OTHER`/`DRIVER`/
+`EFUN`/`SIMUL_EFUN`/`FUNCTION_POINTER`) threaded through every call
+path (`Call`/`CallOther`/`CallEfun` opcodes, closure invocation,
+call_out/heart_beat firing) -- `VM`'s own `callStack_` is currently just
+`vector<shared_ptr<LpcObject>>` with no per-frame call-kind metadata at
+all. Real `secure/daemon/chat.c` uses `origin()` as a security gate
+(`origin() != ORIGIN_LOCAL`) -- a wrong answer there is a security bug,
+not a cosmetic gap, so a rushed partial implementation was rejected as
+worse than none; also flagged as a dedicated-session candidate, not
+folded in here. `debug_info` (6 combined: lima 4, dead-souls 2) checked
+one more time given real demand in two corpora -- both wrap
+`efun::debug_info()` the same load-bearing-shadow way `pluralize` does,
+but its real C implementation genuinely does not exist anywhere in this
+project's only reference source (`packages/contrib.c` and every other
+vendored `.c` file: prototype only, no body) -- unlike `pluralize`, where
+a real, readable, portable implementation existed and simply needed
+transcribing, `debug_info` has nothing to verify against at all. Stays
+excluded, now for an unverifiable-spec reason distinct from the previous
+entry's architecture-mismatch framing, not a frequency judgment either
+way.
+
+Implemented, both fully verified against reference source: `unique_mapping`
+(real, `mapping.c`'s `f_unique_mapping()` -- groups an array's elements
+by a callback result into a mapping; real call sites confirmed genuine
+across `dead-souls/lib/verbs/items/{get,wield,unwield}.c`, all passing a
+bare closure. Reused the exact callback-dispatch shape `filter_array`
+above already established (closure, or string function name with an
+explicit object target) rather than reinventing one. Real group order
+comes from the C body's own reverse-linked-list hash-bucket
+construction -- traced by hand, elements are walked backward through the
+array during bucketing, so each group's own original indices end up
+collected highest-first and re-emitted in that same reversed order --
+and is not documented as contractual anywhere; implemented with
+first-appearance order instead, the exact same non-issue this driver's
+own pre-existing `unique_array()` already settles for the identical real
+ambiguity, its own registration comment cited directly as precedent) and
+`reclaim_objects` (real, `reclaim.c`'s `reclaim_objects()` -- proactively
+sweeps every live object's own variables, recursing into arrays/
+mappings/closure-bound-args, rewriting a stale destructed-object
+reference to int 0 and returning how many were found. This driver
+already has an equivalent *lazy* mechanism for the ordinary cases --
+`VM.cpp`'s `coerceIfDestructed()`, self-healing storage the moment
+anything reads it via `PushLocal`/`PushObjectVar`/`Index` (see the
+2026-08-09 entry below) -- but confirmed one real gap that mechanism
+does not cover at all: `VM.cpp`'s own `Index`-mapping branch only ever
+coerces a mapping entry's *value* half, never its *key* half, so a
+destructed object used as a mapping key is never lazily fixed anywhere
+in this driver currently. Matched real `gc_mapping()`'s own handling of
+exactly this case: the whole entry is erased (real `map_delete()`), not
+rewritten to a 0 key, which this driver's own flat `vector<pair>`
+`Mapping` could otherwise silently duplicate against an already-present
+real 0 key the way real FluffOS's own hash table structurally cannot.
+`reclaim_call_outs()`, real `reclaim_objects()`'s own first step, was
+not ported: confirmed directly that its own cleanup count is a
+`call_out.c`-local static, unrelated to `reclaim.c`'s own returned
+count, and this driver's `Scheduler` already reaches the same observable
+end state lazily (a call_out to a destructed target already never fires,
+confirmed by the pre-existing `testCallOutSkipsDestructedTargetSilently`
+coverage) -- nothing left to eagerly remove there).
+
+3 new test functions (`test/test_lexer.cpp`): `pluralize`'s covers a
+representative slice of the real algorithm (default rule, `PLURAL_SAME`,
+several chop/suffix exception rows, exception-over-general-rule
+precedence, each general-suffix letter the sample reaches, the "a "/"an "
+strip, and the "X of Y" clause) rather than all ~50 exception rows.
+`reclaim_objects`'s test specifically targets the destructed-mapping-key
+case via `sizeof(m)` shrinking, not just the object-variable/array cases
+an ordinary LPC read would have already self-healed regardless of
+whether `reclaim_objects()` ran first (checked and rejected a naive
+before/after-LPC-read comparison for exactly that reason -- it would
+have passed whether or not the new efun did anything). Full suite: 561
+tests passing, up from 558 before this session, no regressions, stable
+across three consecutive runs plus a full `ctest` pass.
+
+**2026-08-22 (continued): call-site corpus reconstructed after the LDMud
+restructure removed it, `pluralize` correctly re-flagged as a shadowed
+simul_efun rather than merely "large effort", 3 more efuns implemented
+(Phase 0 row 0.13: 222 registered, up from 219).** This row's own
+standing methodology ranks the efun gap by real call-site frequency
+against `mudlib/nightmare3_fluffos_v2/lib/` -- but that directory does
+not exist anywhere in this checkout, or on this machine at all, and
+never has under this repo's current `mudlib/` (the restructure commit,
+`7a4121c`, is explicit: `mudlib/` was always just the bundled Lil
+driver-tooling mudlib, renamed from `driver/lil/`, never the nightmare3
+gameplay mudlib STATUS.md's own older entries describe scoping against).
+The most likely explanation is that earlier sessions cloned the real
+mudlib into an ephemeral, gitignored location for the ranking pass and
+then let it lapse rather than tracking it -- `temp/` is gitignored for
+exactly this kind of scratch clone (see `64cc10b`), though not
+previously used for a mudlib. Rather than substituting this repo's own
+tiny 199-file Lil stub (not a gameplay mudlib, would produce
+unrepresentative frequency data) or skipping the ranking step entirely,
+re-cloned the real corpus fresh from `github.com/fluffos/nightmare3` into
+`temp/nightmare3` (gitignored, matching the existing `temp/dgd`,
+`temp/fluffos`, `temp/ldmud` precedent) and confirmed it is the same
+version prior sessions used: every real-call-site/file count in the
+previous corrected-pass table (`ed` 4/3, `deep_inherit_list` 3/3,
+`call_stack` 3/1, `origin` 2/1, `mud_status` 1/1, `cache_stats` 1/1,
+etc) reproduces exactly against this fresh clone, and the specific files
+those old entries cite by path (`secure/SimulEfun/communications.c`,
+`secure/cmds/ambassador/_ed.c`, `std/user/editor.c`) all exist in it.
+
+Re-ran the gap audit against `efun_defs.c` (270 real efun names total in
+this exact vendored reference build, not literally ~300 -- ROADMAP.md's
+row updated to say so) versus the 219 then-registered names: 51 gap
+efuns confirmed real, then ranked by call-site count in
+`temp/nightmare3/lib` (`/doc/` excluded, tight `\bname\(` word-boundary
+match -- the previous pass's own "ed(" substring-matches-"used("-style
+false-positive trap recurred identically on the first raw attempt here
+and was caught the same way, by noticing `ed` alone showing an
+implausible 363 hits/131 files before the boundary fix). Top of the
+re-ranked list: `pluralize` (13 calls, 6 files). Read its real
+implementation (`packages/contrib.c`'s `pluralize()`/`f_pluralize()`,
+~440 lines, a deterministic English-pluralization exception table with
+no missing infrastructure of its own) fully intending to port it --
+but then found `secure/SimulEfun/english.c` defines a complete,
+independent `pluralize(mixed single)` simul_efun in this exact mudlib,
+with its own entirely different algorithm and no `efun::pluralize()`
+delegation anywhere in it (confirmed by grep across the whole corpus).
+Every one of the 13 real call sites (`std/guild.c`, `std/realtor.c`,
+`std/Object.c`, `secure/daemon/finger.c`, `secure/SimulEfun/english.c`
+itself) is a bare `pluralize(...)` call, which this driver's own tiered
+call resolution (local -> inherited -> simul_efun -> core efun) routes
+to that simul_efun every time -- the exact same "unreachable core
+registration" situation `translate`/`event`/`tell_object`/bare `livings()`
+are already documented under, confirmed the same way (checking for an
+`efun::name()` escape-hatch call inside the shadowing simul_efun's own
+body, absent here same as `translate`/`event`, present for `livings()`).
+Not implemented, corrected reasoning: a previous session's framing of
+`pluralize` as merely deferred for "effort, similar scope to `query_num`"
+undersold this -- it is unreachable from this mudlib regardless of
+effort spent, same permanent-exclusion category as `translate`/`event`,
+not a someday item. `get_char` (8 calls, 1 file, `std/user/more.c`) and
+`ed` (4 calls, 3 files) remain excluded for the previously-documented
+reason (need new raw single-character-delivery / stateful multi-line
+editor infrastructure this driver's line-buffered `Server::dispatchLine()`
+has no path for); `origin` (2/1), `resolve` (1/1), and the
+driver-internal-dump family (`mud_status`, `cache_stats`,
+`malloc_status`, `dump_file_descriptors`, `dumpallobj`, `domain_stats`,
+`author_stats`, all 1/1) remain excluded for their own previously-
+documented reasons too, re-verified still accurate (no per-call origin
+tagging, no async DNS/address-server infrastructure, no driver-internal
+struct model to dump from, respectively).
+
+With every call-site-bearing gap efun this pass excluded for a real
+reason, picked from the 0-call-site remainder instead -- not scored by
+frequency (there is none), scored by "real, self-contained, completes
+an already-real subsystem rather than opening a new one," the same bar
+`shallow_inherit_list`/`inherit_list` were included under in an earlier
+pass despite their own 0 real call sites. `named_livings` (real,
+`packages/contrib.c`'s `f_named_livings()`: walks `hashed_living[]` --
+i.e. `LivingNameRegistry` -- keeping only `O_ENABLE_COMMANDS` entries and
+applying the same `O_HIDDEN`/`valid_hide()` gate `first_inventory()`/
+`next_inventory()` already exercise via the existing `isVisibleToObserver()`
+helper; added `LivingNameRegistry::allWithCommandsEnabled()`, the new
+enumeration capability the previous pass's own note said this row still
+needed), `query_notify_fail` (real, `packages/contrib.c`'s
+`f_query_notify_fail()`: a non-consuming peek at whatever `notify_fail()`
+last set, distinct from `notify_no_command()`'s own one-shot
+`takePendingNotifyFail()` -- added `Connection::peekPendingNotifyFail()`
+alongside it), and `request_term_size` (real, `comm.c`'s
+`f_request_term_size()`: a bare IAC DO NAWS: this driver's own NAWS
+receiving side -- `handleSubnegotiation()`, `query_screen_width()`/
+`query_screen_height()` -- was already fully built from row 0.8/a prior
+0.13 pass, this was the one missing half, the proactive request itself;
+added `Connection::requestWindowSize()`).
+
+3 new test functions (`test/test_lexer.cpp`), each built on an
+already-established harness pattern in this file rather than a new one
+(the `set_hide`/`valid_hide` denying-master pattern for `named_livings`'s
+hidden case, the `notify_fail` dispatch-line pattern for
+`query_notify_fail`, the `query_ip_port` connection-probe pattern for
+`request_term_size`). Full suite: 558 tests passing, up from 555 before
+this session, no regressions, stable across three consecutive runs plus
+a full `ctest` pass.
+
 **2026-08-22 (continued): real bug found and fixed in already-shipped
 set_eval_limit()/reset_eval_cost(), then 6 more efuns implemented (Phase
 0 row 0.13: 219 registered, up from 211).** While verifying gap

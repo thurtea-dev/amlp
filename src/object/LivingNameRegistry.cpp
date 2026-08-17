@@ -42,4 +42,15 @@ std::shared_ptr<LpcObject> LivingNameRegistry::find(const std::string& name, boo
     return nullptr;
 }
 
+std::vector<std::shared_ptr<LpcObject>> LivingNameRegistry::allWithCommandsEnabled() {
+    std::vector<std::shared_ptr<LpcObject>> result;
+    for (auto& e : g_registry) {
+        auto locked = e.obj.lock();
+        if (!locked || locked->isDestructed()) continue;
+        if (!locked->commandsEnabled()) continue;
+        result.push_back(std::move(locked));
+    }
+    return result;
+}
+
 } // namespace amlp

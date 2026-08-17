@@ -1,6 +1,7 @@
 #pragma once
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace amlp {
 
@@ -56,6 +57,19 @@ public:
     // no match, a destructed candidate, or one missing O_ENABLE_COMMANDS
     // -- matching real find_living_object()'s own skip conditions.
     static std::shared_ptr<LpcObject> find(const std::string& name, bool requireOnceInteractive);
+
+    // Backs named_livings() (packages/contrib.c's f_named_livings():
+    // walks hashed_living[] end to end, keeping only entries with real
+    // O_ENABLE_COMMANDS -- the O_HIDDEN/valid_hide() filter real
+    // named_livings() also applies needs VM access this class does not
+    // have, so it is left to the efun body, the same split
+    // isVisibleToObserver()'s own call sites already use). Stale
+    // (destructed-and-dropped) weak_ptr entries are skipped, same
+    // tolerance find() already has. Order is registry insertion order,
+    // not hash-bucket order -- real named_livings()'s own order is
+    // itself just an implementation artifact of its hash table, never
+    // documented or relied on by any real call site.
+    static std::vector<std::shared_ptr<LpcObject>> allWithCommandsEnabled();
 };
 
 } // namespace amlp

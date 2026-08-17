@@ -31,6 +31,7 @@
 #include <chrono>
 #include <thread>
 #include <functional>
+#include <cstring>
 
 static void testBasicTokenize() {
     std::string src =
@@ -15042,6 +15043,350 @@ static void testQueryIpPortReturnsConfiguredPortForInteractiveElseZero() {
     std::cout << "testQueryIpPortReturnsConfiguredPortForInteractiveElseZero OK\n";
 }
 
+// named_livings(): only objects with a real set_living_name() entry AND
+// O_ENABLE_COMMANDS, matching real packages/contrib.c's own hashed_living[]
+// walk -- distinct from livings() (every O_ENABLE_COMMANDS object, no
+// living-name requirement at all). Also applies the same O_HIDDEN/
+// valid_hide() gate first_inventory()/next_inventory() already exercise
+// above, reusing the identical denying-master harness pattern.
+static void testNamedLivingsListsOnlyLivingNamedObjectsWithCommandsEnabledRespectingHidden() {
+    ObjectVarHarness denying;
+    denying.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_hide(object ob) { return query_privs(ob) == \"wiz\"; }\n");
+    assert(denying.objects.loadMasterObject());
+
+    // named: real living name + enable_commands -- must appear.
+    denying.writeFile("/nl_named.c",
+        "void setup() { enable_commands(); set_living_name(\"alice\"); }\n");
+    // no_commands: living name set, but enable_commands() never called --
+    // real f_named_livings()'s own O_ENABLE_COMMANDS check must exclude it.
+    denying.writeFile("/nl_no_commands.c",
+        "void setup() { set_living_name(\"hermit\"); }\n");
+    // unnamed: enable_commands() called, but no living name at all -- would
+    // appear in livings() but never in named_livings().
+    denying.writeFile("/nl_unnamed.c",
+        "void setup() { enable_commands(); }\n");
+    // hidden: real living name + enable_commands + set_hide(1) -- must be
+    // skipped by an unprivileged observer, same as first_inventory()'s own
+    // skip loop above.
+    denying.writeFile("/nl_hidden.c",
+        "void setup() { enable_commands(); set_living_name(\"shade\"); }\n"
+        "void grant_wiz() { set_privs(this_object(), \"wiz\"); }\n"
+        "void hide() { set_hide(1); }\n");
+    denying.writeFile("/nl_probe.c", "object *probe() { return named_livings(); }\n");
+
+    auto named = denying.objects.cloneObject("/nl_named");
+    auto noCommands = denying.objects.cloneObject("/nl_no_commands");
+    auto unnamed = denying.objects.cloneObject("/nl_unnamed");
+    auto hidden = denying.objects.cloneObject("/nl_hidden");
+    auto probe = denying.objects.cloneObject("/nl_probe");
+    assert(named && noCommands && unnamed && hidden && probe);
+
+    denying.vm.callFunction(named, "setup", {});
+    denying.vm.callFunction(noCommands, "setup", {});
+    denying.vm.callFunction(unnamed, "setup", {});
+    denying.vm.callFunction(hidden, "setup", {});
+    denying.vm.callFunction(hidden, "grant_wiz", {});
+    denying.vm.callFunction(hidden, "hide", {});
+    assert(hidden->isHidden());
+
+    amlp::Value result = denying.vm.callFunction(probe, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr);
+    bool sawNamed = false, sawNoCommands = false, sawUnnamed = false, sawHidden = false;
+    for (auto& item : (*arr)->items) {
+        auto* ob = std::get_if<std::shared_ptr<amlp::LpcObject>>(&item.data);
+        assert(ob != nullptr);
+        if (*ob == named) sawNamed = true;
+        if (*ob == noCommands) sawNoCommands = true;
+        if (*ob == unnamed) sawUnnamed = true;
+        if (*ob == hidden) sawHidden = true;
+    }
+    assert(sawNamed);
+    assert(!sawNoCommands);
+    assert(!sawUnnamed);
+    assert(!sawHidden);
+
+    std::cout << "testNamedLivingsListsOnlyLivingNamedObjectsWithCommandsEnabledRespectingHidden OK\n";
+}
+
+// query_notify_fail(): a non-consuming peek at whatever notify_fail() last
+// set, distinct from the one-shot takePendingNotifyFail() notify_no_command()
+// itself uses (Server::dispatchLine()) -- checked here by peeking mid-dispatch
+// and then confirming the eventual notify_no_command() message still arrives
+// unaffected, proving the peek genuinely did not consume it.
+static void testQueryNotifyFailPeeksPendingMessageWithoutConsumingIt() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qnf_player.c",
+        "mixed before;\n"
+        "mixed after;\n"
+        "void setup() {\n"
+        "    enable_commands();\n"
+        "    add_action(\"cmd_go\", \"go\");\n"
+        "}\n"
+        "int cmd_go(string arg) {\n"
+        "    before = query_notify_fail();\n"
+        "    notify_fail(\"You can't go that way.\\n\");\n"
+        "    after = query_notify_fail();\n"
+        "    return 0;\n"
+        "}\n"
+        "mixed get_before() { return before; }\n"
+        "mixed get_after() { return after; }\n");
+    auto player = harness.objects.cloneObject("/qnf_player");
+    assert(player != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(player);
+
+    amlp::OutputContext::set(&conn);
+    harness.vm.callFunction(player, "setup", {});
+    amlp::Server::dispatchLine(harness.vm, conn, "go north");
+    amlp::OutputContext::set(nullptr);
+
+    amlp::Value before = harness.vm.callFunction(player, "get_before", {});
+    assert(std::holds_alternative<int64_t>(before.data));
+    assert(std::get<int64_t>(before.data) == 0);
+
+    amlp::Value after = harness.vm.callFunction(player, "get_after", {});
+    assert(std::holds_alternative<std::string>(after.data));
+    assert(std::get<std::string>(after.data) == "You can't go that way.\n");
+
+    // The peek must not have consumed the message -- notify_no_command()'s
+    // own real take, fired by dispatchLine() itself once cmd_go returned 0,
+    // still delivers it to the connection.
+    char buf[256];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    std::string received(buf, static_cast<size_t>(n));
+    assert(received == "You can't go that way.\n");
+
+    ::close(fds[1]);
+    std::cout << "testQueryNotifyFailPeeksPendingMessageWithoutConsumingIt OK\n";
+}
+
+// request_term_size(): a bare IAC DO NAWS with no interactive
+// command_giver being a silent no-op, matching real f_request_term_size()'s
+// implicit command_giver->interactive write target.
+static void testRequestTermSizeSendsIacDoNawsAndIsNoOpWithoutInteractiveCommandGiver() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rts_probe.c", "void probe() { request_term_size(); }\n");
+    auto probe = harness.objects.cloneObject("/rts_probe");
+    assert(probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(probe);
+
+    amlp::OutputContext::set(&conn);
+    harness.vm.callFunction(probe, "probe", {});
+    amlp::OutputContext::set(nullptr);
+
+    unsigned char expected[] = {255, 253, 31}; // IAC DO NAWS
+    char buf[16];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n == static_cast<ssize_t>(sizeof(expected)));
+    assert(std::memcmp(buf, expected, sizeof(expected)) == 0);
+    ::close(fds[1]);
+
+    // No interactive command_giver at all (OutputContext left unset) --
+    // silent no-op, not a throw.
+    auto plain = harness.objects.cloneObject("/rts_probe");
+    assert(plain != nullptr);
+    harness.vm.callFunction(plain, "probe", {});
+
+    std::cout << "testRequestTermSizeSendsIacDoNawsAndIsNoOpWithoutInteractiveCommandGiver OK\n";
+}
+
+// pluralize(): a mechanical port of packages/contrib.c's real ~440-line
+// C body, verified against a representative slice covering every stage
+// of the real algorithm (default rule, PLURAL_SAME, several chop/suffix
+// exception-table entries, exception-table-over-general-rule precedence,
+// each general suffix-rule letter this sample can reach, the "a "/"an "
+// determiner strip, and the "X of Y" clause) rather than every one of
+// its ~50 exception-table rows.
+static void testPluralizeMatchesRealExceptionTableGeneralRulesAndOfClauseAcrossVariousInputs() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pl_probe.c",
+        "mixed p(string s) { return pluralize(s); }\n");
+    auto probe = harness.objects.cloneObject("/pl_probe");
+    assert(probe != nullptr);
+
+    auto p = [&](const std::string& in) -> amlp::Value {
+        return harness.vm.callFunction(probe, "p", {amlp::Value(in)});
+    };
+    auto str = [](const amlp::Value& v) -> std::string {
+        assert(std::holds_alternative<std::string>(v.data));
+        return std::get<std::string>(v.data);
+    };
+
+    // Default rule: plain "+s", nothing else matches.
+    assert(str(p("cat")) == "cats");
+    // Exception table: PLURAL_CHOP + 4, suffix "eese".
+    assert(str(p("goose")) == "geese");
+    // Exception table: PLURAL_SAME -- unchanged.
+    assert(str(p("sheep")) == "sheep");
+    // Exception table wins over the general "*ff -> chop 2, +ves" rule
+    // that would otherwise apply to a word ending "ff" -- real
+    // case 'C': "liff" sets suffix "s" with no chop before the general
+    // rules ever run.
+    assert(str(p("cliff")) == "cliffs");
+    // General rule: last letter 'x' -> "+es".
+    assert(str(p("fox")) == "foxes");
+    // General rule: 'y' preceded by a consonant -> chop 1, "+ies".
+    assert(str(p("baby")) == "babies");
+    // General rule: 'y' preceded by a vowel -> default "+s", no chop.
+    assert(str(p("day")) == "days");
+    // General rule: 'f' preceded by neither 'e' nor 'f' -> chop 1, "+ves".
+    assert(str(p("loaf")) == "loaves");
+    // General rule: 'f' preceded by 'e' -> real explicit no-op break,
+    // falls through to the plain default "+s" ("*ef -> *efs").
+    assert(str(p("chef")) == "chefs");
+    // General rule: 'f' preceded by 'f' -> chop 2 (doubled), "+ves".
+    assert(str(p("half")) == "halves");
+    // General rule: "*man" -> chop 3, "+men".
+    assert(str(p("foreman")) == "foremen");
+    // "a "/"an " determiner strip.
+    assert(str(p("a sword")) == "swords");
+    assert(str(p("an apple")) == "apples");
+    // "X of Y" -- only X is pluralized, " of Y" rides along verbatim.
+    assert(str(p("loaf of bread")) == "loaves of bread");
+    // Empty input: real int 0, not an empty string.
+    amlp::Value empty = p("");
+    assert(std::holds_alternative<int64_t>(empty.data) && std::get<int64_t>(empty.data) == 0);
+
+    std::cout << "testPluralizeMatchesRealExceptionTableGeneralRulesAndOfClauseAcrossVariousInputs OK\n";
+}
+
+// unique_mapping(): groups an array's elements by a callback result into
+// a mapping, both call shapes (closure, and string function name with an
+// explicit object target -- this driver's own established simplification
+// of real process_efun_callback()'s "defaults to current_object"
+// convenience form, matching filter_array's own scoping), extra
+// trailing arguments passed through to the callback, and first-
+// appearance order for both the mapping's own keys and each group's
+// elements (this implementation's own documented, deliberate choice for
+// the real hash-bucket order ambiguity, see its own registration
+// comment).
+static void testUniqueMappingGroupsByCallbackResultInFirstAppearanceOrderForClosureAndStringForms() {
+    ObjectVarHarness harness;
+    harness.writeFile("/um_probe.c",
+        "int classify(int n, int mod) { return n % mod; }\n"
+        "mixed probe_closure(mixed *arr) {\n"
+        "    return unique_mapping(arr, (: $1 % 2 :));\n"
+        "}\n"
+        "mixed probe_string(mixed *arr) {\n"
+        "    return unique_mapping(arr, \"classify\", this_object(), 3);\n"
+        "}\n"
+        "mixed probe_empty() { return unique_mapping(({}), (: $1 :)); }\n");
+    auto probe = harness.objects.cloneObject("/um_probe");
+    assert(probe != nullptr);
+
+    auto makeIntArray = [](std::vector<int64_t> nums) {
+        auto arr = std::make_shared<amlp::Array>();
+        for (auto n : nums) arr->items.emplace_back(n);
+        return arr;
+    };
+
+    // Closure form: group by parity. First appearance order: 3 (odd)
+    // seen before 4 (even).
+    amlp::Value closureResult = harness.vm.callFunction(
+        probe, "probe_closure", {amlp::Value(makeIntArray({3, 4, 5, 6, 7}))});
+    auto* closureMap = std::get_if<std::shared_ptr<amlp::Mapping>>(&closureResult.data);
+    assert(closureMap != nullptr && *closureMap != nullptr);
+    assert((*closureMap)->entries.size() == 2);
+    assert(std::get<int64_t>((*closureMap)->entries[0].first.data) == 1); // odd first
+    {
+        auto* oddGroup = std::get_if<std::shared_ptr<amlp::Array>>(&(*closureMap)->entries[0].second.data);
+        assert(oddGroup != nullptr && (*oddGroup)->items.size() == 3);
+        assert(std::get<int64_t>((*oddGroup)->items[0].data) == 3);
+        assert(std::get<int64_t>((*oddGroup)->items[1].data) == 5);
+        assert(std::get<int64_t>((*oddGroup)->items[2].data) == 7);
+    }
+    assert(std::get<int64_t>((*closureMap)->entries[1].first.data) == 0); // even second
+    {
+        auto* evenGroup = std::get_if<std::shared_ptr<amlp::Array>>(&(*closureMap)->entries[1].second.data);
+        assert(evenGroup != nullptr && (*evenGroup)->items.size() == 2);
+        assert(std::get<int64_t>((*evenGroup)->items[0].data) == 4);
+        assert(std::get<int64_t>((*evenGroup)->items[1].data) == 6);
+    }
+
+    // String function name + explicit target object form, extra arg
+    // (mod = 3) passed through after the element.
+    amlp::Value stringResult = harness.vm.callFunction(
+        probe, "probe_string", {amlp::Value(makeIntArray({1, 2, 3, 4, 5}))});
+    auto* stringMap = std::get_if<std::shared_ptr<amlp::Mapping>>(&stringResult.data);
+    assert(stringMap != nullptr && *stringMap != nullptr);
+    assert((*stringMap)->entries.size() == 3); // 1%3, 2%3, 0%3
+    assert(std::get<int64_t>((*stringMap)->entries[0].first.data) == 1);
+    assert(std::get<int64_t>((*stringMap)->entries[1].first.data) == 2);
+    assert(std::get<int64_t>((*stringMap)->entries[2].first.data) == 0);
+
+    // Empty array -> empty mapping.
+    amlp::Value emptyResult = harness.vm.callFunction(probe, "probe_empty", {});
+    auto* emptyMap = std::get_if<std::shared_ptr<amlp::Mapping>>(&emptyResult.data);
+    assert(emptyMap != nullptr && *emptyMap != nullptr && (*emptyMap)->entries.empty());
+
+    std::cout << "testUniqueMappingGroupsByCallbackResultInFirstAppearanceOrderForClosureAndStringForms OK\n";
+}
+
+// reclaim_objects(): eagerly sweeps every live object's own variables,
+// recursing into arrays and mappings, rewriting a stale (destructed but
+// still referenced) object reference to int 0 and returning how many
+// were found. The mapping-key case is checked specifically: unlike an
+// ordinary object-variable or array-element reference (which this
+// driver's own lazy coerceIfDestructed() already self-heals the moment
+// anything reads it via LPC, making a before/after comparison through
+// LPC alone circular), a destructed mapping *key* is never coerced
+// anywhere else in this driver (VM.cpp's own Index-mapping branch only
+// ever coerces the value half of an entry, confirmed directly) --
+// giving reclaim_objects() a real, LPC-observable, non-circular effect:
+// the whole entry is erased (real map_delete() semantics), shrinking
+// sizeof(m) by one, not left as a still-present 0-keyed entry.
+static void testReclaimObjectsCoercesStaleReferencesAndErasesDestructedMappingKeysReturningCount() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rc_target.c", "void create() {}\n");
+    harness.writeFile("/rc_holder.c",
+        "object stale_ob;\n"
+        "mixed *stale_arr;\n"
+        "mapping stale_key_map;\n"
+        "void setup(object ob) {\n"
+        "    stale_ob = ob;\n"
+        "    stale_arr = ({ ob, 42 });\n"
+        "    stale_key_map = ([ ob: \"value\" ]);\n"
+        "}\n"
+        "int map_size() { return sizeof(stale_key_map); }\n");
+    harness.writeFile("/rc_probe.c", "int probe() { return reclaim_objects(); }\n");
+
+    auto target = harness.objects.cloneObject("/rc_target");
+    auto holder = harness.objects.cloneObject("/rc_holder");
+    auto probe = harness.objects.cloneObject("/rc_probe");
+    assert(target != nullptr && holder != nullptr && probe != nullptr);
+
+    harness.vm.callFunction(holder, "setup", {amlp::Value(target)});
+    amlp::Value sizeBefore = harness.vm.callFunction(holder, "map_size", {});
+    assert(std::get<int64_t>(sizeBefore.data) == 1);
+
+    harness.vm.destructObject(target); // target stays alive via this local
+
+    amlp::Value cleaned = harness.vm.callFunction(probe, "probe", {});
+    assert(std::holds_alternative<int64_t>(cleaned.data));
+    // stale_ob (1) + stale_arr's element 0 (1) + the destructed-keyed
+    // mapping entry (1, real map_delete(), see the function comment).
+    assert(std::get<int64_t>(cleaned.data) == 3);
+
+    // The mapping entry was erased outright, not rewritten to a 0 key --
+    // sizeof(m) genuinely shrank, an effect no lazy read anywhere else
+    // in this driver ever produces for a mapping key.
+    amlp::Value sizeAfter = harness.vm.callFunction(holder, "map_size", {});
+    assert(std::get<int64_t>(sizeAfter.data) == 0);
+
+    std::cout << "testReclaimObjectsCoercesStaleReferencesAndErasesDestructedMappingKeysReturningCount OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -15604,6 +15949,12 @@ int main() {
     testRefsReflectsSharedReferenceCountMinusOne();
     testHeartBeatsListsEveryObjectWithHeartbeatEnabledSkippingDestructed();
     testQueryIpPortReturnsConfiguredPortForInteractiveElseZero();
+    testNamedLivingsListsOnlyLivingNamedObjectsWithCommandsEnabledRespectingHidden();
+    testQueryNotifyFailPeeksPendingMessageWithoutConsumingIt();
+    testRequestTermSizeSendsIacDoNawsAndIsNoOpWithoutInteractiveCommandGiver();
+    testPluralizeMatchesRealExceptionTableGeneralRulesAndOfClauseAcrossVariousInputs();
+    testUniqueMappingGroupsByCallbackResultInFirstAppearanceOrderForClosureAndStringForms();
+    testReclaimObjectsCoercesStaleReferencesAndErasesDestructedMappingKeysReturningCount();
     std::cout << "all tests passed\n";
     return 0;
 }

@@ -148,6 +148,11 @@ void Connection::suppressEcho() {
     send(std::string(reinterpret_cast<char*>(resp), sizeof(resp)));
 }
 
+void Connection::requestWindowSize() {
+    unsigned char req[] = {kIac, kDo, kTelOptNaws};
+    send(std::string(reinterpret_cast<char*>(req), sizeof(req)));
+}
+
 void Connection::processTelnetBytes(const std::string& raw, std::string& plainOut) {
     for (unsigned char b : raw) {
         switch (telnetState_) {
