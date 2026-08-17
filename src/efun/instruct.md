@@ -6,10 +6,19 @@
 |------|------|
 | `EfunTable.cpp` + `include/.../EfunTable.hpp` | Singleton registry mapping efun name → `EfunFn`. `registerCoreEfuns()` is called from `main.cpp`. |
 
-Currently **179 registered names** (including aliases, confirmed via
+Currently **190 registered names** (including aliases, confirmed via
 `grep -oE 'registerEfun\("[a-zA-Z_0-9]+"'`, not a stale estimate). Target is
 **~300** for FluffOS parity and **beyond 300** for the features that exceed
 all three reference drivers.
+
+**Ranking source changed 2026-08-22:** the old `nightmare3_fluffos_v2`
+Rifts mudlib every ranking pass below this point ranked call-site
+frequency against stayed behind in the AetherMUD monorepo when this
+driver was extracted into its own standalone repository -- `mudlib/` is
+now just the bundled Lil starter mudlib. New batches rank against Lil's
+own real efun conformance suite instead
+(`mudlib/single/tests/efuns/*.c`, one file per real efun) -- see
+STATUS.md's own 2026-08-22 entry for the first batch done this way.
 
 ## Files to read before touching this directory
 

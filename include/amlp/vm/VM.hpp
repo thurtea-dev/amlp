@@ -174,6 +174,13 @@ public:
     // paths never depend on the driver's own current working directory.
     std::string resolveMudlibPath(const std::string& lpcPath) const;
 
+    // Config's own configured mud name (real rc.c's own MUD_NAME config
+    // string, index 0 in get_config_item()'s own config_str[] table) --
+    // exposed as a plain derived accessor rather than the whole Config&,
+    // matching resolveMudlibPath()'s own established pattern just above.
+    // get_config(0)'s only real, tested caller.
+    const std::string& mudName() const;
+
     // real command_giver (comm.h): the object whose typed input is
     // currently being parsed against an action table, and the object
     // add_action() registers onto. Tracked as an explicit stack (rather

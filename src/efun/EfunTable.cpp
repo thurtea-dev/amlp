@@ -409,6 +409,174 @@ Value parseRealSaveValue(const std::string& s, size_t& pos) {
     return Value(static_cast<int64_t>(0));
 }
 
+// save_variable(mixed)'s own writer -- real object.c's own save_svalue(),
+// the exact paired writer for parseRealSaveValue()/parseRealSaveString()
+// above (confirmed by reading it directly, not guessed): a string is
+// wrapped in '"', with only '"' and '\\' backslash-escaped, and a literal
+// embedded '\n' byte is substituted for a literal '\r' byte -- not a
+// backslash escape at all, which is why parseRealSaveString() above
+// reverses that exact substitution rather than treating '\r' as a
+// two-character escape. Arrays/mappings always write a trailing ','
+// after *every* element, including the last, matching real
+// save_svalue()'s own unconditional per-element ',' inside the loop --
+// parseRealSaveValue()'s own array/mapping readers already tolerate
+// this leftover trailing comma. Floats use plain "%f" (six decimal
+// places, no exponent), the same convention this driver's own %O
+// sprintf specifier already uses for T_REAL. Real save_svalue()'s own
+// switch has no case at all for an object reference or a function
+// pointer (not even a default) -- confirmed by reading it directly, this
+// is a genuine gap in real FluffOS itself, not a deliberately handled
+// shape -- so this driver throws a clear error for either rather than
+// silently emitting nothing (which would produce truncated, unparsable
+// output), matching this codebase's own established convention for
+// shapes real FluffOS itself does not support saving.
+void writeRealSaveValue(std::string& out, const Value& v) {
+    if (std::holds_alternative<std::monostate>(v.data)) {
+        out += '0';
+    } else if (auto* iv = std::get_if<int64_t>(&v.data)) {
+        out += std::to_string(*iv);
+    } else if (auto* dv = std::get_if<double>(&v.data)) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%f", *dv);
+        out += buf;
+    } else if (auto* sv = std::get_if<std::string>(&v.data)) {
+        out += '"';
+        for (char c : *sv) {
+            if (c == '"' || c == '\\') {
+                out += '\\';
+                out += c;
+            } else if (c == '\n') {
+                out += '\r';
+            } else {
+                out += c;
+            }
+        }
+        out += '"';
+    } else if (auto* av = std::get_if<std::shared_ptr<Array>>(&v.data)) {
+        out += "({";
+        if (*av) {
+            for (const auto& item : (*av)->items) {
+                writeRealSaveValue(out, item);
+                out += ',';
+            }
+        }
+        out += "})";
+    } else if (auto* mv = std::get_if<std::shared_ptr<Mapping>>(&v.data)) {
+        out += "([";
+        if (*mv) {
+            for (const auto& entry : (*mv)->entries) {
+                writeRealSaveValue(out, entry.first);
+                out += ':';
+                writeRealSaveValue(out, entry.second);
+                out += ',';
+            }
+        }
+        out += "])";
+    } else {
+        throw LpcRuntimeError("save_variable: cannot save an object or function-pointer value");
+    }
+}
+
+// restore_variable(string)'s own top-level string reader -- deliberately
+// separate from parseRealSaveString() above, not a shared helper, because
+// real restore_svalue()'s (object.c) top-level restore_string() enforces
+// a real, specific quirk that a nested array/mapping-element string must
+// NOT be held to: the closing '"' must be immediately followed by the
+// end of the *entire* input buffer, or it is a real ROB_STRING_ERROR.
+// Confirmed directly by reading restore_string()'s own two exit paths
+// (the plain, no-escape path: "if (*cp--) return ROB_STRING_ERROR;"
+// right after the loop that found the closing quote; the escaped path:
+// "if ((c == '\\0') || (*cp != '\\0')) return ROB_STRING_ERROR;") -- both
+// require genuine end-of-buffer, not just "the next delimiter char".
+// restore_object()'s own array/mapping-element strings have no such
+// requirement (there a string is always followed by a real ',' or ':'
+// delimiter, never raw end-of-input), which is exactly why
+// parseRealSaveString() above stays lenient and this one does not.
+Value parseRestoreVariableString(const std::string& s, size_t& pos) {
+    std::string result;
+    while (pos < s.size() && s[pos] != '"') {
+        char c = s[pos];
+        if (c == '\\') {
+            ++pos;
+            if (pos >= s.size()) {
+                throw LpcRuntimeError("restore_variable(): Illegal string format.");
+            }
+            char esc = s[pos++];
+            result += (esc == '\r') ? '\n' : esc;
+        } else if (c == '\r') {
+            result += '\n';
+            ++pos;
+        } else {
+            result += c;
+            ++pos;
+        }
+    }
+    if (pos >= s.size()) {
+        throw LpcRuntimeError("restore_variable(): Illegal string format.");
+    }
+    ++pos; // consume the closing '"'
+    if (pos != s.size()) {
+        throw LpcRuntimeError("restore_variable(): Illegal string format.");
+    }
+    return Value(result);
+}
+
+// restore_variable(string)'s own top-level number reader -- real
+// parse_numeric() (object.c), confirmed directly: a leading '-' with no
+// digit after it is a real failure (ROB_NUMERAL_ERROR), not "-0" or a
+// silent 0 -- parseRealSaveNumber() above has no such check (real
+// restore_array()/restore_mapping() element parsing never hits this
+// specific shape in practice, so that reader was never made to validate
+// it). Exponent notation is not implemented, matching
+// parseRealSaveNumber()'s own already-documented reasoning: real
+// save_svalue() (the writer) never produces one, so a faithful reader for
+// genuine on-disk data from this exact vendored driver doesn't need to
+// parse one either.
+Value parseRestoreVariableNumber(const std::string& s, size_t& pos) {
+    bool neg = false;
+    if (s[pos] == '-') {
+        neg = true;
+        ++pos;
+        if (pos >= s.size() || !std::isdigit(static_cast<unsigned char>(s[pos]))) {
+            throw LpcRuntimeError("restore_variable(): Illegal numeric format.");
+        }
+    }
+    size_t start = pos;
+    while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+    bool isFloat = false;
+    if (pos < s.size() && s[pos] == '.') {
+        isFloat = true;
+        ++pos;
+        while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) ++pos;
+    }
+    std::string token = (neg ? "-" : "") + s.substr(start, pos - start);
+    if (isFloat) return Value(std::stod(token));
+    return Value(static_cast<int64_t>(std::stoll(token)));
+}
+
+// restore_variable(string)'s own top-level dispatcher -- real
+// restore_svalue() (object.c), confirmed directly: only the T_STRING
+// case has any "did this consume the whole buffer" check at all (see
+// parseRestoreVariableString()'s own comment) -- a top-level array,
+// mapping, or number with trailing garbage after it is silently accepted
+// by real restore_svalue() exactly as if the garbage were not there, so
+// this dispatcher reuses parseRealSaveValue() (already correctly lenient
+// there) for the '(' and default-to-zero cases rather than adding a
+// trailing check real FluffOS itself does not have.
+Value parseRestoreVariableTopLevel(const std::string& s) {
+    if (s.empty()) return Value(static_cast<int64_t>(0));
+    size_t pos = 0;
+    char c = s[pos];
+    if (c == '"') {
+        ++pos;
+        return parseRestoreVariableString(s, pos);
+    }
+    if (c == '-' || std::isdigit(static_cast<unsigned char>(c))) {
+        return parseRestoreVariableNumber(s, pos);
+    }
+    return parseRealSaveValue(s, pos);
+}
+
 // Real object.c's save_object() normalization (confirmed live: see
 // save_object's own comment on why this exists): strip a trailing
 // ".c", strip a trailing ".o" if already present so this stays
@@ -5325,6 +5493,337 @@ void registerCoreEfuns() {
     // above found nothing), added for the same reason: the task's own
     // spec explicitly calls for it as a second name for reg_assoc.
     t.registerEfun("regexp_assoc", regAssocImpl);
+
+    // -------------------------------------------------------------------------
+    // Phase 0.13 efun growth batch (post-restructure) - test_bit/set_bit/
+    // clear_bit, crc32, cp, inherits, get_config, query_load_average, say,
+    // save_variable/restore_variable. Found this round by diffing this
+    // repo's own bundled Lil starter mudlib's real efun conformance suite
+    // (mudlib/single/tests/efuns/*.c -- each filename names the one real
+    // efun that file exercises) against EfunTable's currently registered
+    // names, then checked each surviving name against func_spec.c/
+    // efuns_main.c directly before implementing -- the extraction that
+    // produced this repo dropped the old nightmare3_fluffos_v2 mudlib this
+    // row's prior batches ranked against (see this row's own
+    // instruct.md), so this is the first batch ranked against Lil's own
+    // content instead.
+    // -------------------------------------------------------------------------
+
+    // string set_bit(string str, int bit) / string clear_bit(string str,
+    // int bit) / int test_bit(string str, int bit) -- real efuns_main.c's
+    // own f_set_bit()/f_clear_bit()/f_test_bit(), confirmed directly: each
+    // packed character holds 6 bits (not 8), addressed as "ind = bit / 6;
+    // bit %= 6", and the on-disk byte range is always ' ' (0x20) through
+    // '_' (0x20 + 0x3f, 0x5f) -- a byte outside that range is flagged as
+    // corrupt ("Illegal bit pattern") rather than silently masked. This
+    // driver has no MAX_BITS config value of its own (real rc.c's own
+    // runtime-configured __MAX_BITFIELD_BITS__); a fixed, generous
+    // ceiling is used purely to reject clearly-bogus huge indices the way
+    // every real caller expects some bound to exist, not to replicate any
+    // specific real-world configured default.
+    constexpr int64_t kMaxBits = 1000000;
+
+    t.registerEfun("set_bit", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("set_bit: expected (string, int) arguments");
+        }
+        std::string str = std::get<std::string>(args[0].data);
+        int64_t bitNum = std::get<int64_t>(args[1].data);
+        if (bitNum > kMaxBits) {
+            throw LpcRuntimeError("set_bit() bit requested exceeds maximum bits");
+        }
+        if (bitNum < 0) {
+            throw LpcRuntimeError("Bad argument 2 (negative) to set_bit().");
+        }
+        size_t ind = static_cast<size_t>(bitNum / 6);
+        int bit = static_cast<int>(bitNum % 6);
+        if (ind >= str.size()) str.resize(ind + 1, ' ');
+        unsigned char ch = static_cast<unsigned char>(str[ind]);
+        if (ch > 0x3f + ' ' || ch < ' ') {
+            throw LpcRuntimeError("Illegal bit pattern in set_bit character " + std::to_string(ind));
+        }
+        str[ind] = static_cast<char>(((ch - ' ') | (1 << bit)) + ' ');
+        return Value(str);
+    });
+
+    t.registerEfun("clear_bit", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("clear_bit: expected (string, int) arguments");
+        }
+        std::string str = std::get<std::string>(args[0].data);
+        int64_t bitNum = std::get<int64_t>(args[1].data);
+        if (bitNum > kMaxBits) {
+            throw LpcRuntimeError("clear_bit() bit requested exceeds maximum bits");
+        }
+        if (bitNum < 0) {
+            throw LpcRuntimeError("Bad argument 2 (negative) to clear_bit().");
+        }
+        size_t ind = static_cast<size_t>(bitNum / 6);
+        int bit = static_cast<int>(bitNum % 6);
+        // Real f_clear_bit(): an index past the current length returns
+        // the first argument completely unmodified, not an error and not
+        // a resize -- clearing a bit that was never set is a no-op.
+        if (ind >= str.size()) return Value(str);
+        unsigned char ch = static_cast<unsigned char>(str[ind]);
+        if (ch > 0x3f + ' ' || ch < ' ') {
+            throw LpcRuntimeError("Illegal bit pattern in clear_bit character " + std::to_string(ind));
+        }
+        str[ind] = static_cast<char>(((ch - ' ') & ~(1 << bit)) + ' ');
+        return Value(str);
+    });
+
+    t.registerEfun("test_bit", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("test_bit: expected (string, int) arguments");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        int64_t bitNum = std::get<int64_t>(args[1].data);
+        // Real f_test_bit(): the out-of-range-length check runs *before*
+        // the negative check, confirmed by reading it directly -- a
+        // negative index past a short/empty string returns 0, not an
+        // error, matching that real ordering exactly.
+        if (bitNum / 6 >= static_cast<int64_t>(str.size())) return Value(static_cast<int64_t>(0));
+        if (bitNum < 0) {
+            throw LpcRuntimeError("Bad argument 2 (negative) to test_bit().");
+        }
+        unsigned char ch = static_cast<unsigned char>(str[static_cast<size_t>(bitNum / 6)]);
+        bool isSet = ((ch - ' ') & (1 << (bitNum % 6))) != 0;
+        return Value(static_cast<int64_t>(isSet ? 1 : 0));
+    });
+
+    // int crc32(string) -- real crc32.c's own compute_crc32(): standard
+    // reflected CRC-32 (polynomial 0xedb88320, confirmed directly against
+    // crctab.h's own generated table), seeded to 0xFFFFFFFF, but with NO
+    // final complement step -- confirmed directly by reading
+    // compute_crc32() itself ("return crc;", no "^ 0xFFFFFFFF" anywhere),
+    // a real, deliberate divergence from the textbook/zlib CRC-32 this
+    // implementation would otherwise match exactly. crc32("") therefore
+    // legitimately equals the raw seed, 0xFFFFFFFF (4294967295), not 0 --
+    // confirmed as a regression test rather than assumed.
+    t.registerEfun("crc32", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("crc32: expected a string argument");
+        }
+        static uint32_t table[256];
+        static bool initialized = false;
+        if (!initialized) {
+            for (uint32_t i = 0; i < 256; ++i) {
+                uint32_t c = i;
+                for (int k = 0; k < 8; ++k) {
+                    c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+                }
+                table[i] = c;
+            }
+            initialized = true;
+        }
+        uint32_t crc = 0xFFFFFFFFu;
+        for (unsigned char ch : std::get<std::string>(args[0].data)) {
+            crc = table[(crc ^ ch) & 0xffu] ^ (crc >> 8);
+        }
+        return Value(static_cast<int64_t>(crc));
+    });
+
+    // int cp(string from, string to) -- real file.c's own copy_file():
+    // reads the whole source file and writes it to the destination,
+    // truncating any existing destination content, returning a real,
+    // nonzero success indicator. Real copy_file() also returns distinct
+    // negative codes for distinct failure kinds and retries into a
+    // synthesized filename when "to" names an existing directory -- not
+    // implemented here, since every real call site this row's own
+    // content exercises only checks truthiness and never copies onto a
+    // directory target.
+    t.registerEfun("cp", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("cp: expected (string from, string to) arguments");
+        }
+        std::string from = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        std::string to = vm.resolveMudlibPath(std::get<std::string>(args[1].data));
+        std::ifstream in(from, std::ios::binary);
+        if (!in) return Value(static_cast<int64_t>(0));
+        std::ofstream out(to, std::ios::binary | std::ios::trunc);
+        if (!out) return Value(static_cast<int64_t>(0));
+        out << in.rdbuf();
+        if (!out) return Value(static_cast<int64_t>(0));
+        return Value(static_cast<int64_t>(1));
+    });
+
+    // int inherits(string filename, object base default: this_object())
+    // -- real efuns_main.c's own f_inherits(): finds/loads the object
+    // named by filename, then checks whether base's own program
+    // transitively inherits that object's program (confirmed directly,
+    // not the "compare two path strings" shape func_spec.c's bare
+    // signature might suggest -- real F_INHERITS calls find_object2() on
+    // the string argument and does a program-identity walk, base->prog
+    // against ob->prog). This driver has no find_object2()-style
+    // find-or-load-and-fail-cleanly primitive to reuse here, so this is
+    // narrower than that real load-and-compare shape: filename is only
+    // ever compared, normalized the same way deep_inherit_list()'s own
+    // normalizeInheritPath() already does, against base's own filename
+    // and base's own deep inherit chain -- never actually loaded/compiled
+    // as a side effect of this boolean query. Confirmed sufficient for
+    // this row's own real, tested call sites: a nonexistent filename like
+    // "foo" simply never matches either check and correctly returns 0,
+    // the same observable result real f_inherits()'s own
+    // find_object2()-fails branch produces.
+    t.registerEfun("inherits", [resolveInheritTarget, normalizeInheritPath, collectDeepInherits](
+                                    VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("inherits: expected a string filename as the first argument");
+        }
+        std::string candidate = normalizeInheritPath(std::get<std::string>(args[0].data));
+
+        std::vector<Value> baseArgs;
+        if (args.size() > 1) baseArgs.push_back(args[1]);
+        auto base = resolveInheritTarget(vm, baseArgs);
+        if (!base) return Value(static_cast<int64_t>(0));
+
+        if (normalizeInheritPath(base->filename()) == candidate) return Value(static_cast<int64_t>(1));
+
+        std::vector<Value> chain;
+        collectDeepInherits(base->program(), collectDeepInherits, chain);
+        for (auto& v : chain) {
+            if (auto* s = std::get_if<std::string>(&v.data); s && *s == candidate) {
+                return Value(static_cast<int64_t>(1));
+            }
+        }
+        return Value(static_cast<int64_t>(0));
+    });
+
+    // mixed get_config(int what) -- real rc.c's own get_config_item():
+    // dispatches on a large table of compile-time/runtime configuration
+    // indices (~50 string and int entries in a real build) this driver
+    // has no equivalent registry for. Only index 0 (real __MUD_NAME__,
+    // the first string-kind entry -- confirmed via config.h's own
+    // "#define MUD_NAME CONFIG_STR(__MUD_NAME__)" plus get_config_item()'s
+    // own "num < BASE_CONFIG_INT" string branch, base index 0) is
+    // implemented, matching this row's own real, tested call site
+    // (get_config(0) == MUD_NAME). Every other index -- including any
+    // negative index, real get_config_item()'s own explicit "num < 0"
+    // failure branch -- throws a clear error rather than fabricating
+    // driver-internal statistics this codebase has no real source for,
+    // the same architecture-mismatch category as mud_status()/
+    // cache_stats() above.
+    t.registerEfun("get_config", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("get_config: expected an int argument");
+        }
+        int64_t what = std::get<int64_t>(args[0].data);
+        if (what == 0) return Value(vm.mudName());
+        throw LpcRuntimeError("get_config: unsupported or invalid config index");
+    });
+
+    // string query_load_average() -- real backend.c's own
+    // query_load_av(): "sprintf(buff, \"%.2f cmds/s, %.2f comp
+    // lines/s\", load_av, compile_av)", confirmed directly. This driver
+    // tracks neither figure as a rolling rate (no per-second sampling
+    // window anywhere in Scheduler/Server), so this returns a fixed,
+    // honestly-zero string in the real format shape rather than a
+    // fabricated live number -- this row's own real, tested call site
+    // only checks stringp() on the result, never a specific rate.
+    t.registerEfun("query_load_average", [](VM&, std::vector<Value>&) -> Value {
+        return Value(std::string("0.00 cmds/s, 0.00 comp lines/s"));
+    });
+
+    // void say(string str, void|object|object* exclude) -- real
+    // simulate.c's own say()/send_say(): broadcasts str to origin's
+    // surrounding object (if eligible), everything else in that
+    // surrounding object's own inventory except origin itself, and
+    // everything in origin's own inventory -- origin being command_giver
+    // if one is active, else current_object (confirmed directly:
+    // "if (current_object->flags & O_LISTENER || current_object->
+    // interactive) save_command_giver(current_object); else
+    // save_command_giver(command_giver); ... origin = command_giver ?
+    // command_giver : current_object" -- this driver approximates the
+    // O_LISTENER/interactive-current_object special case as "always
+    // prefer command_giver, falling back to current_object", since this
+    // driver has no O_LISTENER flag of its own and no real call site here
+    // needs that finer distinction). Real eligibility to receive the
+    // message is "O_LISTENER || interactive" -- approximated here as "has
+    // a live Connection via InteractiveRegistry", this driver's own
+    // already-established stand-in for that same real check (see
+    // message()'s own use of the identical registry above). avoid is
+    // never sent to; origin itself is never sent to either -- it can
+    // never appear in its own inventory, and the surrounding object's
+    // inventory loop explicitly excludes it, matching real send_say()'s
+    // own two call sites exactly. Previously excluded from this table
+    // entirely because the old nightmare3_fluffos_v2 mudlib this row's
+    // prior batches ranked against shadowed it with a simul_efun (see
+    // STATUS.md's 2026-08-21 entry) -- that mudlib is gone from this repo
+    // after the extraction, and this repo's own bundled Lil calls the
+    // bare efun directly and unshadowed (mudlib/single/tests/efuns/
+    // talker.c), so the exclusion no longer applies.
+    t.registerEfun("say", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("say: expected a string as the first argument");
+        }
+        const std::string& text = std::get<std::string>(args[0].data);
+
+        std::vector<std::shared_ptr<LpcObject>> avoid;
+        if (args.size() > 1) {
+            if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&args[1].data)) {
+                if (*ob) avoid.push_back(*ob);
+            } else if (auto* arr = std::get_if<std::shared_ptr<Array>>(&args[1].data)) {
+                if (*arr) {
+                    for (auto& item : (*arr)->items) {
+                        if (auto* o = std::get_if<std::shared_ptr<LpcObject>>(&item.data)) {
+                            if (*o) avoid.push_back(*o);
+                        }
+                    }
+                }
+            }
+        }
+
+        auto isAvoided = [&avoid](const std::shared_ptr<LpcObject>& ob) {
+            return std::find(avoid.begin(), avoid.end(), ob) != avoid.end();
+        };
+        auto sendTo = [&](const std::shared_ptr<LpcObject>& ob) {
+            if (!ob || isAvoided(ob)) return;
+            if (Connection* conn = InteractiveRegistry::find(ob)) conn->send(text);
+        };
+
+        auto origin = resolveCommandGiver(vm);
+        if (!origin) origin = vm.currentObject();
+        if (!origin) return Value{};
+
+        if (auto env = origin->environment().lock()) {
+            sendTo(env);
+            for (auto& sib : env->inventory()) {
+                if (sib != origin) sendTo(sib);
+            }
+        }
+        for (auto& inv : origin->inventory()) {
+            sendTo(inv);
+        }
+        return Value{};
+    });
+
+    // string save_variable(mixed) / mixed restore_variable(string) --
+    // real object.c's own save_variable()/restore_variable(), a single-
+    // value save to/from the exact same on-disk text format save_object()/
+    // restore_object() already use for a whole object's variables (see
+    // writeRealSaveValue()/parseRestoreVariableTopLevel() above for the
+    // real spec citations). save_variable() writes that real format
+    // directly (unlike save_object() above, which still only ever writes
+    // this driver's own simpler custom format) because save_variable()'s
+    // own contract *is* "return the real save-file text for this value" --
+    // there is no other format for it to write.
+    t.registerEfun("save_variable", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("save_variable: expected one argument");
+        std::string out;
+        writeRealSaveValue(out, args[0]);
+        return Value(out);
+    });
+
+    t.registerEfun("restore_variable", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("restore_variable: expected a string argument");
+        }
+        return parseRestoreVariableTopLevel(std::get<std::string>(args[0].data));
+    });
 }
 
 } // namespace amlp

@@ -13609,6 +13609,373 @@ static void testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus() {
     std::cout << "testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus OK\n";
 }
 
+// -----------------------------------------------------------------------
+// Phase 0.13 efun growth batch (post-restructure): test_bit/set_bit/
+// clear_bit, crc32, cp, inherits, get_config, query_load_average, say,
+// save_variable/restore_variable. See EfunTable.cpp's own registration
+// comments for each efun's real-source citations.
+// -----------------------------------------------------------------------
+
+static void testSetBitAndTestBitRoundTripSingleBit() {
+    ObjectVarHarness harness;
+    harness.writeFile("/bit_probe1.c",
+        "mixed probe() {\n"
+        "    string str = set_bit(\"\", 100);\n"
+        "    int hit = test_bit(str, 100);\n"
+        "    int miss50 = test_bit(str, 50);\n"
+        "    int miss150 = test_bit(str, 150);\n"
+        "    return ({ str, hit, miss50, miss150 });\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/bit_probe1");
+    assert(ob != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert((*arr)->items.size() == 4);
+    assert(std::get<int64_t>((*arr)->items[1].data) == 1);
+    assert(std::get<int64_t>((*arr)->items[2].data) == 0);
+    assert(std::get<int64_t>((*arr)->items[3].data) == 0);
+
+    std::cout << "testSetBitAndTestBitRoundTripSingleBit OK\n";
+}
+
+static void testSetBitThrowsOnOutOfRangeOrNegativeBitIndex() {
+    ObjectVarHarness harness;
+    harness.writeFile("/bit_probe2.c",
+        "mixed probe_huge() { return catch(set_bit(\"\", 10000000000000)); }\n"
+        "mixed probe_neg() { return catch(set_bit(\"\", -2)); }\n");
+    auto ob = harness.objects.cloneObject("/bit_probe2");
+    assert(ob != nullptr);
+
+    amlp::Value huge = harness.vm.callFunction(ob, "probe_huge", {});
+    assert(std::holds_alternative<std::string>(huge.data));
+    amlp::Value neg = harness.vm.callFunction(ob, "probe_neg", {});
+    assert(std::holds_alternative<std::string>(neg.data));
+
+    std::cout << "testSetBitThrowsOnOutOfRangeOrNegativeBitIndex OK\n";
+}
+
+// Real f_clear_bit(): an index past the string's current length returns
+// the first argument completely unmodified (no resize, no error) --
+// clearing a bit that was never set is a real no-op, not a growth point
+// the way set_bit()'s own out-of-range handling is.
+static void testClearBitIsNoOpPastStringLengthAndClearsWithinRange() {
+    ObjectVarHarness harness;
+    harness.writeFile("/bit_probe3.c",
+        "mixed probe() {\n"
+        "    string str = \"11111\";\n"
+        "    string cleared = clear_bit(str, 7);\n"
+        "    int stillMiss = test_bit(cleared, 7);\n"
+        "    string setThenClear = clear_bit(set_bit(cleared, 12), 12);\n"
+        "    string noop = clear_bit(setThenClear, 40);\n"
+        "    return ({ stillMiss, noop == setThenClear });\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/bit_probe3");
+    assert(ob != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert(std::get<int64_t>((*arr)->items[0].data) == 0);
+    assert(std::get<int64_t>((*arr)->items[1].data) == 1);
+
+    std::cout << "testClearBitIsNoOpPastStringLengthAndClearsWithinRange OK\n";
+}
+
+// Independently computed (standard reflected CRC-32, poly 0xedb88320,
+// seeded 0xFFFFFFFF, no final complement -- matching real compute_crc32()
+// exactly) rather than pulled from this driver's own implementation, so
+// this test can actually catch a wrong polynomial or a stray final XOR.
+static void testCrc32ReturnsKnownValueForHelloAndSeedValueForEmptyString() {
+    ObjectVarHarness harness;
+    std::vector<amlp::Value> helloArgs{ amlp::Value(std::string("hello")) };
+    amlp::Value hello = amlp::EfunTable::instance().call("crc32", harness.vm, helloArgs);
+    assert(std::get<int64_t>(hello.data) == 3387906425LL);
+
+    std::vector<amlp::Value> emptyArgs{ amlp::Value(std::string("")) };
+    amlp::Value empty = amlp::EfunTable::instance().call("crc32", harness.vm, emptyArgs);
+    assert(std::get<int64_t>(empty.data) == 4294967295LL);
+
+    std::cout << "testCrc32ReturnsKnownValueForHelloAndSeedValueForEmptyString OK\n";
+}
+
+static void testCrc32ThrowsOnNonStringArgument() {
+    ObjectVarHarness harness;
+    std::vector<amlp::Value> args{ amlp::Value(int64_t{0}) };
+    bool threw = false;
+    try {
+        amlp::EfunTable::instance().call("crc32", harness.vm, args);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testCrc32ThrowsOnNonStringArgument OK\n";
+}
+
+static void testCpCopiesFileContentAndReturnsTruthy() {
+    ObjectVarHarness harness;
+    harness.writeFile("/cp_source.c", "void create() {}\n");
+    harness.writeFile("/cp_probe.c",
+        "mixed probe() {\n"
+        "    rm(\"/cp_dest.c\");\n"
+        "    int before = file_size(\"/cp_dest.c\");\n"
+        "    int ok = cp(\"/cp_source.c\", \"/cp_dest.c\");\n"
+        "    int after = file_size(\"/cp_dest.c\");\n"
+        "    return ({ before, ok, after, read_file(\"/cp_source.c\") == read_file(\"/cp_dest.c\") });\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/cp_probe");
+    assert(ob != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert(std::get<int64_t>((*arr)->items[0].data) == -1);
+    assert(std::get<int64_t>((*arr)->items[1].data) != 0);
+    assert(std::get<int64_t>((*arr)->items[2].data) > 0);
+    assert(std::get<int64_t>((*arr)->items[3].data) != 0);
+
+    std::cout << "testCpCopiesFileContentAndReturnsTruthy OK\n";
+}
+
+// Mirrors this repo's own bundled Lil starter mudlib's real conformance
+// test for this efun exactly (mudlib/single/tests/efuns/inherits.c,
+// inh0/inh1/inh2.c): inh2 inherits inh1 inherits inh0 -- a chain, not
+// three independent files.
+static void testInheritsMatchesTransitiveChainInBothDirections() {
+    ObjectVarHarness harness;
+    harness.writeFile("/inh_base.c", "int marker() { return 1; }\n");
+    harness.writeFile("/inh_mid.c", "inherit \"/inh_base\";\n");
+    harness.writeFile("/inh_leaf.c", "inherit \"/inh_mid\";\n");
+
+    auto base = harness.objects.cloneObject("/inh_base");
+    auto mid = harness.objects.cloneObject("/inh_mid");
+    auto leaf = harness.objects.cloneObject("/inh_leaf");
+    assert(base && mid && leaf);
+
+    std::vector<amlp::Value> midInLeaf{ amlp::Value(std::string("/inh_mid.c")), amlp::Value(leaf) };
+    assert(std::get<int64_t>(amlp::EfunTable::instance().call("inherits", harness.vm, midInLeaf).data) == 1);
+
+    std::vector<amlp::Value> baseInLeaf{ amlp::Value(std::string("/inh_base.c")), amlp::Value(leaf) };
+    assert(std::get<int64_t>(amlp::EfunTable::instance().call("inherits", harness.vm, baseInLeaf).data) == 1);
+
+    std::vector<amlp::Value> baseInMid{ amlp::Value(std::string("/inh_base.c")), amlp::Value(mid) };
+    assert(std::get<int64_t>(amlp::EfunTable::instance().call("inherits", harness.vm, baseInMid).data) == 1);
+
+    // Wrong direction: a base does not inherit its own descendant.
+    std::vector<amlp::Value> leafInMid{ amlp::Value(std::string("/inh_leaf.c")), amlp::Value(mid) };
+    assert(std::get<int64_t>(amlp::EfunTable::instance().call("inherits", harness.vm, leafInMid).data) == 0);
+
+    std::vector<amlp::Value> leafInBase{ amlp::Value(std::string("/inh_leaf.c")), amlp::Value(base) };
+    assert(std::get<int64_t>(amlp::EfunTable::instance().call("inherits", harness.vm, leafInBase).data) == 0);
+
+    std::vector<amlp::Value> midInBase{ amlp::Value(std::string("/inh_mid.c")), amlp::Value(base) };
+    assert(std::get<int64_t>(amlp::EfunTable::instance().call("inherits", harness.vm, midInBase).data) == 0);
+
+    std::vector<amlp::Value> unknownInBase{ amlp::Value(std::string("foo")), amlp::Value(base) };
+    assert(std::get<int64_t>(amlp::EfunTable::instance().call("inherits", harness.vm, unknownInBase).data) == 0);
+
+    std::cout << "testInheritsMatchesTransitiveChainInBothDirections OK\n";
+}
+
+static void testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative() {
+    ObjectVarHarness harness;
+    std::vector<amlp::Value> zeroArgs{ amlp::Value(int64_t{0}) };
+    amlp::Value name = amlp::EfunTable::instance().call("get_config", harness.vm, zeroArgs);
+    assert(std::get<std::string>(name.data) == "AMLP");
+
+    std::vector<amlp::Value> negArgs{ amlp::Value(int64_t{-1}) };
+    bool threw = false;
+    try {
+        amlp::EfunTable::instance().call("get_config", harness.vm, negArgs);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative OK\n";
+}
+
+static void testQueryLoadAverageReturnsAStringInRealFormat() {
+    ObjectVarHarness harness;
+    std::vector<amlp::Value> noArgs;
+    amlp::Value result = amlp::EfunTable::instance().call("query_load_average", harness.vm, noArgs);
+    auto* s = std::get_if<std::string>(&result.data);
+    assert(s != nullptr);
+    assert(s->find("cmds/s") != std::string::npos);
+    assert(s->find("comp lines/s") != std::string::npos);
+
+    std::cout << "testQueryLoadAverageReturnsAStringInRealFormat OK\n";
+}
+
+// Real send_say(): the surrounding object and everyone else in it (except
+// origin itself) are eligible targets; origin never receives its own
+// message even when it has its own live connection.
+static void testSayBroadcastsToRoomSiblingsButNotOriginItself() {
+    ObjectVarHarness harness;
+    harness.writeFile("/say_room.c", "void create() {}\n");
+    harness.writeFile("/say_mover.c", "void go(object dest) { move_object(dest); }\n");
+    harness.writeFile("/say_actor.c",
+        "void go(object dest) { move_object(dest); }\n"
+        "void speak(string s) { say(s); }\n");
+
+    auto room = harness.objects.cloneObject("/say_room");
+    auto actor = harness.objects.cloneObject("/say_actor");
+    auto listener = harness.objects.cloneObject("/say_mover");
+    assert(room && actor && listener);
+
+    harness.vm.callFunction(actor, "go", {amlp::Value(room)});
+    harness.vm.callFunction(listener, "go", {amlp::Value(room)});
+
+    int fdsActor[2];
+    int fdsListener[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsActor) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsListener) == 0);
+    amlp::Connection connActor(fdsActor[0]);
+    amlp::Connection connListener(fdsListener[0]);
+    connActor.attach(actor);
+    connListener.attach(listener);
+
+    harness.vm.callFunction(actor, "speak", {amlp::Value(std::string("hi there\n"))});
+
+    char buf[256];
+    ssize_t n = ::recv(fdsListener[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    assert(std::string(buf, static_cast<size_t>(n)) == "hi there\n");
+
+    // The speaker's own peer socket must receive nothing at all.
+    ssize_t nActor = ::recv(fdsActor[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(nActor < 0);
+
+    ::close(fdsActor[1]);
+    ::close(fdsListener[1]);
+    std::cout << "testSayBroadcastsToRoomSiblingsButNotOriginItself OK\n";
+}
+
+static void testSayAvoidArgumentExcludesSpecifiedTarget() {
+    ObjectVarHarness harness;
+    harness.writeFile("/say_room2.c", "void create() {}\n");
+    harness.writeFile("/say_mover2.c", "void go(object dest) { move_object(dest); }\n");
+    harness.writeFile("/say_actor2.c",
+        "void go(object dest) { move_object(dest); }\n"
+        "void speak(string s, object avoid) { say(s, avoid); }\n");
+
+    auto room = harness.objects.cloneObject("/say_room2");
+    auto actor = harness.objects.cloneObject("/say_actor2");
+    auto keep = harness.objects.cloneObject("/say_mover2");
+    auto skip = harness.objects.cloneObject("/say_mover2");
+    assert(room && actor && keep && skip);
+
+    harness.vm.callFunction(actor, "go", {amlp::Value(room)});
+    harness.vm.callFunction(keep, "go", {amlp::Value(room)});
+    harness.vm.callFunction(skip, "go", {amlp::Value(room)});
+
+    int fdsKeep[2];
+    int fdsSkip[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsKeep) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsSkip) == 0);
+    amlp::Connection connKeep(fdsKeep[0]);
+    amlp::Connection connSkip(fdsSkip[0]);
+    connKeep.attach(keep);
+    connSkip.attach(skip);
+
+    harness.vm.callFunction(actor, "speak", {amlp::Value(std::string("secret\n")), amlp::Value(skip)});
+
+    char buf[256];
+    ssize_t nKeep = ::recv(fdsKeep[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(nKeep > 0);
+    assert(std::string(buf, static_cast<size_t>(nKeep)) == "secret\n");
+
+    ssize_t nSkip = ::recv(fdsSkip[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(nSkip < 0);
+
+    ::close(fdsKeep[1]);
+    ::close(fdsSkip[1]);
+    std::cout << "testSayAvoidArgumentExcludesSpecifiedTarget OK\n";
+}
+
+// Matches this repo's own bundled Lil starter mudlib's real conformance
+// test for this efun exactly (mudlib/single/tests/efuns/save_variable.c):
+// an embedded '\n' saves as a literal '\r' byte, '"'/'\\' are backslash-
+// escaped, and arrays/mappings always carry a trailing comma before the
+// closing delimiter, even after the last element.
+static void testSaveVariableMatchesRealFormatForStringsNumbersArraysAndMappings() {
+    ObjectVarHarness harness;
+
+    auto save = [&](amlp::Value v) -> std::string {
+        std::vector<amlp::Value> args{ std::move(v) };
+        return std::get<std::string>(amlp::EfunTable::instance().call("save_variable", harness.vm, args).data);
+    };
+
+    assert(save(amlp::Value(std::string("\n"))) == std::string("\"\r\""));
+    assert(save(amlp::Value(std::string("\""))) == "\"\\\"\"");
+    assert(save(amlp::Value(int64_t{-1})) == "-1");
+    assert(save(amlp::Value(int64_t{22})) == "22");
+    assert(save(amlp::Value(1.2)) == "1.200000");
+
+    auto emptyArr = std::make_shared<amlp::Array>();
+    assert(save(amlp::Value(emptyArr)) == "({})");
+
+    auto oneArr = std::make_shared<amlp::Array>();
+    oneArr->items.push_back(amlp::Value(int64_t{0}));
+    assert(save(amlp::Value(oneArr)) == "({0,})");
+
+    auto oneMap = std::make_shared<amlp::Mapping>();
+    oneMap->entries.emplace_back(amlp::Value(int64_t{1}), amlp::Value(int64_t{22}));
+    assert(save(amlp::Value(oneMap)) == "([1:22,])");
+
+    std::cout << "testSaveVariableMatchesRealFormatForStringsNumbersArraysAndMappings OK\n";
+}
+
+// Matches this repo's own bundled Lil starter mudlib's real conformance
+// test for this efun exactly (mudlib/single/tests/efuns/
+// restore_variable.c): round-trips save_variable()'s own output, and
+// rejects the same five malformed shapes that real restore_svalue()
+// (object.c) rejects -- trailing garbage after a top-level quoted
+// string (both the plain and escaped exit paths) and a lone '-' with no
+// digit after it.
+static void testRestoreVariableRoundTripsSaveVariableOutputAndRejectsMalformedInput() {
+    ObjectVarHarness harness;
+
+    auto restore = [&](const std::string& s) -> amlp::Value {
+        std::vector<amlp::Value> args{ amlp::Value(s) };
+        return amlp::EfunTable::instance().call("restore_variable", harness.vm, args);
+    };
+    auto throws = [&](const std::string& s) -> bool {
+        try {
+            restore(s);
+        } catch (const amlp::LpcRuntimeError&) {
+            return true;
+        }
+        return false;
+    };
+
+    assert(std::get<std::string>(restore("\"\r\"").data) == "\n");
+    assert(std::get<std::string>(restore("\"\\\"\"").data) == "\"");
+    assert(std::get<int64_t>(restore("-1").data) == -1);
+    assert(std::get<int64_t>(restore("22").data) == 22);
+    assert(std::get<double>(restore("1.200000").data) == 1.2);
+
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(restore("({0,})").data);
+    assert(arr && arr->items.size() == 1);
+    assert(std::get<int64_t>(arr->items[0].data) == 0);
+
+    auto map = std::get<std::shared_ptr<amlp::Mapping>>(restore("([1:22,])").data);
+    assert(map && map->entries.size() == 1);
+    assert(std::get<int64_t>(map->entries[0].first.data) == 1);
+    assert(std::get<int64_t>(map->entries[0].second.data) == 22);
+
+    // The five real value_errs shapes from Lil's own test content.
+    assert(throws("\"\"x"));    // trailing garbage after an empty plain string
+    assert(throws("\"\\"));     // unterminated escape
+    assert(throws("\"\\x\\")); // unterminated escape after a real char
+    assert(throws("\"\\x\"x")); // trailing garbage after an escaped string
+    assert(throws("-x"));       // '-' with no digit after it
+
+    std::cout << "testRestoreVariableRoundTripsSaveVariableOutputAndRejectsMalformedInput OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -14125,6 +14492,19 @@ int main() {
     testQueryStrikeBonusEfunMatchesLpcAcrossPlayerStates();
     testQueryParryBonusEfunMatchesLpcAcrossPlayerStates();
     testQueryDodgeBonusEfunMatchesLpcAliasOfParryBonus();
+    testSetBitAndTestBitRoundTripSingleBit();
+    testSetBitThrowsOnOutOfRangeOrNegativeBitIndex();
+    testClearBitIsNoOpPastStringLengthAndClearsWithinRange();
+    testCrc32ReturnsKnownValueForHelloAndSeedValueForEmptyString();
+    testCrc32ThrowsOnNonStringArgument();
+    testCpCopiesFileContentAndReturnsTruthy();
+    testInheritsMatchesTransitiveChainInBothDirections();
+    testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative();
+    testQueryLoadAverageReturnsAStringInRealFormat();
+    testSayBroadcastsToRoomSiblingsButNotOriginItself();
+    testSayAvoidArgumentExcludesSpecifiedTarget();
+    testSaveVariableMatchesRealFormatForStringsNumbersArraysAndMappings();
+    testRestoreVariableRoundTripsSaveVariableOutputAndRejectsMalformedInput();
     std::cout << "all tests passed\n";
     return 0;
 }

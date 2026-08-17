@@ -3,6 +3,72 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22: repo-level `CLAUDE.md` added, restructure state confirmed
+post-extraction, and 11 new efuns implemented (Phase 0 row 0.13:
+190 registered, up from 179).** First session in the standalone `amlp`
+repository after its extraction from the AetherMUD monorepo and rename
+from `lpcdriver`. Confirmed directly rather than trusted: the restructure
+itself (commit `7a4121c`) was already committed on `main` at session
+start, not merely staged as initially described -- `git status` showed a
+clean tree. Confirmed real, not assumed: Phase 0 rows 0.1-0.12 and 0.14
+complete, row 0.13 in progress, row 0.15 filed and still open, matching
+ROADMAP.md's own checkboxes.
+
+Also found and corrected in passing: the prior (2026-08-21) entry's own
+"502 tests passing" figure was stale the moment it was written -- that
+same commit (`1d45a68`, a second commit reusing the 0.14 commit message
+verbatim rather than amending the first) bundled in 7 more tests and a
+previously-unlogged `sprintf`/`printf` `%O` specifier implementation
+(generic LPC value-dump formatting, confirmed against `sprintf.c`'s own
+`svalue_to_string()`) on top of the 502 the entry's own text describes --
+the real post-commit count was already 509, and `%O` was already
+implemented, contradicting that entry's own "not fixed here" framing for
+it. `ROADMAP.md`'s own "Build and test" baseline (486, dated 2026-08-20)
+was even further stale, predating that same commit. Both now corrected
+to the real, freshly re-measured counts.
+
+This mudlib no longer contains the old `nightmare3_fluffos_v2` Rifts
+content the previous several 0.13 batches ranked call-site frequency
+against (it stayed behind in the AetherMUD monorepo per the extraction's
+own design) -- `mudlib/` is now just the bundled Lil starter mudlib. This
+batch re-scoped 0.13's ranking method accordingly: diffed
+`EfunTable.cpp`'s registered names against Lil's own real efun
+conformance suite (`mudlib/single/tests/efuns/*.c`, one file per real
+efun, each a genuine, not merely name-matched, exercise of that efun --
+confirmed batch by grepping `func_spec.c`/`efuns_main.c` for every
+surviving filename before implementing anything), rather than a raw
+call-site count. Implemented: `set_bit`/`clear_bit`/`test_bit` (real
+6-bit-per-character packing, not 8, confirmed directly against
+`f_set_bit()`), `crc32` (confirmed the real algorithm has no final
+complement step, unlike textbook CRC-32 -- `crc32("")` is genuinely
+`0xFFFFFFFF`, not 0), `cp`, `inherits` (real program-identity chain walk,
+not a string comparison, confirmed against `f_inherits()` directly),
+`get_config` (index 0 only, matching this row's own real, tested call
+site; every other index throws rather than fabricating driver-internal
+statistics this codebase has no real source for, same category as
+`mud_status`), `query_load_average` (fixed, honestly-zero string in the
+real format shape, no rolling-rate tracking exists to report), `say`
+(previously excluded from every prior batch because the old Rifts
+mudlib shadowed it with a simul_efun -- that mudlib is gone from this
+repo now, and Lil's own `talker.c` calls the bare efun directly and
+unshadowed, so the exclusion no longer applies), and
+`save_variable`/`restore_variable` (the single-value save to/from the
+same real on-disk text format `restore_object()` already reads --
+`restore_variable`'s own top-level string parser needed a real,
+specific quirk `restore_object`'s array/mapping-element parser must NOT
+share, confirmed by reading `restore_string()` directly: a top-level
+quoted string must consume the *entire* remaining buffer, or it is a
+real error, while a nested array/mapping-element string has no such
+requirement).
+
+New `VM::mudName()` accessor added (`resolveMudlibPath()`'s own established
+"derived accessor, not the whole `Config&`" pattern), `get_config`'s only
+caller.
+
+13 new regression tests. Full suite: 522 tests passing, up from 509 (the
+real, freshly-confirmed prior count, not the stale 502/486 both now
+corrected above), no regressions, stable across three consecutive runs.
+
 **2026-08-21: `global include file` config support implemented (Phase 0
 row 0.14), and a real third-party mudlib (Lil) confirmed logging in
 end to end against this driver for the first time.** New `Config` key
@@ -51,20 +117,29 @@ unconditional `user->move(VOID_OB)`, the sensible landing spot for a
 deliberately minimal bootstrap mudlib with no real world of its own.
 
 Two further gaps surfaced live during this same session's own socket
-testing (not from static reading), both flagged rather than fixed here:
-`say` (Lil's own `/command/say.c` calls the real `say()` efun directly;
-this driver does not register it, deliberately, since this repo's own
-bundled Rifts mudlib shadows it with a simul_efun -- a different
-context, already flagged in an earlier session's efun-gap-list) and
-`eval` (`/command/eval.c` always formats its result via `printf("Result
-= %O\n", ...)`, and this driver's `sprintf`/`printf` do not implement
-the `%O` format specifier at all -- a new, previously-undiscovered gap).
+testing (not from static reading): `say` (Lil's own `/command/say.c`
+calls the real `say()` efun directly; this driver does not register it,
+deliberately, since this repo's own bundled Rifts mudlib shadows it with
+a simul_efun -- a different context, already flagged in an earlier
+session's efun-gap-list -- ~~flagged rather than fixed here~~, see the
+2026-08-22 entry above: that Rifts mudlib is gone from this repo after
+its extraction into a standalone project, and the exclusion no longer
+applies, so `say` is implemented now) and `eval` (`/command/eval.c`
+always formats its result via `printf("Result = %O\n", ...)`, and this
+driver's `sprintf`/`printf` do not implement the `%O` format specifier at
+all -- a new, previously-undiscovered gap -- ~~flagged rather than fixed
+here~~: actually implemented within this same commit, just never
+reflected back into this entry's own text at the time -- see the
+2026-08-22 entry above for the correction).
 
 3 new regression tests (macro resolves when `global_include_file` is
 configured; the identical fixture fails to compile when it is not,
 deliberately reproducing Lil's own real failure shape; a
-no-dependency object compiles identically either way). Full suite: 502
-tests passing, up from 499, no regressions, stable across three
+no-dependency object compiles identically either way). ~~Full suite: 502
+tests passing, up from 499~~ -- stale the moment it was written, see the
+2026-08-22 entry above: the real count after this same commit was 509,
+including 7 more tests and the `%O` work just described, neither
+reflected in this count at the time. no regressions, stable across three
 consecutive runs.
 
 **2026-08-20: Every registered efun now has at least one regression test

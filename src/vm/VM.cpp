@@ -679,6 +679,10 @@ std::string VM::resolveMudlibPath(const std::string& lpcPath) const {
     return config_.mudlibRoot() + lpcPath;
 }
 
+const std::string& VM::mudName() const {
+    return config_.mudName();
+}
+
 // See VM.hpp's own comment. Implements two of real setup_new_commands()'s
 // (add_action.c) three visitation legs -- the ones this mudlib's own
 // confirmed real usage needs (the destination handing its own verbs to
