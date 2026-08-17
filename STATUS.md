@@ -3,6 +3,54 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): 4 more efuns implemented (Phase 0 row 0.13:
+194 registered, up from 190).** Same method as the same-day batch below:
+diffed `EfunTable.cpp`'s registered names against Lil's own real efun
+conformance suite (`mudlib/single/tests/efuns/*.c`), checked each
+surviving name against `func_spec.c`/`efuns_main.c` directly before
+implementing. Most of the remaining gap is architecture-mismatch
+exclusions already recorded in `src/efun/instruct.md`'s own status table
+(`mud_status`/`cache_stats`/`malloc_status`/`dumpallobj`/`opcprof`'s
+driver-internal C-struct dumps, `allocate_buffer`/`read_buffer`'s buffer
+type, `get_char`/`ed`'s per-keystroke/multi-line-editor infrastructure)
+or plain false positives/test-fixture filenames, not real efun names at
+all (confirmed by grep against `func_spec.c` before excluding anything,
+not assumed from the prior pass's own list).
+
+Implemented: `children` (real object-hash-table walk, reused via
+`LiveObjectRegistry`, already backing `objects()`/`livings()` -- inherits
+that registry's own documented weak_ptr scope limitation: a clone with no
+live reference anywhere else in this driver is not enumerated, unlike
+real FluffOS's own persistent, refcount-independent object table; a
+first version of this row's own regression test caught this live, not
+guessed -- it initially created 5 throwaway clones with no surviving
+reference and got back only 1), `set_light` (real `add_light()`
+propagation up the full environment chain, returning the topmost
+ancestor's own resulting total -- confirmed directly, not assumed from
+`func_spec.c`'s own bare "should die a dark death" deprecation comment
+alone), `set_debug_level` (accepted and silently ignored -- this driver
+has no `debug()`-style category-tagged trace system for it to toggle,
+confirmed by grep; this row's own real, tested call site is itself gated
+behind a `__DEBUG_MACRO__` this mudlib never defines by default, so even
+real FluffOS treats it as a no-op there), and `bind` (real function-
+pointer owner rebinding, gated behind `master()->valid_bind()` matching
+this driver's own established master-apply-gate pattern -- real
+FluffOS's own two `FP_NOT_BINDABLE` guards do not apply to this driver's
+simplified Closure model, which has no equivalent unsafe closure kind to
+protect against).
+
+Not implemented, flagged rather than folded in: `origin()` (per-call
+origin tagging through every VM call path -- the one real call site this
+row's own instruct.md has on file is a security gate, where a wrong
+answer is a correctness bug, not just an incomplete feature) and the
+`snoop`/`query_snoop`/`query_snooping` family (a real, self-contained
+subsystem -- a snoop-target registry plus output duplication at the
+`Connection` level -- but sized more like its own row than a batch
+item, comparable to the original shadow() slice).
+
+6 new regression tests. Full suite: 528 tests passing, up from 522, no
+regressions, stable across three consecutive runs.
+
 **2026-08-22: repo-level `CLAUDE.md` added, restructure state confirmed
 post-extraction, and 11 new efuns implemented (Phase 0 row 0.13:
 190 registered, up from 179).** First session in the standalone `amlp`

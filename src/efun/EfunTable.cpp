@@ -5824,6 +5824,162 @@ void registerCoreEfuns() {
         }
         return parseRestoreVariableTopLevel(std::get<std::string>(args[0].data));
     });
+
+    // -------------------------------------------------------------------------
+    // Phase 0.13 efun growth batch, continued: children, set_light, bind.
+    // Same method as the prior batch -- diffed EfunTable's registered
+    // names against mudlib/single/tests/efuns/*.c, checked each surviving
+    // name against func_spec.c/efuns_main.c directly before implementing.
+    // Most of the remaining gap is excluded architecture mismatches
+    // (mud_status/cache_stats/malloc_status/dumpallobj/opcprof's driver-
+    // internal C-struct dumps, allocate_buffer/read_buffer's buffer type,
+    // get_char/ed's per-keystroke/multi-line-editor infrastructure, plain
+    // false positives, or test fixture files rather than real efun
+    // names -- see src/efun/instruct.md's own status table) or, for
+    // origin()/snoop()'s own family, real but sizeable enough (per-call
+    // origin tagging through every VM call path; a whole snoop-target
+    // registry plus Connection-level output duplication) to warrant their
+    // own row rather than folding into this batch -- flagged in
+    // STATUS.md's own dated entry for this batch rather than silently
+    // skipped.
+    // -------------------------------------------------------------------------
+
+    // object *children(string filename) -- real otable.c's own children():
+    // every currently-loaded object (blueprint or clone alike) whose own
+    // filename starts with the given prefix, confirmed directly
+    // (basename()-stripped clone-id aside -- this driver has no clone-id
+    // suffix concept at all, same pre-existing gap already noted on
+    // base_name()'s own comment, so that strip is already a no-op here).
+    // Reuses LiveObjectRegistry (already backing objects()/livings()
+    // above) rather than a separate table -- the exact same "every
+    // currently-loaded object" set real children()'s own object hash
+    // table walks. filename is normalized the same way
+    // ObjectManager::normalizeFilename() strips a trailing ".c" before
+    // storing LpcObject::filename() in the first place, so a real
+    // __FILE__-shaped argument (which always carries ".c",
+    // ObjectManager.cpp's own predefine comment) matches correctly
+    // against the extension-less stored form. Real, narrow scope
+    // limitation inherited directly from LiveObjectRegistry itself (see
+    // its own header comment): a clone with no live shared_ptr anywhere
+    // else in this driver is not enumerated here, unlike real FluffOS's
+    // own persistent, refcount-independent object table, where a clone
+    // stays listed until explicitly destruct()ed regardless of whether
+    // any LPC-level variable still references it. Not a gap specific to
+    // this efun -- objects()/livings() above already carry the identical
+    // limitation, and this driver's own clone lifetime model (a clone
+    // lives only as long as something genuinely holds it, typically an
+    // environment/inventory slot) already assumes it everywhere else.
+    t.registerEfun("children", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("children: expected a string argument");
+        }
+        std::string prefix = std::get<std::string>(args[0].data);
+        if (prefix.size() >= 2 && prefix.compare(prefix.size() - 2, 2, ".c") == 0) {
+            prefix.erase(prefix.size() - 2);
+        }
+        auto result = std::make_shared<Array>();
+        for (auto& ob : LiveObjectRegistry::all()) {
+            const std::string& name = ob->filename();
+            if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0) {
+                result->items.emplace_back(ob);
+            }
+        }
+        return Value(result);
+    });
+
+    // int set_light(int n) -- real efuns_main.c's own f_set_light():
+    // confirmed directly, not guessed from func_spec.c's bare "/*
+    // set_light should die a dark death */ int set_light(int);" comment
+    // alone -- adds n to current_object's own total light count, real
+    // simulate.c's own add_light() (confirmed directly) propagating that
+    // same delta up through every ancestor environment too, then returns
+    // the *topmost* ancestor's own resulting total, walking all the way
+    // to the root regardless of how many levels up that is. Deprecated in
+    // real FluffOS itself, kept here only because this repo's own bundled
+    // Lil starter mudlib genuinely calls it
+    // (mudlib/single/tests/efuns/light.c's own create()).
+    t.registerEfun("set_light", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("set_light: expected an int argument");
+        }
+        auto ob = vm.currentObject();
+        if (!ob) return Value(static_cast<int64_t>(0));
+        int delta = static_cast<int>(std::get<int64_t>(args[0].data));
+        ob->setTotalLight(ob->totalLight() + delta);
+        auto root = ob;
+        for (auto env = ob->environment().lock(); env; env = env->environment().lock()) {
+            env->setTotalLight(env->totalLight() + delta);
+            root = env;
+        }
+        return Value(static_cast<int64_t>(root->totalLight()));
+    });
+
+    // void set_debug_level(int | string) -- real efuns_main.c's own
+    // f_set_debug_level(): toggles bits in a driver-internal debug_level
+    // bitmask (debug.c) controlling which debug(...) trace categories
+    // print to the driver's own console -- this driver has no equivalent
+    // category-tagged trace system anywhere (confirmed by grep: no
+    // debug()-style call site exists in this codebase at all), so there
+    // is nothing real for this efun to toggle. Accepted and silently
+    // ignored (matching this codebase's own established convention for
+    // set_eval_limit()'s own accumulated-cost model this driver
+    // approximates instead of replicating) rather than left as "undefined
+    // efun", since this row's own real, tested call site
+    // (mudlib/single/tests/efuns/set_debug_level.c) only needs the call
+    // to not throw, gated behind a `__DEBUG_MACRO__` this mudlib never
+    // defines by default -- confirmed by grep, so that test's own body is
+    // an intentional no-op even under real FluffOS.
+    t.registerEfun("set_debug_level", [](VM&, std::vector<Value>&) -> Value {
+        return Value{};
+    });
+
+    // function bind(function fp, object new_owner) -- real efuns_main.c's
+    // own f_bind(): rebinds a function pointer's own owner (the object a
+    // closure's local/inherited-function and global-variable references
+    // resolve against) to a different object, gated behind
+    // master()->valid_bind(binder, old_owner, new_owner) -- confirmed
+    // directly via f_bind()'s own exact 3-argument
+    // push_object(current_object)/push_object(old_owner)/push_object(new_
+    // owner) sequence before its "apply_master_ob(APPLY_VALID_BIND, 3)"
+    // call, matching this driver's own already-established "master &&
+    // isTruthy(callFunction(master, 'valid_X', ...))" gate pattern (see
+    // set_hide's identical valid_hide() gate above). Real f_bind() also
+    // has two FP_NOT_BINDABLE guards (a closure over local variables, or
+    // one referencing its own owner's globals/local functions, cannot be
+    // safely rebound) -- not implemented, since this driver's own
+    // simplified Closure (Value.hpp's own comment: a bare function name
+    // plus already-bound arguments, re-resolved lazily against whatever
+    // `owner` currently is at *call* time, not baked at construction) has
+    // no equivalent unsafe case: every closure this driver can construct
+    // is already safe to rebind by construction, there is nothing for
+    // that guard to protect against here. Same-owner rebind is a real
+    // no-op, matching f_bind()'s own "if (ob == old_fp->hdr.owner) { no
+    // change; }" branch exactly -- returns the identical closure
+    // unchanged rather than a new copy.
+    t.registerEfun("bind", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<Closure>>(args[0].data) ||
+            !std::holds_alternative<std::shared_ptr<LpcObject>>(args[1].data)) {
+            throw LpcRuntimeError("bind: expected (function, object) arguments");
+        }
+        auto oldClosure = std::get<std::shared_ptr<Closure>>(args[0].data);
+        auto newOwner = std::get<std::shared_ptr<LpcObject>>(args[1].data);
+        if (!oldClosure) throw LpcRuntimeError("bind: expected a real function pointer");
+        auto oldOwner = oldClosure->owner.lock();
+        if (oldOwner == newOwner) return Value(oldClosure);
+
+        auto master = vm.masterObject();
+        bool permitted = master && isTruthy(vm.callFunction(
+            master, "valid_bind", {Value(vm.currentObject()), Value(oldOwner), Value(newOwner)}));
+        if (!permitted) {
+            throw LpcRuntimeError("Master object denied permission to bind() function pointer.");
+        }
+
+        auto rebound = std::make_shared<Closure>();
+        rebound->owner = newOwner;
+        rebound->functionName = oldClosure->functionName;
+        rebound->boundArgs = oldClosure->boundArgs;
+        return Value(rebound);
+    });
 }
 
 } // namespace amlp

@@ -13976,6 +13976,179 @@ static void testRestoreVariableRoundTripsSaveVariableOutputAndRejectsMalformedIn
     std::cout << "testRestoreVariableRoundTripsSaveVariableOutputAndRejectsMalformedInput OK\n";
 }
 
+// -----------------------------------------------------------------------
+// Phase 0.13 efun growth batch, continued: children, set_light,
+// set_debug_level, bind.
+// -----------------------------------------------------------------------
+
+// Mirrors this repo's own bundled Lil starter mudlib's real conformance
+// test for this efun (mudlib/single/tests/efuns/children.c): every
+// currently-loaded clone of the same file, plus the file's own first
+// loaded instance, all match a plain prefix lookup by filename.
+static void testChildrenReturnsEveryLiveObjectMatchingFilenamePrefix() {
+    ObjectVarHarness harness;
+    harness.writeFile("/children_probe.c", "void create() {}\n");
+    harness.writeFile("/children_other.c", "void create() {}\n");
+
+    // LiveObjectRegistry entries are weak_ptr (see its own header
+    // comment) -- a clone this driver's own C++ reference-counting model
+    // has no other owner for is not enumerable here, unlike real
+    // FluffOS's own persistent, refcount-independent object table.
+    // Every clone this test wants children() to see is kept alive in
+    // this vector for exactly that reason, deliberately, not an
+    // oversight -- matching how a real clone stays alive in practice via
+    // an environment/inventory slot or some other genuine reference.
+    std::vector<std::shared_ptr<amlp::LpcObject>> liveClones;
+    liveClones.push_back(harness.objects.cloneObject("/children_probe"));
+    assert(liveClones.back() != nullptr);
+    for (int i = 0; i < 4; ++i) {
+        liveClones.push_back(harness.objects.cloneObject("/children_probe"));
+        assert(liveClones.back() != nullptr);
+    }
+    auto unrelated = harness.objects.cloneObject("/children_other");
+    assert(unrelated != nullptr);
+
+    // Real __FILE__ always carries ".c" -- confirmed the driver's own
+    // extension-less LpcObject::filename() storage still matches it.
+    std::vector<amlp::Value> args{ amlp::Value(std::string("/children_probe.c")) };
+    amlp::Value result = amlp::EfunTable::instance().call("children", harness.vm, args);
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && *arr);
+    assert((*arr)->items.size() == 5);
+    for (auto& item : (*arr)->items) {
+        auto* ob = std::get_if<std::shared_ptr<amlp::LpcObject>>(&item.data);
+        assert(ob != nullptr && *ob);
+        assert((*ob)->filename() == "/children_probe");
+    }
+
+    std::cout << "testChildrenReturnsEveryLiveObjectMatchingFilenamePrefix OK\n";
+}
+
+// Real add_light(): the delta propagates up through every ancestor
+// environment, and set_light() itself returns the *topmost* ancestor's
+// own resulting total, not the calling object's own total.
+static void testSetLightAccumulatesUpThroughEnvironmentChainAndReturnsRootTotal() {
+    ObjectVarHarness harness;
+    harness.writeFile("/light_root.c", "void create() {}\n");
+    harness.writeFile("/light_mid.c", "void go(object dest) { move_object(dest); }\n");
+    harness.writeFile("/light_leaf.c",
+        "void go(object dest) { move_object(dest); }\n"
+        "int shine(int n) { return set_light(n); }\n");
+
+    auto root = harness.objects.cloneObject("/light_root");
+    auto mid = harness.objects.cloneObject("/light_mid");
+    auto leaf = harness.objects.cloneObject("/light_leaf");
+    assert(root && mid && leaf);
+
+    harness.vm.callFunction(mid, "go", {amlp::Value(root)});
+    harness.vm.callFunction(leaf, "go", {amlp::Value(mid)});
+
+    amlp::Value result = harness.vm.callFunction(leaf, "shine", {amlp::Value(int64_t{3})});
+    assert(std::get<int64_t>(result.data) == 3);
+    assert(leaf->totalLight() == 3);
+    assert(mid->totalLight() == 3);
+    assert(root->totalLight() == 3);
+
+    // A second call accumulates rather than replacing.
+    amlp::Value second = harness.vm.callFunction(leaf, "shine", {amlp::Value(int64_t{2})});
+    assert(std::get<int64_t>(second.data) == 5);
+    assert(root->totalLight() == 5);
+
+    std::cout << "testSetLightAccumulatesUpThroughEnvironmentChainAndReturnsRootTotal OK\n";
+}
+
+static void testSetDebugLevelAcceptsIntOrStringWithoutThrowing() {
+    ObjectVarHarness harness;
+    std::vector<amlp::Value> intArgs{ amlp::Value(int64_t{10}) };
+    amlp::EfunTable::instance().call("set_debug_level", harness.vm, intArgs);
+    std::vector<amlp::Value> stringArgs{ amlp::Value(std::string("connections")) };
+    amlp::EfunTable::instance().call("set_debug_level", harness.vm, stringArgs);
+
+    std::cout << "testSetDebugLevelAcceptsIntOrStringWithoutThrowing OK\n";
+}
+
+// All bind tests use a master object defining a real (permissive)
+// valid_bind(), matching the established set_hide()/shadow()-style
+// harness pattern -- real bind() always denies without one.
+static void testBindRebindsClosureOwnerAndChangesResolution() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_bind(object binder, object old_owner, object new_owner) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/bind_owner_a.c",
+        "int greet() { return 111; }\n"
+        "mixed make() { return (: greet :); }\n");
+    harness.writeFile("/bind_owner_b.c", "int greet() { return 222; }\n");
+
+    auto ownerA = harness.objects.cloneObject("/bind_owner_a");
+    auto ownerB = harness.objects.cloneObject("/bind_owner_b");
+    assert(ownerA && ownerB);
+
+    amlp::Value closureVal = harness.vm.callFunction(ownerA, "make", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::Closure>>(closureVal.data));
+
+    amlp::Value beforeCall =
+        harness.vm.callClosure(std::get<std::shared_ptr<amlp::Closure>>(closureVal.data), {});
+    assert(std::get<int64_t>(beforeCall.data) == 111);
+
+    std::vector<amlp::Value> bindArgs{ closureVal, amlp::Value(ownerB) };
+    amlp::Value rebound = amlp::EfunTable::instance().call("bind", harness.vm, bindArgs);
+    assert(std::holds_alternative<std::shared_ptr<amlp::Closure>>(rebound.data));
+
+    amlp::Value afterCall =
+        harness.vm.callClosure(std::get<std::shared_ptr<amlp::Closure>>(rebound.data), {});
+    assert(std::get<int64_t>(afterCall.data) == 222);
+
+    std::cout << "testBindRebindsClosureOwnerAndChangesResolution OK\n";
+}
+
+static void testBindIsNoOpWhenNewOwnerMatchesCurrentOwner() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_bind(object binder, object old_owner, object new_owner) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/bind_self.c",
+        "int greet() { return 42; }\n"
+        "mixed make() { return (: greet :); }\n");
+    auto ob = harness.objects.cloneObject("/bind_self");
+    assert(ob != nullptr);
+
+    amlp::Value closureVal = harness.vm.callFunction(ob, "make", {});
+    std::vector<amlp::Value> bindArgs{ closureVal, amlp::Value(ob) };
+    amlp::Value result = amlp::EfunTable::instance().call("bind", harness.vm, bindArgs);
+    assert(std::get<std::shared_ptr<amlp::Closure>>(result.data) ==
+           std::get<std::shared_ptr<amlp::Closure>>(closureVal.data));
+
+    std::cout << "testBindIsNoOpWhenNewOwnerMatchesCurrentOwner OK\n";
+}
+
+static void testBindThrowsWhenNoMasterIsLoaded() {
+    ObjectVarHarness harness; // no master loaded at all
+    harness.writeFile("/bind_owner_c.c",
+        "int greet() { return 1; }\n"
+        "mixed make() { return (: greet :); }\n");
+    harness.writeFile("/bind_owner_d.c", "int greet() { return 2; }\n");
+    auto ownerC = harness.objects.cloneObject("/bind_owner_c");
+    auto ownerD = harness.objects.cloneObject("/bind_owner_d");
+    assert(ownerC && ownerD);
+
+    amlp::Value closureVal = harness.vm.callFunction(ownerC, "make", {});
+    std::vector<amlp::Value> bindArgs{ closureVal, amlp::Value(ownerD) };
+    bool threw = false;
+    try {
+        amlp::EfunTable::instance().call("bind", harness.vm, bindArgs);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testBindThrowsWhenNoMasterIsLoaded OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -14505,6 +14678,12 @@ int main() {
     testSayAvoidArgumentExcludesSpecifiedTarget();
     testSaveVariableMatchesRealFormatForStringsNumbersArraysAndMappings();
     testRestoreVariableRoundTripsSaveVariableOutputAndRejectsMalformedInput();
+    testChildrenReturnsEveryLiveObjectMatchingFilenamePrefix();
+    testSetLightAccumulatesUpThroughEnvironmentChainAndReturnsRootTotal();
+    testSetDebugLevelAcceptsIntOrStringWithoutThrowing();
+    testBindRebindsClosureOwnerAndChangesResolution();
+    testBindIsNoOpWhenNewOwnerMatchesCurrentOwner();
+    testBindThrowsWhenNoMasterIsLoaded();
     std::cout << "all tests passed\n";
     return 0;
 }

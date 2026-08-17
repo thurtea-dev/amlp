@@ -6,7 +6,7 @@
 |------|------|
 | `EfunTable.cpp` + `include/.../EfunTable.hpp` | Singleton registry mapping efun name → `EfunFn`. `registerCoreEfuns()` is called from `main.cpp`. |
 
-Currently **190 registered names** (including aliases, confirmed via
+Currently **194 registered names** (including aliases, confirmed via
 `grep -oE 'registerEfun\("[a-zA-Z_0-9]+"'`, not a stale estimate). Target is
 **~300** for FluffOS parity and **beyond 300** for the features that exceed
 all three reference drivers.

@@ -200,6 +200,18 @@ public:
     bool isVirtual() const { return isVirtual_; }
     void setIsVirtual(bool v) { isVirtual_ = v; }
 
+    // real object_t::total_light (simulate.c's add_light()): a running
+    // count of light sources this object and everything inside it
+    // contribute, propagated up through every ancestor environment on
+    // every change (see EfunTable.cpp's "set_light" registration, the
+    // only mutator). Deprecated in real FluffOS itself (func_spec.c's own
+    // "/* set_light should die a dark death */" comment right above its
+    // declaration) but still a real, registered efun this repo's own
+    // bundled Lil starter mudlib genuinely calls
+    // (mudlib/single/tests/efuns/light.c's own create()).
+    int totalLight() const { return totalLight_; }
+    void setTotalLight(int v) { totalLight_ = v; }
+
 private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
@@ -217,6 +229,7 @@ private:
     std::weak_ptr<LpcObject> shadowedBy_;
     std::weak_ptr<LpcObject> shadowing_;
     bool isVirtual_ = false;
+    int totalLight_ = 0;
 };
 
 } // namespace amlp
