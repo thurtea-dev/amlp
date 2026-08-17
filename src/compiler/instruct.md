@@ -20,8 +20,8 @@ in one pass.
 - `include/amlp/compiler/Lexer.hpp`
 - `include/amlp/vm/Bytecode.hpp` - the opcodes CodeGen emits
 - `ROADMAP.md` Phase 0 and Phase 1 rows that touch `src/compiler`
-- `reference/fluffos-2.9-ds2.08/grammar.y` - the reference grammar
-- `reference/fluffos-2.9-ds2.08/lex.c` - the reference lexer
+- `temp/reference/fluffos-2.9-ds2.08/grammar.y` - the reference grammar
+- `temp/reference/fluffos-2.9-ds2.08/lex.c` - the reference lexer
 
 ## Phase 0 tasks
 

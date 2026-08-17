@@ -16,6 +16,7 @@
 #include "amlp/net/InteractiveRegistry.hpp"
 #include "amlp/net/SocketRegistry.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
+#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <memory>
@@ -14037,6 +14038,147 @@ static void testInheritsMatchesTransitiveChainInBothDirections() {
     std::cout << "testInheritsMatchesTransitiveChainInBothDirections OK\n";
 }
 
+// functions()/variables()/fetch_variable()/store_variable(): real
+// packages/contrib.c introspection efuns, confirmed to have genuine C
+// bodies in this exact vendored build (PACKAGE_CONTRIB active in
+// options.h) despite an earlier session's own accounting mistakenly
+// filing all four under "no implementation anywhere in this project's
+// own reference source" -- corrected in this session's own STATUS.md
+// entry, not silently carried forward.
+
+static void testFunctionsListsOwnAndInheritedNamesWithOverridePrecedence() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fn_base.c",
+        "int a() { return 1; }\n"
+        "int shared() { return 1; }\n");
+    harness.writeFile("/fn_leaf.c",
+        "inherit \"/fn_base\";\n"
+        "int x;\n"
+        "int b() { return 2; }\n"
+        "int shared() { return 2; }\n");
+    auto leaf = harness.objects.cloneObject("/fn_leaf");
+    assert(leaf != nullptr);
+
+    // Default flag (all names, inherited included): a, shared, b, all
+    // present exactly once, leaf's own "shared" override winning over
+    // base's shadowed one (both named the same), and the synthesized
+    // "$objvarinit" CodeGen.cpp adds for leaf's own "int x;" never
+    // appearing at all.
+    std::vector<amlp::Value> allArgs{ amlp::Value(leaf) };
+    amlp::Value all = amlp::EfunTable::instance().call("functions", harness.vm, allArgs);
+    auto allArr = std::get<std::shared_ptr<amlp::Array>>(all.data);
+    std::vector<std::string> allNames;
+    for (auto& v : allArr->items) allNames.push_back(std::get<std::string>(v.data));
+    assert(allNames.size() == 3);
+    assert(std::count(allNames.begin(), allNames.end(), "a") == 1);
+    assert(std::count(allNames.begin(), allNames.end(), "b") == 1);
+    assert(std::count(allNames.begin(), allNames.end(), "shared") == 1);
+    assert(std::find(allNames.begin(), allNames.end(), "$objvarinit") == allNames.end());
+
+    // flag&2: leaf's own directly-defined functions only, "a" (inherited
+    // only, never redefined by leaf) excluded.
+    std::vector<amlp::Value> ownArgs{ amlp::Value(leaf), amlp::Value(int64_t{2}) };
+    amlp::Value own = amlp::EfunTable::instance().call("functions", harness.vm, ownArgs);
+    auto ownArr = std::get<std::shared_ptr<amlp::Array>>(own.data);
+    std::vector<std::string> ownNames;
+    for (auto& v : ownArr->items) ownNames.push_back(std::get<std::string>(v.data));
+    assert(ownNames.size() == 2);
+    assert(std::count(ownNames.begin(), ownNames.end(), "b") == 1);
+    assert(std::count(ownNames.begin(), ownNames.end(), "shared") == 1);
+    assert(std::find(ownNames.begin(), ownNames.end(), "a") == ownNames.end());
+
+    std::cout << "testFunctionsListsOwnAndInheritedNamesWithOverridePrecedence OK\n";
+}
+
+static void testFunctionsDetailedFormIncludesNumArgsAndMixedTypePlaceholders() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fn_detail.c", "int add(int x, int y) { return x + y; }\n");
+    auto ob = harness.objects.cloneObject("/fn_detail");
+    assert(ob != nullptr);
+
+    std::vector<amlp::Value> detailArgs{ amlp::Value(ob), amlp::Value(int64_t{1}) };
+    amlp::Value detail = amlp::EfunTable::instance().call("functions", harness.vm, detailArgs);
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(detail.data);
+    assert(arr->items.size() == 1);
+    auto sub = std::get<std::shared_ptr<amlp::Array>>(arr->items[0].data);
+    // [name, num_args, return_type, arg_type...] -- real f_functions()'s
+    // own subvec layout; no declared-type metadata exists in this
+    // driver's own CompiledProgram, so every type slot is the fixed
+    // "mixed" placeholder documented in EfunTable.cpp's own comment.
+    assert(sub->items.size() == 5);
+    assert(std::get<std::string>(sub->items[0].data) == "add");
+    assert(std::get<int64_t>(sub->items[1].data) == 2);
+    assert(std::get<std::string>(sub->items[2].data) == "mixed");
+    assert(std::get<std::string>(sub->items[3].data) == "mixed");
+    assert(std::get<std::string>(sub->items[4].data) == "mixed");
+
+    std::cout << "testFunctionsDetailedFormIncludesNumArgsAndMixedTypePlaceholders OK\n";
+}
+
+static void testVariablesListsFlattenedNamesInInheritedThenOwnOrder() {
+    ObjectVarHarness harness;
+    harness.writeFile("/var_base.c", "int x;\n");
+    harness.writeFile("/var_leaf.c", "inherit \"/var_base\";\nint y;\n");
+    auto leaf = harness.objects.cloneObject("/var_leaf");
+    assert(leaf != nullptr);
+
+    std::vector<amlp::Value> bareArgs{ amlp::Value(leaf) };
+    amlp::Value bare = amlp::EfunTable::instance().call("variables", harness.vm, bareArgs);
+    auto bareArr = std::get<std::shared_ptr<amlp::Array>>(bare.data);
+    assert(bareArr->items.size() == 2);
+    assert(std::get<std::string>(bareArr->items[0].data) == "x");
+    assert(std::get<std::string>(bareArr->items[1].data) == "y");
+
+    std::vector<amlp::Value> pairArgs{ amlp::Value(leaf), amlp::Value(int64_t{1}) };
+    amlp::Value pair = amlp::EfunTable::instance().call("variables", harness.vm, pairArgs);
+    auto pairArr = std::get<std::shared_ptr<amlp::Array>>(pair.data);
+    assert(pairArr->items.size() == 2);
+    auto first = std::get<std::shared_ptr<amlp::Array>>(pairArr->items[0].data);
+    assert(std::get<std::string>(first->items[0].data) == "x");
+    assert(std::get<std::string>(first->items[1].data) == "mixed");
+
+    std::cout << "testVariablesListsFlattenedNamesInInheritedThenOwnOrder OK\n";
+}
+
+static void testFetchAndStoreVariableRoundTripByNameAndThrowOnUnknownName() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fv_probe.c",
+        "int x = 5;\n"
+        "mixed do_fetch(string n) { return fetch_variable(n); }\n"
+        "void do_store(string n, mixed v) { store_variable(n, v); }\n");
+    auto ob = harness.objects.cloneObject("/fv_probe");
+    assert(ob != nullptr);
+
+    amlp::Value fetched = harness.vm.callFunction(ob, "do_fetch",
+        { amlp::Value(std::string("x")) });
+    assert(std::get<int64_t>(fetched.data) == 5);
+
+    harness.vm.callFunction(ob, "do_store",
+        { amlp::Value(std::string("x")), amlp::Value(int64_t{42}) });
+    amlp::Value refetched = harness.vm.callFunction(ob, "do_fetch",
+        { amlp::Value(std::string("x")) });
+    assert(std::get<int64_t>(refetched.data) == 42);
+
+    bool fetchThrew = false;
+    try {
+        harness.vm.callFunction(ob, "do_fetch", { amlp::Value(std::string("nope")) });
+    } catch (const amlp::LpcRuntimeError&) {
+        fetchThrew = true;
+    }
+    assert(fetchThrew);
+
+    bool storeThrew = false;
+    try {
+        harness.vm.callFunction(ob, "do_store",
+            { amlp::Value(std::string("nope")), amlp::Value(int64_t{1}) });
+    } catch (const amlp::LpcRuntimeError&) {
+        storeThrew = true;
+    }
+    assert(storeThrew);
+
+    std::cout << "testFetchAndStoreVariableRoundTripByNameAndThrowOnUnknownName OK\n";
+}
+
 static void testGetConfigReturnsMudNameForIndexZeroAndThrowsForNegative() {
     ObjectVarHarness harness;
     std::vector<amlp::Value> zeroArgs{ amlp::Value(int64_t{0}) };
@@ -16896,6 +17038,10 @@ int main() {
     testReloadObjectLeavesAnActiveSnoopRelationshipUntouched();
     testDestructClosesOwnedSocketsWithNoCallbackFiring();
     testDestructShadowCascadeAlsoClosesTheCascadedObjectsOwnSockets();
+    testFunctionsListsOwnAndInheritedNamesWithOverridePrecedence();
+    testFunctionsDetailedFormIncludesNumArgsAndMixedTypePlaceholders();
+    testVariablesListsFlattenedNamesInInheritedThenOwnOrder();
+    testFetchAndStoreVariableRoundTripByNameAndThrowOnUnknownName();
     std::cout << "all tests passed\n";
     return 0;
 }

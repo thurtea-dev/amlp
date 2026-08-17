@@ -3,6 +3,177 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-24 (continued): row 0.13 batch -- `functions`, `variables`,
+`fetch_variable`, `store_variable` implemented (234 to 238), correcting
+a real, repeated methodological miss from earlier passes rather than
+just adding four names.**
+
+Ranked the remaining 46 non-`parse_*` gap names fresh against all six
+mudlib corpora under `temp/` (per this session's own relocation above,
+not the old `reference/` path) before trusting any prior pass's own
+categorization. `translate` (66 raw hits) re-confirmed a shadowed
+simul_efun with no `efun::` delegation anywhere, same as before -- real
+`translate()` is 4-arg VRML matrix-translate (`efun_defs.c`:
+`T_ARRAY,T_REAL,T_REAL,T_REAL`), completely unrelated to every corpus's
+own text-garbling `translate(string, int)` simul_efun. `ed`/`get_char`
+(52/48 raw hits) re-confirmed real, genuine `.c` call sites (not just
+doc-page noise), but both need raw-input/line-editor infrastructure
+this driver has none of -- unchanged from the prior pass's own verdict.
+
+Re-verified the "unverifiable, no implementation anywhere" categorization
+for the six-name reflection family instead of carrying it forward as
+already-settled: false for four of the six. `packages/contrib.c`
+contains real, complete bodies for `f_functions`, `f_variables`,
+`f_fetch_variable`, and `f_store_variable` (`PACKAGE_CONTRIB` confirmed
+active in this exact build's own `options.h`) -- the same file
+`function_owner`/`replaceable` were already correctly found real in
+during an earlier pass, so this was a genuine grep-depth miss on those
+four specific names, not a case of them actually having nothing to
+check a port against. `debug_info` also has a real body
+(`packages/develop.c`'s own `f_debug_info`) -- still excluded, but for
+the correct reason now: a large mode-switched dump of FluffOS-specific
+`object_t`/`program_t` internals (heart-beat/wizard/clone flag bits,
+`obj_list` linked-list position, live ref counts) this driver's own
+shared_ptr-based object model has no equivalent to report, the same
+driver-internal-dump architecture-mismatch family `mud_status`/
+`cache_stats`/etc. already sit in, not "unverifiable." `fetch_class_member`/
+`store_class_member` do have real bodies too but stay excluded
+regardless -- no `TYPE_CLASS`/`class` value kind exists in this driver
+at all, a separate, still-valid reason. Full correction, including how
+the miss happened, recorded in `src/efun/instruct.md`'s own accounting
+section rather than silently fixed.
+
+Real signatures (`packages/contrib_spec.c`, the hand-written declared
+form, more legible than `efun_defs.c`'s own generated table): `mixed
+*functions(object, int default: 0)`, `mixed *variables(object, int
+default: 0)`, `mixed fetch_variable(string)`, `void
+store_variable(string, mixed)` -- the last two always implicit
+`current_object`, no object argument at all, confirmed directly from
+`f_fetch_variable`/`f_store_variable`'s own `find_global_variable(
+current_object->prog, ...)` calls, not assumed from the two-efun
+family's own naming symmetry with the first two. Real call sites
+(`functions`/`variables`, `lima` and `dead-souls` only, both close FluffOS
+lineage) mostly pass the object argument alone, relying on this exact
+default -- resolved the apparent `2,2`-vs-1-arg-call contradiction the
+same way `query_num`'s own earlier pass already flagged as a standing
+trap: `efun_defs.c`'s generated arity fields show post-default arity,
+not the real callable minimum, always cross-check `packages/*_spec.c`'s
+own hand-written `default:` markers before trusting a bare min/max
+read.
+
+Implemented against this driver's own `CompiledProgram` (`Bytecode.hpp`):
+`functions()`'s bare-name and flag&2 (locals-only) forms read
+`CompiledProgram::functions` directly (this driver's own per-program
+function list was already local-only, never flattened across
+inheritance -- confirmed against `VM.cpp`'s own `findFunctionInChain`,
+which resolves inheritance by recursive search at call time rather than
+a precomputed flattened table); the flag&2-clear (include-inherited)
+form walks `inheritedPrograms` depth-first with the same own-functions-
+first, first-name-wins override precedence `findFunctionInChain` already
+uses for an ordinary call, so an overridden function is never double-
+counted or reported under its own shadowed parent's entry.
+`variables()` reads `CompiledProgram::objectVarNames` directly -- already
+fully flattened in real declaration order (`save_object`/
+`restore_object`'s own established use of that same field, confirmed by
+direct comparison rather than assumed identical to `functions()`'s own
+un-flattened shape). `fetch_variable`/`store_variable` do a linear name
+lookup against that same `objectVarNames`/`variables()` pair against
+`vm.currentObject()`, real "No variable named '%s'!" error text kept on
+a miss. Real `f_functions()`'s own exclusion of its synthesized
+`__INIT`-family initializer function from the result ported too, this
+driver's own equivalent being the synthesized `"$objvarinit"`
+CodeGen.cpp already adds to every program's own function list.
+
+One honest, explicitly documented fidelity gap, not silently glossed
+over: real `functions()`'s flag&1 detailed form and `variables()`'s
+flag-truthy form both report real per-declaration TYPE_* strings this
+driver has no metadata for at all -- `FunctionEntry` carries only
+name/entryPoint/numArgs/numLocals, `objectVarNames` is bare strings,
+neither a declared-type field anywhere. Every type slot in both detailed
+forms is the fixed placeholder `"mixed"` instead of a real type name --
+the closest honest equivalent to an untyped/mixed declaration, not a
+fabricated value, and called out directly in each registration's own
+comment plus a regression test that asserts on the placeholder rather
+than silently accepting whatever came out.
+
+Four new regression tests (589 total, up from 585, all passing across 3
+consecutive runs plus `ctest`): `functions()` own-vs-inherited-vs-
+override-precedence and the `$objvarinit` exclusion; `functions()`'s
+detailed-form shape and the `"mixed"` placeholders; `variables()`'s
+flattened inherited-then-own order and its own pair form;
+`fetch_variable`/`store_variable`'s round trip through an actual LPC
+object (current-object-implicit, so exercised through a real callable
+wrapper function rather than a direct `EfunTable::instance().call()`,
+the same distinction `save_object`/`restore_object`'s own tests already
+established) plus both throwing on an unknown name.
+
+Every other name in the 46-name non-`parse_*` gap re-checked this pass
+and confirmed to still belong in its existing category (documented
+exclusion or zero-call-site) -- none of the remaining architecture-
+mismatch verdicts (buffer family, driver-internal-dump family,
+VRML-pose family, MXP/TTYPE family, `set_reset`, `resolve`, `get_char`/
+`ed`, `socket_acquire`/`socket_release`) turned out to be wrong the way
+the reflection family did; only that one family's own "no body exists"
+premise was actually false. Real remaining gap: 50 (`comm -23` between
+`efun_defs.c`'s 270 real names and `EfunTable.cpp`'s now-238
+`registerEfun` names), all still either documented exclusions,
+zero-call-site names, or the one deliberately deferred `parse_*`
+package.
+
+**2026-08-24 (continued): formalized the `reference/fluffos-2.9-ds2.08`
+relocation the previous entry below flagged but did not fix -- now
+`temp/reference/fluffos-2.9-ds2.08/`, gitignored, same discipline as
+the six vendored mudlib corpora already under `temp/`.**
+
+Confirmed byte-identical before touching anything: every one of the 305
+files git still had tracked at the old path (`git ls-tree -r
+393a7f0 -- reference/fluffos-2.9-ds2.08`, the last commit where it was
+still tracked) diffed clean against its counterpart under
+`temp/reference/fluffos-2.9-ds2.08/`, zero content mismatches, zero
+missing, zero extras.
+
+Git-side, the deletion from tracking turned out to already be committed
+-- not by this session. The previous entry below's own commit
+(`destruct_object()`'s socket-close fix) evidently picked up the
+already-present-but-unstaged working-tree deletion of `reference/` when
+committed, bundling both into one commit; its own commit message
+documents this explicitly ("Flagged, not fixed here: ... Needs a
+follow-up session to formally relocate"). So there was nothing left to
+`git rm --cached` here, only the citation sweep and `.gitignore`
+confirmation. `.gitignore`'s own blanket `temp/` line (added the prior
+session that first vendored the six mudlib corpora into `temp/`) already
+covers the new location; confirmed directly with `git check-ignore -v`
+against files under the new path, not assumed from the blanket pattern
+alone.
+
+Citation-path sweep, same discipline as this directory's own two prior
+relocations (`mudlib/nightmare3_fluffos_v2/fluffos-2.9-ds2.08/` to
+`driver/reference/fluffos-2.9-ds2.08/`, then to
+`reference/fluffos-2.9-ds2.08/` during the LDMud-style restructure --
+see git history, not previously written down in STATUS.md itself):
+`CLAUDE.md`, `src/compiler/instruct.md`, `src/efun/instruct.md`, and
+`prompt.md` all updated from `reference/fluffos-2.9-ds2.08/` to
+`temp/reference/fluffos-2.9-ds2.08/`. `ROADMAP.md`, `STATUS-ARCHIVE.md`,
+and `README.md` checked and confirmed to contain zero occurrences of
+the old path already, nothing to change. `STATUS.md`'s own existing
+dated entries (including the immediately-following one below, and one
+historical entry still citing the even-earlier `driver/reference/...`
+path from before the LDMud restructure) deliberately left untouched --
+a dated log records what was true at the time it was written, not a
+live index, matching the prior relocation's own precedent of leaving
+STATUS.md's past entries alone while bulk-updating every forward-looking
+doc. Added a durable provenance note to CLAUDE.md's own orientation
+section instead: the new path, why it is intentionally untracked, that
+it must be manually present for any citation work, and the full
+relocation lineage (three locations across this project's history, one
+vendored FluffOS 2.9 ds2.08 tree throughout, never re-downloaded or
+re-derived).
+
+Build and full suite re-run to confirm zero behavior change from a
+pure documentation/tracking change: 585 tests, all passing, same count
+as the previous entry below (this change touches no source or test
+file).
+
 **2026-08-24: `destruct_object()`'s own `close_referencing_sockets()`
 call site ported -- the precisely-located gap the previous session left
 documented (Phase 0 row 0.13: 234 registered, unchanged -- this is a

@@ -25,10 +25,29 @@ must continue unchanged.
   Older entries are archived in `STATUS-ARCHIVE.md`.
 - `prompt.md` is a menu of ready-to-run task prompts for specific rows.
   It has a track record of describing some subsystems incorrectly, so
-  verify anything it says against `reference/fluffos-2.9-ds2.08` (the
+  verify anything it says against `temp/reference/fluffos-2.9-ds2.08` (the
   vendored real FluffOS 2.9 source) before implementing anything it
   describes.
 - Every `src/<module>/` has its own `instruct.md` describing that module's
   task backlog. These frame tasks as open regardless of actual completion
   status, so they are **not** a live status signal. Only `ROADMAP.md`'s
   checkboxes and `STATUS.md`'s dated entries are.
+- `temp/reference/fluffos-2.9-ds2.08/` is the vendored real FluffOS 2.9
+  source used for every citation throughout this repo (`efun_defs.c`,
+  `func_spec.c`, `object.c`, `simulate.c`, etc.). It is intentionally
+  untracked (relocated 2026-08-24 from its previous tracked location at
+  `reference/fluffos-2.9-ds2.08/`, alongside the six vendored mudlib
+  corpora already under `temp/`, none of which are tracked either -- see
+  `.gitignore`'s own `temp/` line and STATUS.md's 2026-08-24 entry).
+  Because it is gitignored, it will not appear in a fresh clone or `git
+  status` and must be manually present on disk for any verification work
+  that cites it -- if it is missing, say so rather than guessing at real
+  behavior from memory or by pattern-resemblance to a similar-sounding
+  construct. Provenance: this is the same FluffOS 2.9 (ds2.08 patchlevel)
+  tree carried through this project's entire history, previously relocated
+  once before (from `mudlib/nightmare3_fluffos_v2/fluffos-2.9-ds2.08/` to
+  `driver/reference/fluffos-2.9-ds2.08/` during the LDMud-style restructure,
+  then to its now-former tracked location `reference/fluffos-2.9-ds2.08/`)
+  -- never re-downloaded or re-derived, so its own internal `README.md`/
+  `LLM_BREADCRUMB.md` still describe themselves in terms of even earlier
+  locations and are stale prose, not a provenance concern.

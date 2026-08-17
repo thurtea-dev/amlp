@@ -32,7 +32,7 @@ int), %(regexp) capture, and adjacent %s%... without a literal between.
 
 Implement each missing format specifier one at a time, with a regression
 test per specifier added to test/test_lexer.cpp. Reference the
-real implementation in reference/fluffos-2.9-ds2.08/
+real implementation in temp/reference/fluffos-2.9-ds2.08/
 efuns_main.c f_sscanf() and sscanf_regexp(). Build and confirm all
 existing tests still pass after each specifier is added.
 ```
@@ -477,7 +477,7 @@ Commit the updated STATUS.md and ROADMAP.md.
 
 ```
 Read src/efun/EfunTable.cpp and list every registered efun name.
-Read reference/fluffos-2.9-ds2.08/func_spec.c and
+Read temp/reference/fluffos-2.9-ds2.08/func_spec.c and
 list every efun defined there. Produce a gap analysis:
 
 1. Efuns in func_spec.c but not in EfunTable.cpp (missing)

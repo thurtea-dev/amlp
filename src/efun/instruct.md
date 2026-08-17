@@ -211,7 +211,7 @@ efun registration would be unreachable, shadowed code. Same for
 runs the next one:** the call-site frequency count for this second pass
 was first run against the whole `mudlib/` tree, same as the first pass
 apparently was -- that directory also contains the *vendored C reference
-driver itself* (`reference/fluffos-2.9-ds2.08/`,
+driver itself* (`temp/reference/fluffos-2.9-ds2.08/`,
 including its own `testsuite/`), which is C source, not LPC, and is not
 this driver's own mudlib content at all. Counting hits there inflated
 several efuns' real-usage numbers substantially (`get_config` looked
@@ -488,6 +488,49 @@ architecture-mismatched -- but sized closer to `replace_program`'s own
 into a batch. Flagged with this citation so it is not rediscovered from
 scratch next time.
 
+**Correction, 2026-08-24: the "no implementation anywhere" verdict two
+paragraphs above was wrong for four of the six reflection-family
+names.** Re-verified directly against `packages/contrib.c` (not
+re-derived from this file's own prior summary) while scoping this
+session's own row 0.13 batch: `f_functions`, `f_variables`,
+`f_fetch_variable`, and `f_store_variable` all have real, complete C
+bodies in that exact file, active in this exact vendored build
+(`PACKAGE_CONTRIB` confirmed set in `options.h`) -- the same file
+`function_owner`/`replaceable` (immediately above) were already
+correctly found real in during an earlier pass, so this was a real
+methodological miss (a too-narrow grep, or one that didn't scroll far
+enough through a long file), not a case of the names genuinely having
+no C body to check against. All four implemented this session
+(`EfunTable.cpp`, `functions`/`variables`/`fetch_variable`/
+`store_variable`), with one honest fidelity gap documented directly in
+each registration's own comment: this driver's `CompiledProgram`
+carries no declared-type metadata at all (`FunctionEntry` is
+name/entryPoint/numArgs/numLocals only, `objectVarNames` is bare
+strings), so every real return/arg/variable type string real
+`f_functions`/`f_variables` would report is the fixed placeholder
+`"mixed"` here instead of a real per-declaration type name -- not
+fabricated, but not full real fidelity either.
+
+`debug_info` and `fetch_class_member`/`store_class_member` were
+re-checked too and stay excluded, but the *reason* code for
+`debug_info` specifically was also wrong the same way: it does have a
+real body (`packages/develop.c`'s own `f_debug_info`, confirmed this
+session), so "unverifiable, nothing to check a port against" does not
+actually apply to it. It belongs in the driver-internal-dump
+architecture-mismatch family instead (row 5's own `mud_status` entry,
+this file's own accounting table below) -- its real body is a large
+mode-switched dump of FluffOS-specific `object_t`/`program_t` internals
+(`O_HEART_BEAT` and other real flag bits, `obj_list` linked-list
+position, live ref counts) this driver's own shared_ptr-based object
+model has no equivalent structure to report, the same substantive
+reason `mud_status`/`cache_stats`/etc. stay excluded, just previously
+filed under the wrong label. `fetch_class_member`/`store_class_member`
+are unaffected by this correction either way -- both do have real
+bodies too, but stay excluded for the already-separately-valid reason
+given elsewhere in this file: no `TYPE_CLASS`/`class` value kind exists
+in this driver at all, so there is nothing for either efun to operate
+on regardless of whether their own C bodies exist.
+
 **Tier 1, sixth pass (2026-08-22):** with `translate`/`origin`/the
 `parse_*`/buffer/reflection/driver-internal-dump families all already
 excluded or deferred with a documented reason, checked every remaining
@@ -562,13 +605,18 @@ than trimmed).
 
 With this, every remaining name in the six-corpus ranking with real
 call-site weight is accounted for -- shadowed simul_efuns, architecture
-mismatches (buffer/reflection/driver-internal-dump families,
-`get_char`/`ed`, `resolve`), unverifiable no-body efuns (`debug_info`),
-or one of three real items intentionally left for their own dedicated
-sessions (`origin`, the real `parse_*` package, `reload_object`). Only
-0-call-site names remain unaccounted for from here -- whoever runs the
-next pass should expect the ranking's top rows to stay unchanged unless
-one of those three dedicated-session items gets taken on, and should
+mismatches (buffer/driver-internal-dump families including `debug_info`
+-- see this file's own 2026-08-24 correction note above, it does have a
+real body, `get_char`/`ed`, `resolve`), the `TYPE_CLASS`-mismatch pair
+(`fetch_class_member`/`store_class_member`), or one of three real items
+intentionally left for their own dedicated sessions (`origin`, the real
+`parse_*` package, `reload_object`). The reflection-family four
+(`functions`/`variables`/`fetch_variable`/`store_variable`) are no
+longer in this excluded set at all -- implemented 2026-08-24, see this
+file's own correction note above. Only 0-call-site names remain
+unaccounted for from here -- whoever runs the next pass should expect
+the ranking's top rows to stay unchanged unless one of those three
+dedicated-session items gets taken on, and should
 look to the 0-weight tail (already individually surveyed in earlier
 passes: the VRML-pose family, `zonetime`/`is_daylight_savings_time`,
 `request_term_type`/`act_mxp`/`has_mxp`, `program_info`/

@@ -23,6 +23,7 @@
 #include <fnmatch.h>
 #include <fstream>
 #include <functional>
+#include <unordered_set>
 #include <iostream>
 #include <memory>
 #include <netinet/in.h>
@@ -7040,6 +7041,160 @@ void registerCoreEfuns() {
             }
         }
         return Value(static_cast<int64_t>(0));
+    });
+
+    // mixed *functions(object ob default: this_object(), int flag default: 0)
+    // -- real packages/contrib_spec.c's own declared signature
+    // ("mixed *functions(object, int default: 0);"), body in
+    // packages/contrib.c's own f_functions(). flag&1 selects detailed
+    // per-function sub-arrays ([name, num_args, return_type,
+    // ...arg_types]) over a bare name list; flag&2 restricts the result
+    // to ob's own directly-defined functions, omitting everything only
+    // reached through inheritance. Real per-argument/return TYPE_*
+    // strings come from declared-type metadata this driver's own
+    // CompiledProgram never tracks (FunctionEntry only carries
+    // name/entryPoint/numArgs/numLocals, no declared-type info at all,
+    // confirmed directly against Bytecode.hpp) -- every type slot here
+    // is the fixed placeholder "mixed" instead of a real per-declaration
+    // type name, the closest honest equivalent to an untyped/mixed
+    // declaration, documented rather than silently fabricated. Real
+    // f_functions() also hides its own synthesized __INIT-family
+    // initializer function from the result (checking
+    // APPLY___INIT_SPECIAL_CHAR); this driver's own equivalent is the
+    // synthesized "$objvarinit" CodeGen.cpp adds to every program's own
+    // function list (see its own comment there), excluded here the same
+    // way. The flag&2-clear (include-inherited) case walks
+    // inheritedPrograms depth-first, own functions first then each
+    // parent in declaration order, first name seen wins -- the same
+    // override precedence findFunctionInChain() (this file's own
+    // OpCode::Call resolver, VM.cpp) already uses for an ordinary
+    // function call, so a function this program itself overrides never
+    // shows up twice or under its shadowed parent's own entry.
+    t.registerEfun("functions", [resolveInheritTarget](VM& vm, std::vector<Value>& args) -> Value {
+        auto ob = resolveInheritTarget(vm, args);
+        if (!ob) return Value(std::make_shared<Array>());
+        int64_t flag = 0;
+        if (args.size() > 1 && std::holds_alternative<int64_t>(args[1].data)) {
+            flag = std::get<int64_t>(args[1].data);
+        }
+
+        std::vector<const FunctionEntry*> entries;
+        if (flag & 2) {
+            for (const auto& fn : ob->program().functions) {
+                if (fn.name == "$objvarinit") continue;
+                entries.push_back(&fn);
+            }
+        } else {
+            std::unordered_set<std::string> seen;
+            std::function<void(const CompiledProgram&)> collect =
+                [&](const CompiledProgram& prog) {
+                    for (const auto& fn : prog.functions) {
+                        if (fn.name == "$objvarinit") continue;
+                        if (!seen.insert(fn.name).second) continue;
+                        entries.push_back(&fn);
+                    }
+                    for (const auto& parent : prog.inheritedPrograms) {
+                        if (parent) collect(*parent);
+                    }
+                };
+            collect(ob->program());
+        }
+
+        auto result = std::make_shared<Array>();
+        for (const auto* fn : entries) {
+            if (flag & 1) {
+                auto sub = std::make_shared<Array>();
+                sub->items.push_back(Value(fn->name));
+                sub->items.push_back(Value(static_cast<int64_t>(fn->numArgs)));
+                sub->items.push_back(Value(std::string("mixed")));
+                for (int i = 0; i < fn->numArgs; ++i) {
+                    sub->items.push_back(Value(std::string("mixed")));
+                }
+                result->items.push_back(Value(sub));
+            } else {
+                result->items.push_back(Value(fn->name));
+            }
+        }
+        return Value(result);
+    });
+
+    // mixed *variables(object ob default: this_object(), int flag default: 0)
+    // -- real packages/contrib_spec.c's own declared signature, body in
+    // packages/contrib.c's own f_variables(): recurses ob's own inherit
+    // tree first (in inherit-declaration order), then ob's own
+    // directly-declared variables last -- the exact same flattened
+    // order this driver's own CompiledProgram::objectVarNames already
+    // carries end to end (see save_object()/restore_object()'s own
+    // established use of that same field, above). flag truthy selects
+    // [name, type] pairs over a bare name list; no declared-type
+    // metadata exists here either (see functions()'s own comment just
+    // above), so type is always the fixed placeholder "mixed".
+    t.registerEfun("variables", [resolveInheritTarget](VM& vm, std::vector<Value>& args) -> Value {
+        auto ob = resolveInheritTarget(vm, args);
+        if (!ob) return Value(std::make_shared<Array>());
+        int64_t flag = 0;
+        if (args.size() > 1 && std::holds_alternative<int64_t>(args[1].data)) {
+            flag = std::get<int64_t>(args[1].data);
+        }
+        const auto& names = ob->program().objectVarNames;
+        auto result = std::make_shared<Array>();
+        for (const auto& name : names) {
+            if (flag) {
+                auto sub = std::make_shared<Array>();
+                sub->items.push_back(Value(name));
+                sub->items.push_back(Value(std::string("mixed")));
+                result->items.push_back(Value(sub));
+            } else {
+                result->items.push_back(Value(name));
+            }
+        }
+        return Value(result);
+    });
+
+    // mixed fetch_variable(string name) -- real packages/contrib_spec.c's
+    // own declared signature, body in packages/contrib.c's own
+    // f_fetch_variable(): looks up name in current_object's own
+    // flattened variable table (real find_global_variable(), this
+    // driver's own CompiledProgram::objectVarNames, the same table
+    // variables()/save_object()/restore_object() above already use),
+    // returning its current value. Real "No variable named '%s'!\n"
+    // error text kept, current_object always implicit -- there is no
+    // object argument in the real signature, unlike functions()/
+    // variables() above.
+    t.registerEfun("fetch_variable", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("fetch_variable: expected a string variable name");
+        }
+        auto ob = vm.currentObject();
+        if (!ob) throw LpcRuntimeError("fetch_variable: no current object");
+        const auto& names = ob->program().objectVarNames;
+        const auto& name = std::get<std::string>(args[0].data);
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (names[i] == name) {
+                return i < ob->variables().size() ? ob->variables()[i] : Value{};
+            }
+        }
+        throw LpcRuntimeError("No variable named '" + name + "'!");
+    });
+
+    // void store_variable(string name, mixed value) -- real
+    // f_store_variable(), the write-side counterpart directly above,
+    // same current_object-implicit/name-lookup/error-text semantics.
+    t.registerEfun("store_variable", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("store_variable: expected (string name, mixed value) arguments");
+        }
+        auto ob = vm.currentObject();
+        if (!ob) throw LpcRuntimeError("store_variable: no current object");
+        const auto& names = ob->program().objectVarNames;
+        const auto& name = std::get<std::string>(args[0].data);
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (names[i] == name) {
+                if (i < ob->variables().size()) ob->variables()[i] = args[1];
+                return Value{};
+            }
+        }
+        throw LpcRuntimeError("No variable named '" + name + "'!");
     });
 
     // mixed get_config(int what) -- real rc.c's own get_config_item():
