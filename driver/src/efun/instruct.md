@@ -1,4 +1,4 @@
-# src/efun/ — EfunTable: All Registered Efuns
+# src/efun/ - EfunTable: All Registered Efuns
 
 ## What lives here
 
@@ -14,17 +14,17 @@ all three reference drivers.
 ## Files to read before touching this directory
 
 - `include/lpcdriver/efun/EfunTable.hpp`
-- `include/lpcdriver/vm/Value.hpp` — every efun signature is `Value(VM&, vector<Value>&)`
-- `docs/ROADMAP.md` — efun tasks are spread across Phase 0, 1, 2, and 3
-- Reference: `fluffos-2.9-ds2.08/func_spec.c` — the canonical efun list (~180
+- `include/lpcdriver/vm/Value.hpp` - every efun signature is `Value(VM&, vector<Value>&)`
+- `docs/ROADMAP.md` - efun tasks are spread across Phase 0, 1, 2, and 3
+- Reference: `fluffos-2.9-ds2.08/func_spec.c` - the canonical efun list (~180
   core names)
-- Reference: `fluffos-2.9-ds2.08/packages/` — ~120 more package efuns
+- Reference: `fluffos-2.9-ds2.08/packages/` - ~120 more package efuns
 - Reference: `fluffos-2.9-ds2.08/efuns_main.c`, `simulate.c`, `array.c`,
-  `mapping.c`, `string.c` — implementation of the core efuns
+  `mapping.c`, `string.c` - implementation of the core efuns
 
 ## Phase 0 tasks (highest priority)
 
-### 0.1 — `throw(mixed)`
+### 0.1 - `throw(mixed)`
 
 `throw()` is the other half of `catch()`. Without it, mudlib code that uses
 the `catch`/`throw` idiom to signal errors silently fails.
@@ -32,7 +32,7 @@ the `catch`/`throw` idiom to signal errors silently fails.
 **Spec (from `func_spec.c`):** `void throw(mixed);`
 
 **What to build:**
-1. `LpcThrownValue` already exists in `Value.hpp` — this efun just needs to
+1. `LpcThrownValue` already exists in `Value.hpp` - this efun just needs to
    construct and throw it.
 2. Register as `"throw"` in `registerCoreEfuns()`.
 3. Implementation:
@@ -49,7 +49,7 @@ the `catch`/`throw` idiom to signal errors silently fails.
 5. Add 3 regression tests: throw a string, throw an int, throw inside nested
    catch frames.
 
-### 0.2 — `sscanf` full format set
+### 0.2 - `sscanf` full format set
 
 Current gaps: `%f` (float), `%x` (hex int), `%(regexp)` capture, adjacent
 `%s%...` without literal text between them.
@@ -58,9 +58,9 @@ Current gaps: `%f` (float), `%x` (hex int), `%(regexp)` capture, adjacent
 `sscanf_regexp()`.
 
 Add each format specifier one at a time with a regression test per specifier.
-For `%(regexp)`: depends on the PCRE efun work (0.11) — do that first.
+For `%(regexp)`: depends on the PCRE efun work (0.11) - do that first.
 
-### 0.3 — `sprintf` `%*` dynamic field width
+### 0.3 - `sprintf` `%*` dynamic field width
 
 `%*` means "read the next argument as the field width integer". Currently
 throws "unsupported format specifier".
@@ -70,7 +70,7 @@ throws "unsupported format specifier".
 One small change to the `sprintf` lambda: when `*` is seen after `%`, pop the
 next arg as `int64_t` and use it as `fieldWidth` (or `precision` if `%.*`).
 
-### 0.7 — `save_object`/`restore_object` in FluffOS `.o` text format
+### 0.7 - `save_object`/`restore_object` in FluffOS `.o` text format
 
 Currently the driver uses a custom binary format that is incompatible with all
 existing FluffOS mudlib save files.
@@ -91,7 +91,7 @@ existing FluffOS mudlib save files.
    and calls the appropriate serializer.
 4. Add 5+ regression tests covering all value kinds including nested arrays.
 
-### 0.9 — `map`/`filter`/`sort_array` as real closure consumers
+### 0.9 - `map`/`filter`/`sort_array` as real closure consumers
 
 Currently these efuns may accept only simple callbacks or not be registered.
 
@@ -108,18 +108,18 @@ args (look up the function name on the current object).
 
 Also register `map_array`/`filter_array` as aliases (FluffOS has both spellings).
 
-### 0.11 — PCRE regexp efuns
+### 0.11 - PCRE regexp efuns
 
 Wrap PCRE2 (link `-lpcre2-8`):
 - `regexp(string, pattern)` → 1 if matches, 0 if not
 - `regexplode(string, pattern)` → array of alternating non-match/match substrings
 - `reg_assoc(string, patterns_array, tokens_array, default)` → tokenize string
-- `regexp_assoc` — alias
+- `regexp_assoc` - alias
 
 Add `find_package(PkgConfig)` + `pkg_check_modules(PCRE2 REQUIRED libpcre2-8)`
 to `driver/CMakeLists.txt` and link `efun` against it.
 
-### 0.13 — Grow to ~300 efuns (FluffOS parity)
+### 0.13 - Grow to ~300 efuns (FluffOS parity)
 
 After the above Phase 0 items, audit `func_spec.c` AND `efun_defs.c` (the
 auto-generated dispatch table, ground truth over the hand-edited text file
@@ -161,7 +161,7 @@ efun registration would be unreachable, shadowed code. Same for
 runs the next one:** the call-site frequency count for this second pass
 was first run against the whole `mudlib/` tree, same as the first pass
 apparently was -- that directory also contains the *vendored C reference
-driver itself* (`mudlib/nightmare3_fluffos_v2/fluffos-2.9-ds2.08/`,
+driver itself* (`driver/reference/fluffos-2.9-ds2.08/`,
 including its own `testsuite/`), which is C source, not LPC, and is not
 this driver's own mudlib content at all. Counting hits there inflated
 several efuns' real-usage numbers substantially (`get_config` looked
@@ -244,11 +244,11 @@ read efun exists), `sockets_status`, `net_connect`, `add_verb`,
 **Tier 3 (lower urgency, high effort):**
 Socket package (advanced: `socket_acquire`/`socket_release`, object-to-
 object socket transfer, out of "basics" scope), database package, crypto
-package — see Phase 2.
+package - see Phase 2.
 
 ## Phase 2 tasks
 
-### 2.15 — SQLite built-in database efuns
+### 2.15 - SQLite built-in database efuns
 
 Link against SQLite3 (`find_package(SQLite3 REQUIRED)`).
 
@@ -262,7 +262,7 @@ New efuns:
 Maintain an internal `vector<sqlite3*>` indexed by handle. Handles are
 per-connection, not global (thread-safety not needed in single-threaded model).
 
-### 2.16 — Hash efuns
+### 2.16 - Hash efuns
 
 Link against OpenSSL (`find_package(OpenSSL REQUIRED)`):
 - `hash(string algorithm, string data)` → hex string
@@ -270,7 +270,7 @@ Link against OpenSSL (`find_package(OpenSSL REQUIRED)`):
 - `bcrypt_hash(string password, int cost)` → string
 - `bcrypt_verify(string password, string hash)` → int
 
-### 2.17 — `json_encode`/`json_decode`
+### 2.17 - `json_encode`/`json_decode`
 
 Embed `nlohmann/json.hpp` (single-header, no extra deps):
 - `json_encode(mixed value)` → string (JSON text)
@@ -279,20 +279,20 @@ Embed `nlohmann/json.hpp` (single-header, no extra deps):
 Mappings become JSON objects; arrays become JSON arrays; strings/ints/floats
 map directly; `nil` (DGD) / `0` (FluffOS) maps to JSON null.
 
-### 2.18 — `http_get`/`http_post` async efuns
+### 2.18 - `http_get`/`http_post` async efuns
 
 Backed by the async scheduler (Phase 2.5/2.6). Use libcurl async callbacks:
 - `http_get(string url)` → awaitable: suspends until response
 - `http_post(string url, string body, string content_type)` → awaitable
 
-### 2.22 — LPC-native test runner
+### 2.22 - LPC-native test runner
 
 New efuns for use inside `.c` test files:
-- `assert_equal(mixed a, mixed b)` — throws if not equal
+- `assert_equal(mixed a, mixed b)` - throws if not equal
 - `assert_not_equal(mixed a, mixed b)`
-- `assert_throws(function fn)` — catches and returns the error string
+- `assert_throws(function fn)` - catches and returns the error string
 - `test_pass(string name)` / `test_fail(string name, string reason)`
-- `run_tests(object test_ob)` — run all `test_*` functions in the object
+- `run_tests(object test_ob)` - run all `test_*` functions in the object
 
 These efuns write structured results to a JSON file for CI integration.
 

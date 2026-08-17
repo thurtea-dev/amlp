@@ -1,4 +1,4 @@
-# src/compiler/ — Lexer, Parser, CodeGen, AST
+# src/compiler/ - Lexer, Parser, CodeGen, AST
 
 ## What lives here
 
@@ -16,12 +16,12 @@ in one pass.
 
 ## Files to read before touching this directory
 
-- `include/lpcdriver/compiler/Ast.hpp` — full AST node catalogue
+- `include/lpcdriver/compiler/Ast.hpp` - full AST node catalogue
 - `include/lpcdriver/compiler/Lexer.hpp`
-- `include/lpcdriver/vm/Bytecode.hpp` — the opcodes CodeGen emits
+- `include/lpcdriver/vm/Bytecode.hpp` - the opcodes CodeGen emits
 - `docs/ROADMAP.md` Phase 0 and Phase 1 rows that touch `src/compiler`
-- `mudlib/nightmare3_fluffos_v2/fluffos-2.9-ds2.08/grammar.y` — the reference grammar
-- `mudlib/nightmare3_fluffos_v2/fluffos-2.9-ds2.08/lex.c` — the reference lexer
+- `driver/reference/fluffos-2.9-ds2.08/grammar.y` - the reference grammar
+- `driver/reference/fluffos-2.9-ds2.08/lex.c` - the reference lexer
 
 ## Phase 0 tasks
 
@@ -30,7 +30,7 @@ None directly in the compiler. The stub/gap work is in `src/efun` and
 - Verify that `#include` preprocessing handles all macros the mudlib uses
   before Phase 1 begins.
 
-## Phase 1 tasks — Dialect-aware frontend
+## Phase 1 tasks - Dialect-aware frontend
 
 **This is the biggest compiler change in the roadmap. Do not start until
 Phase 0 is complete and the test suite is green.**
@@ -41,22 +41,22 @@ The `Lexer` must accept a `LpcDialect` value (from `src/dialect/`) and
 change its tokenization rules accordingly.
 
 **FluffOS/MudOS (current default)**
-- `(: … :)` closure literals — already working
-- `(*fp)(args)` dereference-call syntax — already working
+- `(: … :)` closure literals - already working
+- `(*fp)(args)` dereference-call syntax - already working
 - No changes needed for the default dialect
 
 **LDMud additions**
-- `#'name` — tokenize as a new `Token::LambdaRef` carrying the name after `#'`
-- `#'efun_name` — same, but for efun references
+- `#'name` - tokenize as a new `Token::LambdaRef` carrying the name after `#'`
+- `#'efun_name` - same, but for efun references
 - The `lambda` keyword (not a kKeyword today)
 - `unbound_lambda` keyword
 - `bind` keyword (not a statement; a function, but needs recognition)
 
 **DGD additions**
-- `nil` keyword (not `0`; maps to a new `Value::Nil` variant — see `src/vm`)
+- `nil` keyword (not `0`; maps to a new `Value::Nil` variant - see `src/vm`)
 - `atomic` function modifier keyword
 - `rlimits` statement keyword
-- `parse_string` — handled as an efun, no lexer change needed
+- `parse_string` - handled as an efun, no lexer change needed
 
 Concretely: add a `LpcDialect dialect_` member to `Lexer`; extend
 `lexIdentOrKeyword()` to push `#'` into a `LambdaRef` token and to recognize
@@ -70,7 +70,7 @@ the new keywords when the matching dialect is active.
 - Parse `#'name` tokens into a new `LambdaRefExpr` AST node that CodeGen
   turns into a `MakeClosure` instruction with `FP_LDMUD_SYMBOL` kind.
 - Parse `lambda(({ params }), body_array)` into a `LambdaExpr` AST node
-  (the body is an LPC array literal used as code — see `src/vm/instruct.md`
+  (the body is an LPC array literal used as code - see `src/vm/instruct.md`
   for how the VM executes it).
 - Parse `unbound_lambda(({ params }), body_array)` similarly.
 - Parse `replaces` as an optional qualifier on `inherit "path";`.
@@ -111,7 +111,7 @@ ctest --test-dir driver/build -R "lexer|parser|codegen" --output-on-failure
 
 ## Key invariants
 
-- The compiler must never crash on malformed input — always throw
+- The compiler must never crash on malformed input - always throw
   `LpcRuntimeError` (from `src/core`) with a clear source/line/column message.
 - Adding a new keyword must not break any existing mudlib file that uses that
   word as a plain identifier. Check first. The comment in `Lexer.cpp` about

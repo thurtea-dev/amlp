@@ -1,4 +1,4 @@
-# AetherMUD — Claude Code Prompts
+# AetherMUD - Claude Code Prompts
 
 Ready-to-paste prompts for continuing the world-class LPC driver development.
 Copy the block for the phase/task you want and paste it directly into Claude Code.
@@ -20,7 +20,7 @@ ctest --test-dir driver/build --output-on-failure
 
 ---
 
-## Phase 0 — Stabilize the current base
+## Phase 0 - Stabilize the current base
 
 ### P0-A: `sscanf` full format set
 
@@ -32,7 +32,7 @@ int), %(regexp) capture, and adjacent %s%... without a literal between.
 
 Implement each missing format specifier one at a time, with a regression
 test per specifier added to driver/tests/test_lexer.cpp. Reference the
-real implementation in mudlib/nightmare3_fluffos_v2/fluffos-2.9-ds2.08/
+real implementation in driver/reference/fluffos-2.9-ds2.08/
 efuns_main.c f_sscanf() and sscanf_regexp(). Build and confirm all
 existing tests still pass after each specifier is added.
 ```
@@ -68,13 +68,13 @@ Read docs/ROADMAP.md (Phase 0 row 0.8) and driver/src/net/instruct.md
 driver/src/net/Connection.hpp.
 
 Implement:
-1. IAC parser in Connection::pollLines() — strip all \xFF sequences
+1. IAC parser in Connection::pollLines() - strip all \xFF sequences
    from the raw read buffer before splitting into lines; handle the
    three-byte IAC WILL/WONT/DO/DONT sequences
-2. Echo suppression — when input_to() is called with the I_NOECHO flag
+2. Echo suppression - when input_to() is called with the I_NOECHO flag
    (flag value 1), send IAC WILL ECHO; when the input_to completes,
    send IAC WONT ECHO
-3. NAWS (option 31) — when client sends IAC DO NAWS respond
+3. NAWS (option 31) - when client sends IAC DO NAWS respond
    IAC WILL NAWS; parse the IAC SB NAWS subneg; store terminalWidth_
    and terminalHeight_ on Connection; expose query_screen_width() /
    query_screen_height() efuns
@@ -145,7 +145,7 @@ full test suite.
 
 ---
 
-## Phase 1 — Dialect universality
+## Phase 1 - Dialect universality
 
 ### P1-A: Dialect scaffold (start here first)
 
@@ -163,7 +163,7 @@ Create the dialect foundation:
 5. Wire DialectFactory into main.cpp after Config::loadFromFile()
 6. Add dialect to CMakeLists.txt
 
-Do NOT yet implement dialect-specific lexer/parser/VM changes — only
+Do NOT yet implement dialect-specific lexer/parser/VM changes - only
 the enum, config, and boot API abstraction. Add tests in
 driver/tests/test_dialect_fluffos.cpp confirming that the FluffOS boot
 API returns the correct apply names. Build and run full test suite.
@@ -238,7 +238,7 @@ Build and run full test suite.
 
 ---
 
-## Phase 2 — Architecture differentiation
+## Phase 2 - Architecture differentiation
 
 ### P2-A: Apply cache
 
@@ -269,7 +269,7 @@ Create driver/src/persist/ as a new CMake library. Implement:
    - Serialize all live objects (filename + variable values by name)
    - Serialize all pending call_outs (target, function, dueAt offset, args)
    - Serialize all heartbeat registrations
-2. StateSerializer::restoreState() — full round-trip restore
+2. StateSerializer::restoreState() - full round-trip restore
 3. dump_state() efun (master-only)
 4. Config::statedumpFile() key and statedumpInterval() periodic trigger
    in main.cpp's run loop
@@ -288,8 +288,8 @@ Create driver/src/lsp/ as a new CMake library. Implement the first two
 LSP capabilities:
 1. JSON-RPC framing (Content-Length header, stdin/stdout transport)
 2. initialize request/response
-3. textDocument/publishDiagnostics — compile in-memory, collect errors
-4. textDocument/completion — efun names + local function names
+3. textDocument/publishDiagnostics - compile in-memory, collect errors
+4. textDocument/completion - efun names + local function names
 
 Wire --lsp flag in main.cpp: when present, start LspServer::run()
 instead of the game server.
@@ -324,7 +324,7 @@ run full test suite with and without LPCDRIVER_ENABLE_JIT.
 
 ---
 
-## Phase 3 — Production hardening
+## Phase 3 - Production hardening
 
 ### P3-A: Security model
 
@@ -364,7 +364,7 @@ Add tests in driver/tests/test_proto.cpp using socketpair(). Build
 and run full test suite.
 ```
 
-### P3-C: Generational GC (Layer 1 — no-op wrapper)
+### P3-C: Generational GC (Layer 1 - no-op wrapper)
 
 ```
 Read docs/ROADMAP.md Phase 3 row 3.3 and driver/src/gc/instruct.md.
@@ -375,7 +375,7 @@ wrapper). DO NOT change any observable behavior.
 Create driver/src/gc/ as a new CMake library. Implement:
 1. GcObject header struct (Kind, generation, marked, pinned)
 2. GcHeap singleton with allocate(), addRoot(), removeRoot(), collect()
-   — collect() is a no-op in Layer 1 (just logs what it would collect)
+   - collect() is a no-op in Layer 1 (just logs what it would collect)
 3. Type aliases: GcArray = GcObject wrapping std::vector<Value>
 4. All existing shared_ptr<Array> sites still work unchanged
 
@@ -477,12 +477,12 @@ Commit the updated STATUS.md and ROADMAP.md.
 
 ```
 Read driver/src/efun/EfunTable.cpp and list every registered efun name.
-Read mudlib/nightmare3_fluffos_v2/fluffos-2.9-ds2.08/func_spec.c and
+Read driver/reference/fluffos-2.9-ds2.08/func_spec.c and
 list every efun defined there. Produce a gap analysis:
 
 1. Efuns in func_spec.c but not in EfunTable.cpp (missing)
 2. Efuns in EfunTable.cpp but not in func_spec.c (driver-specific)
-3. Efuns in both — check that the signature matches
+3. Efuns in both - check that the signature matches
 
 For the top 20 missing efuns by usage frequency (grep call sites in
 mudlib/nightmare3_fluffos_v2/), produce a priority-ordered backlog.
@@ -498,7 +498,7 @@ and list every registered efun.
 
 For each registered efun, determine whether it has at least one
 regression test. Produce a list of efuns with no test coverage.
-Then implement one regression test for each untested efun — minimum
+Then implement one regression test for each untested efun - minimum
 happy path + one error/edge case per efun. Build and confirm all
 tests pass.
 ```
