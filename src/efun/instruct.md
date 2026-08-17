@@ -435,6 +435,55 @@ architecture-mismatched -- but sized closer to `replace_program`'s own
 into a batch. Flagged with this citation so it is not rediscovered from
 scratch next time.
 
+**Tier 1, sixth pass (2026-08-22):** with `translate`/`origin`/the
+`parse_*`/buffer/reflection/driver-internal-dump families all already
+excluded or deferred with a documented reason, checked every remaining
+never-yet-individually-assessed real gap name still carrying real
+call-site weight, or cheap enough to be worth a direct look regardless.
+Implemented: `function_owner` (real, `packages/contrib.c`, 1 genuine
+call site, `lima/lib/std/object/hooks.c`), `replaceable` (real,
+`packages/contrib.c`, genuinely paired with `replace_program()` at its
+own one real call site, `dead-souls/lib/lib/std/room.c` -- a small,
+direct follow-on reusing `CompiledProgram::functions`, which already
+*is* real code's own `FUNC_INHERITED`/`FUNC_NO_CODE`-filtered set with
+no extra filtering needed), `num_classes` (real, `packages/contrib.c`,
+an unconditional 0 -- a certainty, not a guess, since this driver's
+compiler has never implemented LPC `class` declarations, no `TYPE_CLASS`
+at all), `set_author` (real, `packages/mudlib_stats.c`, implemented as
+a documented no-op the same way `flush_messages()` already is: its only
+observable real effect anywhere is tagging the already-excluded
+`author_stats()`/`domain_stats()`'s own per-author accounting, so
+nothing in this driver could ever observe the difference either way).
+`function_owner`'s first draft returned void for a null/gone owner;
+its own dedicated test caught this on the very first real run --
+re-read real `interpret.h`'s own `put_unrefed_object()` macro directly,
+confirmed it is a real int 0 for that case (and for a destructed-but-
+still-referenced owner too), fixed before this landed. `set_author`'s
+own "1 real call site" (lima) turned out to be a false positive worth
+recording for the methodology itself: a same-named local function
+*definition* in `lima/lib/std/book.c` (a book object's own "who wrote
+this" setter, shadowing the core efun for that file), not a call --
+this row's own `\bname\(` matching cannot distinguish a same-named
+definition from a call, a new variant of the comment/prototype
+false-positive trap already known from earlier passes.
+
+Investigated and excluded/deferred, not implemented: `set_reset` (real,
+`efuns_main.c`) has no equivalent to schedule at all -- this driver
+implements no `reset()`-apply mechanism whatsoever (confirmed by direct
+grep, zero hits), a genuine architecture-mismatch case unlike
+`set_author`'s "no-op is provably complete" situation, since here there
+really is a real driver-level concept this driver never built. Real
+`reload_object` (`object.c`) was read in full and IS implementable in
+principle (zero every object variable, close owned efun sockets,
+splice/cascade its own shadow chain -- both reusable from
+`ObjectManager::destructObject()` -- disable heart_beat, remove pending
+call_outs, then call `create()` again, an easy-to-miss final step) but
+has zero real call sites across all six corpora and needs one genuinely
+new piece (a "close every socket a given object owns" `SocketRegistry`
+capability that does not exist yet) -- deferred rather than built
+speculatively against nothing real to validate against; the full real
+sequence above is recorded here so it does not need rediscovering.
+
 **Tier 2 (medium effort), corrected:** `query_actions` removed (not a
 real efun name, see `commands`'s own row above). Everything else in the
 first pass's Tier 2 list is now done: `add_action`, `remove_action`,

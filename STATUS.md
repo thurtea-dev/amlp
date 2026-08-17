@@ -3,6 +3,98 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): a real implementation bug caught by its own
+test rather than shipped, 4 more efuns implemented, most of the
+remaining ranked gap resolved into concrete excluded/deferred
+categories (Phase 0 row 0.13: 231 registered, up from 227).** Re-ran the
+six-corpus ranking (same shape as last entry -- `translate`/`origin`
+still the two highest-ranked correctly-excluded/deferred items, nothing
+new since the corpora themselves haven't changed). Checked every
+previously-unassessed real gap name still carrying real call-site
+weight or otherwise worth a direct look, verifying each against
+`reference/fluffos-2.9-ds2.08` before writing anything, same as every
+pass before this one.
+
+Implemented: `function_owner` (real, `packages/contrib.c`, 1 genuine
+call site in `lima/lib/std/object/hooks.c`) -- the closure's own owner
+object, `Closure::owner` already being exactly real `funptr_hdr_t::owner`
+in weak_ptr form. First draft returned void (`Value{}`) for a null/gone
+owner; its own dedicated test caught this immediately on the first real
+run, not a rubber-stamped pass -- re-read real `interpret.h`'s own
+`put_unrefed_object()` macro directly rather than guessing, confirmed
+it explicitly pushes a real int 0 for a null *or destructed* owner
+(`"if (!(x) || (x)->flags & O_DESTRUCTED) *sp = const0u"`), fixed to
+match, and the test extended to cover both real paths independently:
+`weak_ptr::lock()` failing outright (owner's last reference genuinely
+gone) and `lock()` succeeding but `isDestructed()` being true (owner
+destructed while a live reference is deliberately kept locally, the
+same "destructed but still referenced" pattern this driver's own
+2026-08-09 `coerceIfDestructed()` work already established test
+coverage for elsewhere). `replaceable` (real, `packages/contrib.c`,
+confirmed genuinely paired with `replace_program()` at its own one real
+call site -- `dead-souls/lib/lib/std/room.c`'s own
+`"if (replaceable(this_object()) && ...) replace_program(...)"`)
+implemented as a direct, small follow-on to last session's own
+`replace_program()` work: this driver's `CompiledProgram::functions`
+already *is* exactly real code's own `FUNC_INHERITED`/`FUNC_NO_CODE`-
+filtered set (functions defined locally in this exact file, with real
+code -- an inherited function lives in a different `CompiledProgram`
+entirely, confirmed directly rather than assumed), so no separate
+filtering logic was needed at all, just a membership check against an
+ignore list seeded with `"create"` and this driver's own synthesized
+`"$objvarinit"` (the real equivalent of FluffOS's own synthesized
+`"__INIT"`) plus the caller's explicit extras. `num_classes` (real,
+`packages/contrib.c`) implemented as an unconditional `0`: not a guess
+or a default, a certainty -- this driver's compiler has never
+implemented LPC `class` declarations at all (no `TYPE_CLASS` value
+kind, the same gap the already-excluded `assemble_class`/
+`disassemble_class`/`fetch_class_member`/`store_class_member` share),
+so every object this driver can possibly compile has exactly zero class
+declarations. `set_author` (real, `packages/mudlib_stats.c`) implemented
+as a documented no-op, same reasoning `flush_messages()` already
+established for its own already-default real effect: real
+`set_author()`'s only observable effect anywhere in the reference
+source is tagging `PACKAGE_MUDLIB_STATS`-only per-author memory
+accounting (`ob->stats.author`), and its only real consumer
+(`author_stats()`/`domain_stats()`) is already excluded from this table
+for having no equivalent model in this driver at all -- nothing in this
+driver could ever observe what `set_author()` recorded either way, so a
+no-op is behaviorally complete, not an approximation. Its own "real
+call site" was double-checked and turned out to be a false positive
+worth flagging for the methodology itself: the one raw grep hit
+(`lima/lib/std/book.c`) is a same-named local function *definition* (a
+book object's own "who wrote this" property setter, shadowing the core
+efun for that file, not a call to it at all) -- this row's own
+`\bname\(` matching cannot itself distinguish a definition from a call,
+a trap already known for comments/prototypes but not previously
+observed for a same-named local override specifically.
+
+Investigated and resolved into a firm exclusion, not implemented:
+`set_reset` (real, `efuns_main.c`) schedules when this object's own
+`reset()` apply will next fire (`ob->next_reset`) -- but this driver has
+no `reset()`-apply mechanism anywhere at all (grepped directly, zero
+hits), unlike `set_author`'s situation: there IS a real driver-level
+concept here (periodic per-object `reset()` firing) that this driver
+genuinely never built, so a no-op would be silently misleading rather
+than behaviorally complete, the same architecture-mismatch category as
+`mud_status` rather than `flush_messages`. `reload_object` (real,
+`object.c`) was read in full and found genuinely implementable in
+principle -- zero every object variable, close any efun sockets it
+owns, cascade-destruct or splice out of its own shadow chain (both
+reusable from `ObjectManager::destructObject()`'s own existing logic),
+disable heart_beat, remove pending call_outs, then call `create()`
+again -- but has zero real call sites across all six corpora and would
+need one genuinely new piece (a "close every socket a given object
+owns" `SocketRegistry` capability that does not exist yet), so deferred
+rather than implemented speculatively against no real usage to validate
+against; flagged here so the full real sequence (including the easy-to-
+miss "calls create() again at the end," not just "zeroes variables")
+is not rediscovered from scratch.
+
+Full suite: 568 tests passing, up from 564 before this session, no
+regressions, stable across three consecutive runs plus a full `ctest`
+pass.
+
 **2026-08-22 (continued): `replace_program()` taken on as the flagship
 item from last session's own architecture notes, `query_replaced_program`
 added alongside it as a natural follow-on, `origin()` investigated

@@ -3748,6 +3748,61 @@ void registerCoreEfuns() {
         return Value(*ob->replacedProgramName());
     });
 
+    // int replaceable(object ob, void|string *ignore) -- real
+    // packages/contrib.c's own f_replaceable(): true iff every function
+    // ob's own program defines *locally* (not inherited -- real
+    // FUNC_INHERITED/FUNC_NO_CODE filter) is either "create", the
+    // compiler's own synthesized initializer (real "__INIT", this
+    // driver's own equivalent is CodeGen's synthesized "$objvarinit" --
+    // see CodeGen.cpp's own comment), or one of the caller's explicit
+    // ignore-list names -- i.e. nothing about ob's own file would
+    // actually be lost if replace_program() swapped it away. This
+    // driver's own CompiledProgram::functions already *is* exactly
+    // "locally defined in this file, with real code" (an inherited
+    // function lives in a *different* CompiledProgram's own functions
+    // list entirely, only reached by findFunctionInChain()'s own
+    // separate walk -- see CompiledProgram's own Bytecode.hpp comment),
+    // so no separate inherited/no-code filtering is needed here at all;
+    // real code's own filtering is just this driver's existing data
+    // shape. Real "obj == simul_efun_ob || prog->func_ref" forces false
+    // additionally -- func_ref has no equivalent here for the same
+    // reason replace_program()'s own registration comment above already
+    // gives (this driver's Closure never holds a direct function-table
+    // reference to guard against). Real call site confirmed genuine and
+    // paired directly with replace_program() itself: dead-souls' own
+    // std/room.c gates its own "replace_program(tmp[0])" behind
+    // "if (replaceable(this_object()) && ...)".
+    t.registerEfun("replaceable", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("replaceable: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob) return Value(int64_t{0});
+
+        std::vector<std::string> ignore = {"create", "$objvarinit"};
+        if (args.size() > 1) {
+            if (!std::holds_alternative<std::shared_ptr<Array>>(args[1].data)) {
+                throw LpcRuntimeError("replaceable: expected a string array second argument");
+            }
+            auto extra = std::get<std::shared_ptr<Array>>(args[1].data);
+            if (extra) {
+                for (auto& item : extra->items) {
+                    if (auto* s = std::get_if<std::string>(&item.data)) ignore.push_back(*s);
+                }
+            }
+        }
+
+        bool result = true;
+        for (auto& fn : ob->program().functions) {
+            if (std::find(ignore.begin(), ignore.end(), fn.name) == ignore.end()) {
+                result = false;
+                break;
+            }
+        }
+        if (ob == vm.simulEfunObject()) result = false;
+        return Value(static_cast<int64_t>(result ? 1 : 0));
+    });
+
     // object snoop(object by, void|object victim) -- Phase 0.13 (snoop
     // family). Confirmed directly against fluffos-2.9-ds2.08's own
     // f_snoop() (efuns_main.c) and new_set_snoop() (comm.c), not the task
@@ -5124,6 +5179,87 @@ void registerCoreEfuns() {
             (void)(ob ? InteractiveRegistry::find(ob) : nullptr);
         }
         return Value{};
+    });
+
+    // void set_author(string name) -- real packages/mudlib_stats.c's own
+    // f_set_author()/set_author(): tags current_object's own
+    // memory/object-count accounting under the given author name in
+    // real FluffOS's PACKAGE_MUDLIB_STATS system (mudlib_stats_t's own
+    // `objects` counter, ob->stats.author). No other observable effect
+    // anywhere in the real source -- confirmed directly, the only real
+    // consumer is author_stats()/domain_stats(), themselves already
+    // excluded from this table (architecture mismatch: this driver has
+    // no per-author memory/object-count tracking model at all, same
+    // category as mud_status/cache_stats). Since nothing in this driver
+    // could ever observe what set_author() recorded either way, a no-op
+    // is not an approximation of real behavior here, it is behaviorally
+    // complete -- same reasoning flush_messages() above already
+    // establishes for its own already-default real effect. Zero genuine
+    // calls to the *core efun* anywhere across all six corpora once
+    // checked directly -- the one raw grep hit (lima's own
+    // std/book.c) is a same-named local function *definition* (a
+    // book object's own "who wrote this" property setter, a same-name
+    // shadow, not a call to this efun at all), a real trap this
+    // ranking's own tight-but-not-context-aware `\bname\(` matching
+    // cannot itself distinguish from a genuine call. Implemented anyway,
+    // same bar 0-call-site items like named_livings/query_replaced_program
+    // were included under previously: real, self-contained, and its own
+    // no-op is provably complete rather than a guess.
+    t.registerEfun("set_author", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("set_author: expected a string argument");
+        }
+        return Value{};
+    });
+
+    // object function_owner(function fp) -- real packages/contrib.c's
+    // own f_function_owner(): the object that owned fp at the moment it
+    // was created (real funptr_hdr_t::owner), via real interpret.h's own
+    // put_unrefed_object() macro -- confirmed directly rather than
+    // assumed: "if (!(x) || (x)->flags & O_DESTRUCTED) *sp = const0u;
+    // else ...", a real int 0 for a null *or destructed* owner, not the
+    // object reference regardless (an earlier draft of this comment
+    // assumed no O_DESTRUCTED filter existed; re-read and corrected
+    // before this landed, not caught only by the test that was written
+    // against the wrong assumption first). This driver's own
+    // Closure::owner is already real FluffOS's own hdr.owner field,
+    // weak_ptr rather than a full reference -- lock() covers the "gone
+    // entirely" half of that real check on its own (fails once the
+    // owner's last real reference is actually gone), isDestructed()
+    // covers the other half explicitly (a still-referenced-but-
+    // destructed owner locks successfully but must still read back as 0
+    // here, matching real semantics exactly).
+    t.registerEfun("function_owner", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<Closure>>(args[0].data)) {
+            throw LpcRuntimeError("function_owner: expected a function argument");
+        }
+        auto closure = std::get<std::shared_ptr<Closure>>(args[0].data);
+        if (!closure) return Value(int64_t{0});
+        auto owner = closure->owner.lock();
+        // Real put_unrefed_object() (interpret.h): "if (!(x) || (x)->flags
+        // & O_DESTRUCTED) *sp = const0u" -- a real int 0, not void, for a
+        // null or destructed owner (this driver's own isDestructed() is
+        // covered too: a still-referenced-but-destructed owner still
+        // locks successfully but must still read back as 0 here).
+        if (!owner || owner->isDestructed()) return Value(int64_t{0});
+        return Value(owner);
+    });
+
+    // int num_classes(object ob) -- real packages/contrib.c's own
+    // f_num_classes(): "sp->u.ob->prog->num_classes", how many LPC
+    // `class` struct declarations ob's own compiled program defines.
+    // This driver's compiler has never implemented LPC class
+    // declarations at all (no TYPE_CLASS value kind -- the same gap
+    // assemble_class/disassemble_class/fetch_class_member/
+    // store_class_member above are all excluded for), so this is not a
+    // guess or an approximation: every object this driver can possibly
+    // compile has exactly zero class declarations, unconditionally and
+    // certainly, not merely by default.
+    t.registerEfun("num_classes", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("num_classes: expected an object argument");
+        }
+        return Value(int64_t{0});
     });
 
     // object *users() -- every object currently bound to a live

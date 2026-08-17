@@ -15515,6 +15515,166 @@ static void testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObj
     std::cout << "testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObject OK\n";
 }
 
+// function_owner(): the closure's own owner, or int 0 once that owner
+// is genuinely gone (not merely destructed-but-still-referenced --
+// Closure::owner is already a weak_ptr, real code applies no separate
+// O_DESTRUCTED filter of its own either).
+static void testFunctionOwnerReturnsClosureOwnerOrZeroOnceOwnerIsGone() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fo_owner.c",
+        "int greet() { return 111; }\n"
+        "mixed make() { return (: greet :); }\n");
+    auto owner = harness.objects.cloneObject("/fo_owner");
+    assert(owner != nullptr);
+
+    amlp::Value closureVal = harness.vm.callFunction(owner, "make", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::Closure>>(closureVal.data));
+
+    {
+        std::vector<amlp::Value> ownerArgs{closureVal};
+        amlp::Value ownerResult = amlp::EfunTable::instance().call("function_owner", harness.vm, ownerArgs);
+        auto* ownerOb = std::get_if<std::shared_ptr<amlp::LpcObject>>(&ownerResult.data);
+        assert(ownerOb != nullptr && *ownerOb == owner);
+        // ownerResult itself holds a strong shared_ptr to the same
+        // object (the efun's own real return value) -- must not outlive
+        // this scope, or it would keep the object alive on its own and
+        // the "owner is genuinely gone" check below would pass for the
+        // wrong reason (isDestructed()-style staleness, not an actually
+        // expired weak_ptr).
+    }
+
+    // Wrong argument type throws.
+    bool threw = false;
+    std::vector<amlp::Value> badArgs{amlp::Value(int64_t{5})};
+    try {
+        amlp::EfunTable::instance().call("function_owner", harness.vm, badArgs);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    // Destructed but still referenced (a live local shared_ptr kept
+    // below, the same pattern the destructed-object test suite already
+    // establishes): the weak_ptr still locks successfully, but real
+    // put_unrefed_object()'s own explicit O_DESTRUCTED check must still
+    // read this back as 0, not the object.
+    harness.vm.destructObject(owner); // owner stays alive via this local
+    std::vector<amlp::Value> destructedArgs{closureVal};
+    amlp::Value destructedResult =
+        amlp::EfunTable::instance().call("function_owner", harness.vm, destructedArgs);
+    assert(std::holds_alternative<int64_t>(destructedResult.data) &&
+           std::get<int64_t>(destructedResult.data) == 0);
+
+    // Once the owner's last real reference is gone entirely, the
+    // weak_ptr itself expires too -- a second, independent way to reach
+    // the same real int-0 answer.
+    owner.reset();
+    std::vector<amlp::Value> goneArgs{closureVal};
+    amlp::Value goneResult = amlp::EfunTable::instance().call("function_owner", harness.vm, goneArgs);
+    assert(std::holds_alternative<int64_t>(goneResult.data) && std::get<int64_t>(goneResult.data) == 0);
+
+    std::cout << "testFunctionOwnerReturnsClosureOwnerOrZeroOnceOwnerIsGone OK\n";
+}
+
+static void testNumClassesAlwaysReturnsZeroSinceClassDeclarationsDoNotExist() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nc_probe.c", "void create() {}\n");
+    auto ob = harness.objects.cloneObject("/nc_probe");
+    assert(ob != nullptr);
+
+    std::vector<amlp::Value> args{amlp::Value(ob)};
+    amlp::Value result = amlp::EfunTable::instance().call("num_classes", harness.vm, args);
+    assert(std::holds_alternative<int64_t>(result.data) && std::get<int64_t>(result.data) == 0);
+
+    bool threw = false;
+    std::vector<amlp::Value> badArgs{amlp::Value(int64_t{1})};
+    try {
+        amlp::EfunTable::instance().call("num_classes", harness.vm, badArgs);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testNumClassesAlwaysReturnsZeroSinceClassDeclarationsDoNotExist OK\n";
+}
+
+static void testSetAuthorAcceptsStringReturnsVoidAndThrowsOnWrongType() {
+    ObjectVarHarness harness;
+
+    std::vector<amlp::Value> args{amlp::Value(std::string("someone"))};
+    amlp::Value result = amlp::EfunTable::instance().call("set_author", harness.vm, args);
+    assert(result.isVoid());
+
+    bool threw = false;
+    std::vector<amlp::Value> badArgs{amlp::Value(int64_t{1})};
+    try {
+        amlp::EfunTable::instance().call("set_author", harness.vm, badArgs);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testSetAuthorAcceptsStringReturnsVoidAndThrowsOnWrongType OK\n";
+}
+
+// replaceable(): true only when every one of ob's own *locally defined*
+// functions is create(), the compiler's own synthesized "$objvarinit"
+// (only present when a top-level variable actually has an initializer
+// expression), or in the caller's explicit ignore list -- false the
+// moment any other real function exists, and always false for the
+// simul_efun object regardless.
+static void testReplaceableTrueOnlyWhenEveryLocalFunctionIsIgnorable() {
+    ObjectVarHarness harness;
+    harness.writeFile("/repl_bare.c", "void create() {}\n");
+    harness.writeFile("/repl_with_init.c", "int x = 5;\nvoid create() {}\n");
+    harness.writeFile("/repl_extra.c", "void create() {}\nint extra() { return 1; }\n");
+
+    auto bare = harness.objects.cloneObject("/repl_bare");
+    auto withInit = harness.objects.cloneObject("/repl_with_init");
+    auto extra = harness.objects.cloneObject("/repl_extra");
+    assert(bare && withInit && extra);
+
+    auto callReplaceable = [&](std::shared_ptr<amlp::LpcObject> ob,
+                                std::shared_ptr<amlp::Array> ignore = nullptr) {
+        std::vector<amlp::Value> args{amlp::Value(ob)};
+        if (ignore) args.emplace_back(ignore);
+        return amlp::EfunTable::instance().call("replaceable", harness.vm, args);
+    };
+
+    // Only create(): trivially replaceable.
+    assert(std::get<int64_t>(callReplaceable(bare).data) == 1);
+
+    // create() plus a synthesized "$objvarinit" from the initializer --
+    // still replaceable, the synthesized name is auto-ignored.
+    assert(std::get<int64_t>(callReplaceable(withInit).data) == 1);
+
+    // create() plus a genuine extra function -- not replaceable.
+    assert(std::get<int64_t>(callReplaceable(extra).data) == 0);
+
+    // ...unless that function is explicitly ignored.
+    auto ignoreExtra = std::make_shared<amlp::Array>();
+    ignoreExtra->items.emplace_back(std::string("extra"));
+    assert(std::get<int64_t>(callReplaceable(extra, ignoreExtra).data) == 1);
+
+    // Wrong argument type throws.
+    bool threw = false;
+    std::vector<amlp::Value> badArgs{amlp::Value(int64_t{1})};
+    try {
+        amlp::EfunTable::instance().call("replaceable", harness.vm, badArgs);
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    // Always false for the simul_efun object itself, even with no
+    // functions of its own beyond create().
+    harness.writeFile("/simul_efun.c", "void create() {}\n");
+    assert(harness.objects.loadSimulEfunObject());
+    assert(std::get<int64_t>(callReplaceable(harness.objects.simulEfunObject()).data) == 0);
+
+    std::cout << "testReplaceableTrueOnlyWhenEveryLocalFunctionIsIgnorable OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -16086,6 +16246,10 @@ int main() {
     testReplaceProgramDeferredSwapPreservesInheritedVariablesAndDropsOwnFunctions();
     testQueryReplacedProgramReflectsOnlyAnActuallyAppliedSwap();
     testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObject();
+    testFunctionOwnerReturnsClosureOwnerOrZeroOnceOwnerIsGone();
+    testNumClassesAlwaysReturnsZeroSinceClassDeclarationsDoNotExist();
+    testSetAuthorAcceptsStringReturnsVoidAndThrowsOnWrongType();
+    testReplaceableTrueOnlyWhenEveryLocalFunctionIsIgnorable();
     std::cout << "all tests passed\n";
     return 0;
 }
