@@ -56,12 +56,11 @@ bool buildSockaddr(const std::string& host, int port, sockaddr_in& sin) {
 
 // Real error_strings[] (socket_err.c), same order, same text, indexed by
 // real socket_error()'s own "-(error + 1)" formula (SocketErr::ESocket
-// == -1 -> index 0, and so on down to SocketErr::ECallback == -29 ->
-// index 28). The two entries past this driver's own implemented error
-// set (EESOCKRLSD/EESOCKNOTRLSD, socket_release()/socket_acquire()'s own
-// errors -- neither implemented, see SocketRegistry.hpp's own file
-// comment) are kept anyway so socket_error() never falls off the real
-// table's own bounds for a code this driver simply never returns itself.
+// == -1 -> index 0, and so on down to SocketErr::EBadData == -32 ->
+// index 31). The last entry is real (EEBADDATA, socket_write()'s own
+// MUD-mode wire-framing nesting-depth error) but unreachable here, since
+// MUD mode itself is not implemented -- see SocketErr::EBadData's own
+// comment, LpcSocket.hpp.
 const char* const kErrorStrings[] = {
     "Problem creating socket",           // ESocket      -1
     "Problem with setsockopt",           // ESetSockOpt  -2
@@ -92,9 +91,9 @@ const char* const kErrorStrings[] = {
     "Problem with sendto",               // ESendTo      -27
     "Problem with send",                 // ESend        -28
     "Wait for callback",                 // ECallback    -29
-    "Socket already released",           // (unimplemented) -30
-    "Socket not released",               // (unimplemented) -31
-    "Data nested too deeply",            // (unimplemented) -32
+    "Socket already released",           // ESockRlsd    -30
+    "Socket not released",               // ESockNotRlsd -31
+    "Data nested too deeply",            // EBadData     -32 (unreachable, see above)
 };
 constexpr int kErrorStringsCount = sizeof(kErrorStrings) / sizeof(kErrorStrings[0]);
 
@@ -418,6 +417,50 @@ std::vector<std::shared_ptr<LpcSocket>> SocketRegistry::all() {
 
 void SocketRegistry::forceRemove(int handle) {
     g_sockets.erase(handle);
+}
+
+int SocketRegistry::beginRelease(int handle, const std::shared_ptr<LpcObject>& ob,
+                                  const std::shared_ptr<LpcObject>& caller) {
+    auto it = g_sockets.find(handle);
+    if (it == g_sockets.end()) return SocketErr::EFdRange;
+    auto& sock = it->second;
+    if (sock->state == SocketState::Closed) return SocketErr::EBadF;
+    if (sock->owner.lock() != caller) return SocketErr::ESecurity;
+    if (sock->released) return SocketErr::ESockRlsd;
+
+    sock->released = true;
+    sock->releaseTarget = ob;
+    return SocketErr::Success;
+}
+
+bool SocketRegistry::isReleased(int handle) {
+    auto sock = find(handle);
+    return sock && sock->released;
+}
+
+void SocketRegistry::cancelRelease(int handle) {
+    auto sock = find(handle);
+    if (!sock) return;
+    sock->released = false;
+    sock->releaseTarget.reset();
+}
+
+int SocketRegistry::acquire(int handle, Value readCallback, Value writeCallback,
+                             Value closeCallback, const std::shared_ptr<LpcObject>& caller) {
+    auto it = g_sockets.find(handle);
+    if (it == g_sockets.end()) return SocketErr::EFdRange;
+    auto& sock = it->second;
+    if (sock->state == SocketState::Closed) return SocketErr::EBadF;
+    if (!sock->released) return SocketErr::ESockNotRlsd;
+    if (sock->releaseTarget.lock() != caller) return SocketErr::ESecurity;
+
+    sock->released = false;
+    sock->owner = caller;
+    sock->releaseTarget.reset();
+    sock->readCallback = std::move(readCallback);
+    sock->writeCallback = std::move(writeCallback);
+    sock->closeCallback = std::move(closeCallback);
+    return SocketErr::Success;
 }
 
 }  // namespace amlp

@@ -44,6 +44,14 @@ constexpr int ETypeNotSupp  = -26;
 constexpr int ESendTo       = -27;
 constexpr int ESend         = -28;
 constexpr int ECallback     = -29;
+constexpr int ESockRlsd     = -30;
+constexpr int ESockNotRlsd  = -31;
+// Real socket_write()'s own MUD-mode wire-framing error (too many
+// nested levels in the LPC value being sent) -- unreachable here since
+// MUD mode itself is not implemented (SocketMode's own comment above),
+// kept only so socket_error()/errorString() below never falls off the
+// real table's own bounds for a code this driver simply never returns.
+constexpr int EBadData      = -32;
 }  // namespace SocketErr
 
 // Real enum socket_mode (socket_efuns.h): MUD=0, STREAM=1, DATAGRAM=2,
@@ -99,17 +107,19 @@ public:
     SocketState state = SocketState::Unbound;
 
     // Real owner_ob (object_t*, current_object at socket_create()/
-    // socket_accept() time): a weak_ptr, not shared, matching this
-    // driver's own established PendingInputTo precedent -- a socket
-    // outliving the object that created it must not itself keep that
-    // object alive, and a callback firing after the owner is destructed
-    // is silently dropped rather than treated as an error, the same way
+    // socket_accept() time, reassigned by a completed socket_acquire()
+    // below): a weak_ptr, not shared, matching this driver's own
+    // established PendingInputTo precedent -- a socket outliving the
+    // object that owns it must not itself keep that object alive, and a
+    // callback firing after the owner is destructed is silently dropped
+    // rather than treated as an error, the same way
     // Server::dispatchLine()'s own PendingInputTo::object.lock() check
     // already works. Real close_referencing_sockets(ob) (force-closing
-    // every socket a destructed object still owns) has no equivalent
-    // here -- a known, documented gap, not a crash risk (the dangling
-    // socket just never fires its callback again once the owner is
-    // gone), see SocketRegistry's own file-level comment.
+    // every socket a destructed object still owns) is ported --
+    // ObjectManager::destructObject()/reloadObject()'s own onDestructed
+    // callback, wired to SocketRegistry::closeAllOwnedBy() from
+    // EfunTable.cpp's own destruct()/reload_object() registrations, see
+    // SocketRegistry's own file-level comment for the full citation.
     std::weak_ptr<LpcObject> owner;
 
     // string|function forms, exactly like Connection::pendingNotifyFail_
@@ -118,6 +128,17 @@ public:
     Value readCallback;
     Value writeCallback;
     Value closeCallback;
+
+    // Real S_RELEASE: true between a successful socket_release() call
+    // and the matching socket_acquire() that completes the handoff (or
+    // the release being cancelled because no acquire ever happened --
+    // see SocketRegistry::beginRelease()/cancelRelease()'s own
+    // comments). releaseTarget mirrors real release_ob, the one object
+    // socket_acquire() will accept this fd from while released is true
+    // -- a weak_ptr for the same "never keeps the target object alive"
+    // reason owner above already is one.
+    bool released = false;
+    std::weak_ptr<LpcObject> releaseTarget;
 
     // Real S_BLOCKED: true while a partial socket_write() is still being
     // flushed (pendingWrite holds the undelivered remainder), or while a

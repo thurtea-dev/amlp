@@ -3,6 +3,108 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-24 (continued): row 0.13 batch -- `socket_release`/
+`socket_acquire` implemented (238 to 240), correcting a second real
+methodological miss this session, this time a scope-difficulty call
+rather than a "no body exists" one.**
+
+Bookkeeping check first: the prior entry's own "46 non-`parse_*`" phrase
+was a description of that entry's own starting scope, not a live count
+-- both this file's own concluding "Real remaining gap: 50" and
+ROADMAP.md's own row 0.13 line were already correct, nothing stale to
+fix. Made the 42-non-`parse_*`-plus-8-`parse_*` breakdown explicit in
+ROADMAP.md's own row 0.13 line anyway, since it was previously only
+derivable, not stated.
+
+Re-ranked the remaining 42 non-`parse_*` names fresh against all six
+corpora, then -- per this session's own explicit instruction -- checked
+every single one for a real C body anywhere in the reference tree, not
+just the ones with real call-site weight: all 42 have one somewhere
+(`packages/contrib.c`, `packages/matrix.c`, `packages/mudlib_stats.c`,
+`packages/sockets.c`, `packages/develop.c`, `disassembler.c`,
+`efuns_main.c`, `comm.c`), confirming last session's "unverifiable, no
+body" miss was specific to the reflection family, not a wider pattern
+-- every other existing exclusion reason (buffer/driver-internal-dump/
+VRML-pose/MXP-TTYPE families, `resolve`, `get_char`/`ed`, `set_reset`,
+`fetch_class_member`/`store_class_member`) is a genuine architecture
+mismatch or missing-infrastructure case, not an absent-body case, and
+stays excluded on that basis. `translate` (56) and `event` (7)
+individually re-checked against `efun::translate()`/`efun::event()`
+delegation across all six corpora specifically (not just recalled from
+memory) -- zero hits either way, both still genuinely shadowed
+simul_efuns with no load-bearing delegation anywhere, confirmed rather
+than assumed unchanged.
+
+`socket_acquire`/`socket_release` (4/3 raw hits, `lima`'s own
+`obj/secure/socket.c`/`old_socket.c` and `dead-souls`'s own
+`i3router`/`imc2server` socket-handoff daemons -- two independent
+corpora, not one-off usage) had been filed as "Tier 3, out of basics
+scope" (`instruct.md`) without their real bodies ever having been read.
+Read `packages/sockets.c`'s own `f_socket_release`/`f_socket_acquire`
+and `socket_efuns.c`'s own `socket_release()`/`socket_acquire()` in
+full: a real, self-contained object-to-object efun-socket ownership
+handoff protocol, not the larger "advanced" subsystem the old label
+implied. `socket_release(fd, ob, callback)` (caller must be the current
+owner): marks the socket released to `ob`, synchronously fires
+`callback(fd, ob)` (a function pointer, or a string applied on `ob` via
+real `safe_apply(..., ORIGIN_INTERNAL)`), then re-checks its own
+release flag -- if `ob`'s own callback completed a matching
+`socket_acquire()` before returning, success; otherwise the release is
+reverted in the same call and `EESOCKNOTRLSD` returned.
+`socket_acquire(fd, read_cb, write_cb, close_cb)` only succeeds while
+the fd is released *to the exact calling object* (`EESECURITY`
+otherwise), reassigning ownership and overwriting all three callbacks
+unconditionally on success. This driver's own existing
+`SocketRegistry`/`LpcSocket` (owner tracking via `weak_ptr`, string|
+function callback storage, the same real `SocketErr` code family)
+already fit this mechanism directly -- implemented as two new
+`LpcSocket` fields (`released`/`releaseTarget`) plus four new
+`SocketRegistry` methods (`beginRelease`/`isReleased`/`cancelRelease`/
+`acquire`), with the one VM-touching step (firing the release callback)
+kept in `EfunTable.cpp`'s own registration, mirroring
+`Server.cpp`'s own `fireSocketCallback()` dispatch rather than sharing
+it directly (that helper lives in `Server.cpp`'s own anonymous
+namespace; this is the only call site outside it needing the identical
+function-pointer-vs-string dispatch, so it is narrowly duplicated with
+an explicit citation rather than a header extracted for one caller).
+Two real error codes this driver had never needed before,
+`EESOCKRLSD`/`EESOCKNOTRLSD` (`socket_err.h`, -30/-31), added to
+`SocketErr` and `SocketRegistry::errorString()`'s own mirrored table;
+found and fixed a latent inaccuracy in the same table while there --
+its trailing "Data nested too deeply" entry (-32) was labeled
+"unimplemented" with no real citation at all, actually real
+(`EEBADDATA`, `socket_write()`'s own MUD-mode nesting-depth error,
+genuinely unreachable here only because MUD mode itself is not
+implemented, a preexisting and already-documented gap, not a new one).
+
+Also fixed a stale comment found in passing while touching
+`LpcSocket.hpp`'s own `owner` field: it still described
+`close_referencing_sockets(ob)` as "no equivalent here -- a known,
+documented gap" -- true when first written, but wrong since the
+2026-08-24 `destruct_object()` session earlier today ported it. Updated
+to cite the real current mechanism instead of repeating a claim that
+session had already closed.
+
+Two new regression tests (591 total, up from 589, all passing across 3
+consecutive runs plus `ctest`): a full handoff round trip (owner
+releases to a target object, whose own callback completes the handoff
+via `socket_acquire()`, confirmed both by the real return code and by
+`socket_status()`'s own owner slot genuinely reading the new owner
+afterward) and a rejection/revert case (a *third* object, reached via a
+real `call_other()` from inside the release target's own callback so
+`current_object` during the nested acquire attempt is genuinely that
+third object, is correctly refused with `ESecurity`; since nothing
+successfully acquired, the outer `socket_release()` call reverts and
+reports `ESockNotRlsd`; a stray `socket_acquire()` afterward on the
+now-unreleased fd fails the same way).
+
+Real remaining gap: 48 (`comm -23` between `efun_defs.c`'s 270 real
+names and `EfunTable.cpp`'s now-240 `registerEfun` names) -- 40
+non-`parse_*` names, all confirmed this session to be genuine
+architecture-mismatch or missing-infrastructure exclusions (not
+"unverifiable" ones), plus the 8-name `parse_*` package, still the one
+deliberately deferred dedicated-session candidate.
+
 **2026-08-24 (continued): row 0.13 batch -- `functions`, `variables`,
 `fetch_variable`, `store_variable` implemented (234 to 238), correcting
 a real, repeated methodological miss from earlier passes rather than

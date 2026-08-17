@@ -5317,6 +5317,88 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(result));
     });
 
+    // int socket_release(int fd, object ob, string|function callback)
+    // -- real socket_efuns.c's own socket_release(): hands the fd off to
+    // ob, which must complete the handoff by calling socket_acquire()
+    // itself, synchronously, from inside callback (real code's own
+    // "call the callback, then re-check whether S_RELEASE is still set"
+    // shape -- see SocketRegistry::beginRelease()/isReleased()/
+    // cancelRelease()'s own comments for the real per-step citation,
+    // this registration only owns the callback-firing step none of
+    // those three can do themselves, no VM access at that layer).
+    // Previously filed as "Tier 3, out of basics scope" (instruct.md);
+    // re-investigated this session given real, if modest, cross-corpus
+    // demand (lima's own socket.c/old_socket.c, dead-souls' own
+    // i3router/imc2server socket-handoff daemons) and found this
+    // driver's own existing SocketRegistry/LpcSocket infrastructure
+    // (owner tracking, string|function callback storage, real error
+    // codes) already fits the real mechanism directly -- no new
+    // architecture needed after all, just two new fields and two new
+    // methods, corrected in STATUS.md/instruct.md rather than left
+    // standing.
+    t.registerEfun("socket_release", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 || !std::holds_alternative<int64_t>(args[0].data) ||
+            !std::holds_alternative<std::shared_ptr<LpcObject>>(args[1].data)) {
+            throw LpcRuntimeError("socket_release: expected (int, object, string|function)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[1].data);
+        Value callback = args[2];
+
+        int rc = SocketRegistry::beginRelease(handle, ob, vm.currentObject());
+        if (rc != SocketErr::Success) return Value(static_cast<int64_t>(rc));
+
+        // Real "safe_call_function_pointer(callback->u.fp, 2) :
+        // safe_apply(callback->u.string, ob, 2, ORIGIN_INTERNAL)" --
+        // mirrors Server.cpp's own fireSocketCallback() dispatch exactly
+        // (same real function/string split, same real ORIGIN_INTERNAL),
+        // duplicated narrowly here rather than shared across the two
+        // files since fireSocketCallback lives in Server.cpp's own
+        // anonymous namespace and this is the only call site outside it
+        // that needs the identical dispatch.
+        std::vector<Value> callbackArgs{Value(static_cast<int64_t>(handle)), Value(ob)};
+        if (auto* closure = std::get_if<std::shared_ptr<Closure>>(&callback.data)) {
+            if (*closure) {
+                try {
+                    vm.callClosure(*closure, callbackArgs);
+                } catch (const std::exception&) {
+                    // Real safe_call_function_pointer(): an error inside
+                    // the callback is caught and does not abort
+                    // socket_release() itself.
+                }
+            }
+        } else if (auto* name = std::get_if<std::string>(&callback.data)) {
+            if (ob) {
+                try {
+                    vm.callFunction(ob, *name, callbackArgs, Origin::Internal);
+                } catch (const std::exception&) {
+                }
+            }
+        }
+
+        if (SocketRegistry::isReleased(handle)) {
+            SocketRegistry::cancelRelease(handle);
+            return Value(static_cast<int64_t>(SocketErr::ESockNotRlsd));
+        }
+        return Value(static_cast<int64_t>(SocketErr::Success));
+    });
+
+    // int socket_acquire(int fd, string|function read_callback,
+    //                     string|function write_callback,
+    //                     string|function close_callback)
+    // -- real socket_efuns.c's own socket_acquire(), the completing half
+    // of socket_release() above; see SocketRegistry::acquire()'s own
+    // comment for the real per-step citation.
+    t.registerEfun("socket_acquire", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 4 || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError(
+                "socket_acquire: expected (int, string|function, string|function, string|function)");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        int result = SocketRegistry::acquire(handle, args[1], args[2], args[3], vm.currentObject());
+        return Value(static_cast<int64_t>(result));
+    });
+
     // string socket_error(int error)
     t.registerEfun("socket_error", [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {

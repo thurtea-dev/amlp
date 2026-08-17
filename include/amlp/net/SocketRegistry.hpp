@@ -150,6 +150,51 @@ public:
     // the same "read the one-shot state, then act on it" split
     // Connection::takeWindowSizeUpdate() already established.
     static void forceRemove(int handle);
+
+    // int socket_release(int fd, object ob, string|function callback)
+    // -- the validation/state half of real socket_release() (socket_efuns.c:
+    // fd range, not closed/flushing, caller is the current owner, not
+    // already released -- EFdRange/EBadF/ESecurity/ESockRlsd on a real
+    // failure of any of those). On success, marks the socket released to
+    // ob (LpcSocket::released/releaseTarget) and returns Success -- the
+    // caller (EfunTable.cpp's own socket_release registration, the one
+    // layer with VM& access) fires callback(fd, ob) itself immediately
+    // after, real socket_efuns.c's own "safe_call_function_pointer(...)
+    // : safe_apply(..., ob, 2, ORIGIN_INTERNAL)", then calls
+    // isReleased()/cancelRelease() below to resolve the real "did the
+    // callback complete a socket_acquire() before returning" outcome real
+    // socket_release() determines by re-checking its own S_RELEASE flag
+    // after the callback returns.
+    static int beginRelease(int handle, const std::shared_ptr<LpcObject>& ob,
+                             const std::shared_ptr<LpcObject>& caller);
+
+    // True while handle sits between a successful beginRelease() and
+    // either a completing socket_acquire() (acquire() below clears this)
+    // or a cancelRelease() call. False for an unknown handle too --
+    // never released is observably the same as no-longer-released here.
+    static bool isReleased(int handle);
+
+    // Reverts a beginRelease() that no socket_acquire() ever completed
+    // for -- real socket_release()'s own "lpc_socks[fd].flags &=
+    // ~S_RELEASE; lpc_socks[fd].release_ob = NULL;" fallback, run by the
+    // EfunTable.cpp caller only when isReleased() is still true right
+    // after firing the release callback.
+    static void cancelRelease(int handle);
+
+    // int socket_acquire(int fd, string|function read_callback,
+    //                     string|function write_callback,
+    //                     string|function close_callback)
+    // -- real socket_acquire() (socket_efuns.c): only succeeds while
+    // handle is released (isReleased() above) *to this exact caller*
+    // (real "release_ob != current_object" check, ESecurity otherwise);
+    // on success, reassigns ownership to caller, clears the released
+    // state, and overwrites all three callbacks with the ones given
+    // here -- real socket_acquire()'s own unconditional
+    // set_read_callback()/set_write_callback()/set_close_callback()
+    // trio, replacing whatever socket_create()/a prior socket_acquire()
+    // had set, not merged with them.
+    static int acquire(int handle, Value readCallback, Value writeCallback,
+                        Value closeCallback, const std::shared_ptr<LpcObject>& caller);
 };
 
 }  // namespace amlp

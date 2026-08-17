@@ -704,9 +704,21 @@ read efun exists), `sockets_status`, `net_connect`, `add_verb`,
 `remove_verb`.
 
 **Tier 3 (lower urgency, high effort):**
-Socket package (advanced: `socket_acquire`/`socket_release`, object-to-
-object socket transfer, out of "basics" scope), database package, crypto
-package - see Phase 2.
+Database package, crypto package - see Phase 2.
+
+**Correction, 2026-08-24: `socket_acquire`/`socket_release` were never
+actually "high effort" -- this line was written without reading either
+efun's own real body first.** Both implemented this session
+(`EfunTable.cpp`, `SocketRegistry.hpp`/`.cpp`; see STATUS.md's own
+dated entry for the full real-mechanism citation): a self-contained
+object-to-object efun-socket ownership handoff, not a larger
+subsystem, and this driver's existing `SocketRegistry`/`LpcSocket`
+infrastructure already fit it directly -- two new fields, four new
+methods. Flagged here as a reminder for whoever reads an "out of
+scope"/"high effort" label on a name with real, nonzero call-site
+weight in a future pass: read the real body before trusting the label,
+the same lesson the reflection-family miss just above already
+established for "unverifiable" labels specifically.
 
 ## Phase 2 tasks
 

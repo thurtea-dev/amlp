@@ -7295,6 +7295,106 @@ static void testSocketAddressForHandleDistinguishesLocalFromRemote() {
     std::cout << "testSocketAddressForHandleDistinguishesLocalFromRemote OK\n";
 }
 
+// socket_release()/socket_acquire(): real socket_efuns.c's own object-
+// to-object efun socket handoff. Previously filed as "Tier 3, out of
+// basics scope"; re-verified real, tractable, and worth implementing
+// this session (SocketRegistry.hpp/.cpp's own comments carry the full
+// citation).
+
+static void testSocketReleaseAndAcquireHandOffOwnershipAndCallbacks() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sr_target.c",
+        "int acquired;\n"
+        "void on_handoff(int fd, object ob) {\n"
+        "    acquired = (socket_acquire(fd, \"on_read2\", \"on_write2\", \"on_close2\") == 1);\n"
+        "}\n"
+        "void on_read2(int f, string m, string a) {}\n"
+        "void on_write2(int f) {}\n"
+        "void on_close2(int f) {}\n"
+        "int did_acquire() { return acquired; }\n");
+    harness.writeFile("/sr_owner.c",
+        "int make() { return socket_create(2, \"on_read\", 0); }\n"
+        "void on_read(int f, string m, string a) {}\n"
+        "int release_to(int fd, object target) { return socket_release(fd, target, \"on_handoff\"); }\n");
+    auto owner = harness.objects.cloneObject("/sr_owner");
+    auto target = harness.objects.cloneObject("/sr_target");
+    assert(owner != nullptr && target != nullptr);
+
+    amlp::Value madeFd = harness.vm.callFunction(owner, "make", {});
+    assert(std::get<int64_t>(madeFd.data) >= 0);
+    int fd = static_cast<int>(std::get<int64_t>(madeFd.data));
+
+    amlp::Value rc = harness.vm.callFunction(owner, "release_to",
+        { amlp::Value(static_cast<int64_t>(fd)), amlp::Value(target) });
+    assert(std::get<int64_t>(rc.data) == amlp::SocketErr::Success);
+    assert(std::get<int64_t>(harness.vm.callFunction(target, "did_acquire", {}).data) == 1);
+
+    // Real ownership genuinely moved -- socket_status()'s own owner slot
+    // (index 5, LpcSocket::owner) now reads target, not the original
+    // owner, confirming socket_acquire()'s own "lpc_socks[fd].owner_ob =
+    // current_object;" actually ran, not just returned success.
+    std::vector<amlp::Value> statusArgs{ amlp::Value(int64_t{fd}) };
+    amlp::Value status = amlp::EfunTable::instance().call("socket_status", harness.vm, statusArgs);
+    auto statusArr = std::get<std::shared_ptr<amlp::Array>>(status.data);
+    assert(!statusArr->items.empty());
+    auto ownerInStatus = std::get<std::shared_ptr<amlp::LpcObject>>(statusArr->items[5].data);
+    assert(ownerInStatus == target);
+
+    std::cout << "testSocketReleaseAndAcquireHandOffOwnershipAndCallbacks OK\n";
+}
+
+static void testSocketReleaseRevertsWhenNeverAcquiredAndRejectsTheWrongCaller() {
+    ObjectVarHarness harness;
+    // A third object the release target itself tries (and must fail) to
+    // hand the fd off to, from inside its own callback -- proving
+    // socket_acquire()'s own "release_ob != current_object" security
+    // check is a genuine identity check, not just "was this fd released
+    // at all", and exercised through a real call_other() so
+    // current_object during that nested acquire attempt is genuinely
+    // this third object, not the release target itself.
+    harness.writeFile("/sr_wrong.c",
+        "int try_acquire(int fd) { return socket_acquire(fd, \"x\", \"y\", \"z\"); }\n");
+    harness.writeFile("/sr_target2.c",
+        "int wrong_rc;\n"
+        "void on_handoff2(int fd, object ob) {\n"
+        "    object wrong = clone_object(\"/sr_wrong\");\n"
+        "    wrong_rc = wrong->try_acquire(fd);\n"
+        "}\n"
+        "int get_wrong_rc() { return wrong_rc; }\n");
+    harness.writeFile("/sr_owner3.c",
+        "int make() { return socket_create(2, \"on_read\", 0); }\n"
+        "void on_read(int f, string m, string a) {}\n"
+        "int release_to(int fd, object target) { return socket_release(fd, target, \"on_handoff2\"); }\n");
+    auto owner3 = harness.objects.cloneObject("/sr_owner3");
+    auto target2 = harness.objects.cloneObject("/sr_target2");
+    assert(owner3 != nullptr && target2 != nullptr);
+
+    amlp::Value madeFd = harness.vm.callFunction(owner3, "make", {});
+    assert(std::get<int64_t>(madeFd.data) >= 0);
+    int fd = static_cast<int>(std::get<int64_t>(madeFd.data));
+
+    amlp::Value rc = harness.vm.callFunction(owner3, "release_to",
+        { amlp::Value(static_cast<int64_t>(fd)), amlp::Value(target2) });
+    // target2's own on_handoff2 never itself calls socket_acquire() --
+    // only the wrong object tries, and fails -- so the outer
+    // socket_release() call reverts the release and reports
+    // ESockNotRlsd, real socket_release()'s own "S_RELEASE still set
+    // after the callback returns" fallback.
+    assert(std::get<int64_t>(rc.data) == amlp::SocketErr::ESockNotRlsd);
+    assert(std::get<int64_t>(harness.vm.callFunction(target2, "get_wrong_rc", {}).data)
+           == amlp::SocketErr::ESecurity);
+
+    // A stray socket_acquire() on this now-unreleased fd fails too --
+    // there is nothing left to acquire.
+    std::vector<amlp::Value> lateArgs{
+        amlp::Value(int64_t{fd}), amlp::Value(std::string("x")),
+        amlp::Value(std::string("y")), amlp::Value(std::string("z")) };
+    amlp::Value late = amlp::EfunTable::instance().call("socket_acquire", harness.vm, lateArgs);
+    assert(std::get<int64_t>(late.data) == amlp::SocketErr::ESockNotRlsd);
+
+    std::cout << "testSocketReleaseRevertsWhenNeverAcquiredAndRejectsTheWrongCaller OK\n";
+}
+
 static void testQueryHostNameMatchesRealGethostname() {
     ObjectVarHarness harness;
     harness.writeFile("/qhn_probe.c", "string probe() { return query_host_name(); }\n");
@@ -17042,6 +17142,8 @@ int main() {
     testFunctionsDetailedFormIncludesNumArgsAndMixedTypePlaceholders();
     testVariablesListsFlattenedNamesInInheritedThenOwnOrder();
     testFetchAndStoreVariableRoundTripByNameAndThrowOnUnknownName();
+    testSocketReleaseAndAcquireHandOffOwnershipAndCallbacks();
+    testSocketReleaseRevertsWhenNeverAcquiredAndRejectsTheWrongCaller();
     std::cout << "all tests passed\n";
     return 0;
 }
