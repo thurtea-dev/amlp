@@ -14630,6 +14630,193 @@ static void testFilterMappingKeepsOnlyEntriesWhereCallbackIsTruthy() {
     std::cout << "testFilterMappingKeepsOnlyEntriesWhereCallbackIsTruthy OK\n";
 }
 
+// --- strwidth / reset_eval_cost / remove_shadow / oldcrypt / next_bit /
+// element_of / shuffle (Phase 0.13, batch continued 2026-08-22) --
+// Confirmed directly against fluffos-2.9-ds2.08's own efun_defs.c
+// (strwidth/reset_eval_cost aliases), packages/contrib.c
+// (remove_shadow/oldcrypt/element_of/shuffle), and efuns_main.c
+// (next_bit) before writing any of this -- see EfunTable.cpp's own
+// registrations for the full real-semantics writeup.
+
+static void testStrwidthReturnsSameLengthAsSizeof() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sw_probe.c", "int probe(string s) { return strwidth(s); }\n");
+    auto ob = harness.objects.cloneObject("/sw_probe");
+    assert(ob != nullptr);
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {amlp::Value(std::string("hello"))});
+    assert(std::get<int64_t>(result.data) == 5);
+    std::cout << "testStrwidthReturnsSameLengthAsSizeof OK\n";
+}
+
+static void testResetEvalCostDefaultsToZeroLimitAndAcceptsExplicitArgument() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rec_probe.c", "int go() { return 1; }\n");
+    auto ob = harness.objects.cloneObject("/rec_probe");
+    assert(ob != nullptr);
+
+    // Called directly through EfunTable, not an LPC wrapper: dispatching
+    // the efun itself through a bytecode-executed wrapper function would
+    // consume its own eval-cost ticks against the just-lowered ceiling
+    // before the wrapper even returns, the same self-tripping concern
+    // testSetEvalLimitActuallyChangesTheEnforcedCeiling's own comment
+    // already documents for set_eval_limit.
+    harness.vm.resetEvalCost();
+    std::vector<amlp::Value> noArgs;
+    amlp::EfunTable::instance().call("reset_eval_cost", harness.vm, noArgs);
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "go", {});
+    } catch (const amlp::EvalCostError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::vector<amlp::Value> explicitArgs{amlp::Value(int64_t{1000000})};
+    amlp::EfunTable::instance().call("reset_eval_cost", harness.vm, explicitArgs);
+    harness.vm.resetEvalCost();
+    amlp::Value result = harness.vm.callFunction(ob, "go", {});
+    assert(std::get<int64_t>(result.data) == 1);
+
+    std::cout << "testResetEvalCostDefaultsToZeroLimitAndAcceptsExplicitArgument OK\n";
+}
+
+static void testRemoveShadowSplicesOutOfChainAndReturnsZeroWhenNotShadowing() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/rs1_victim.c", "void create() {}\n");
+    harness.writeFile("/rs1_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n"
+        "int unshadow() { return remove_shadow(this_object()); }\n");
+    auto victim = harness.objects.cloneObject("/rs1_victim");
+    auto sh = harness.objects.cloneObject("/rs1_shadow");
+    assert(victim != nullptr && sh != nullptr);
+
+    harness.vm.callFunction(sh, "attach", {amlp::Value(victim)});
+    assert(victim->shadowedBy().lock() == sh);
+    assert(sh->shadowing().lock() == victim);
+
+    amlp::Value result = harness.vm.callFunction(sh, "unshadow", {});
+    assert(std::get<int64_t>(result.data) == 1);
+    assert(!victim->shadowedBy().lock());
+    assert(!sh->shadowing().lock());
+
+    // No longer part of any shadow relationship -- returns 0, not an error.
+    amlp::Value again = harness.vm.callFunction(sh, "unshadow", {});
+    assert(std::get<int64_t>(again.data) == 0);
+
+    std::cout << "testRemoveShadowSplicesOutOfChainAndReturnsZeroWhenNotShadowing OK\n";
+}
+
+static void testOldcryptTruncatesSaltToFirstTwoCharactersUnlikeCrypt() {
+    ObjectVarHarness harness;
+    harness.writeFile("/oldcrypt_probe.c",
+        "string probe(string pw, string salt) { return oldcrypt(pw, salt); }\n");
+    auto ob = harness.objects.cloneObject("/oldcrypt_probe");
+    assert(ob != nullptr);
+
+    amlp::Value r1 = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("hunter2")), amlp::Value(std::string("ab"))});
+    amlp::Value r2 = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("hunter2")), amlp::Value(std::string("abXXXXXX"))});
+    const std::string& hash1 = std::get<std::string>(r1.data);
+    const std::string& hash2 = std::get<std::string>(r2.data);
+    // Both salts share the same first two characters ("ab"); oldcrypt()
+    // only ever reads those, so the results are identical even though
+    // the second call's own salt argument is much longer -- unlike
+    // crypt(), which would use the whole thing.
+    assert(hash1 == hash2);
+    assert(hash1.rfind("ab", 0) == 0);
+
+    std::cout << "testOldcryptTruncatesSaltToFirstTwoCharactersUnlikeCrypt OK\n";
+}
+
+static void testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nb_probe.c",
+        "string make() {\n"
+        "    string s = \"\";\n"
+        "    s = set_bit(s, 0);\n"
+        "    s = set_bit(s, 3);\n"
+        "    s = set_bit(s, 10);\n"
+        "    return s;\n"
+        "}\n"
+        "int probe(string s, int start) { return next_bit(s, start); }\n");
+    auto ob = harness.objects.cloneObject("/nb_probe");
+    assert(ob != nullptr);
+
+    amlp::Value made = harness.vm.callFunction(ob, "make", {});
+    assert(std::holds_alternative<std::string>(made.data));
+
+    // start == 0 is inclusive: bit 0 is set, so it is returned itself.
+    amlp::Value fromZero = harness.vm.callFunction(ob, "probe", {made, amlp::Value(int64_t{0})});
+    assert(std::get<int64_t>(fromZero.data) == 0);
+
+    // start > 0 is exclusive: next_bit(s, 3) must skip bit 3 itself even
+    // though it is set, landing on bit 10 instead.
+    amlp::Value fromThree = harness.vm.callFunction(ob, "probe", {made, amlp::Value(int64_t{3})});
+    assert(std::get<int64_t>(fromThree.data) == 10);
+
+    // Nothing left after the last set bit.
+    amlp::Value fromTen = harness.vm.callFunction(ob, "probe", {made, amlp::Value(int64_t{10})});
+    assert(std::get<int64_t>(fromTen.data) == -1);
+
+    std::cout << "testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry OK\n";
+}
+
+static void testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty() {
+    ObjectVarHarness harness;
+    harness.writeFile("/eo_probe.c", "mixed probe(mixed *arr) { return element_of(arr); }\n");
+    auto ob = harness.objects.cloneObject("/eo_probe");
+    assert(ob != nullptr);
+
+    auto arr = std::make_shared<amlp::Array>();
+    arr->items.push_back(amlp::Value(int64_t{7}));
+    arr->items.push_back(amlp::Value(int64_t{8}));
+    arr->items.push_back(amlp::Value(int64_t{9}));
+    for (int i = 0; i < 20; ++i) {
+        amlp::Value result = harness.vm.callFunction(ob, "probe", {amlp::Value(arr)});
+        int64_t v = std::get<int64_t>(result.data);
+        assert(v == 7 || v == 8 || v == 9);
+    }
+
+    auto empty = std::make_shared<amlp::Array>();
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe", {amlp::Value(empty)});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty OK\n";
+}
+
+static void testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sf_probe.c", "mixed *probe(mixed *arr) { return shuffle(arr); }\n");
+    auto ob = harness.objects.cloneObject("/sf_probe");
+    assert(ob != nullptr);
+
+    auto arr = std::make_shared<amlp::Array>();
+    for (int64_t i = 0; i < 20; ++i) arr->items.push_back(amlp::Value(i));
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {amlp::Value(arr)});
+    auto* resultArr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(resultArr != nullptr && *resultArr == arr); // same identity, mutated in place
+
+    assert(arr->items.size() == 20);
+    std::vector<int64_t> seen;
+    for (auto& v : arr->items) seen.push_back(std::get<int64_t>(v.data));
+    std::sort(seen.begin(), seen.end());
+    for (int64_t i = 0; i < 20; ++i) assert(seen[static_cast<size_t>(i)] == i);
+
+    std::cout << "testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -15178,6 +15365,13 @@ int main() {
     testThisInteractiveAndThisUserReturnConnectionBoundObjectNotCommandGiver();
     testMapMappingReplacesValuesKeepingKeysViaStringFunctionName();
     testFilterMappingKeepsOnlyEntriesWhereCallbackIsTruthy();
+    testStrwidthReturnsSameLengthAsSizeof();
+    testResetEvalCostDefaultsToZeroLimitAndAcceptsExplicitArgument();
+    testRemoveShadowSplicesOutOfChainAndReturnsZeroWhenNotShadowing();
+    testOldcryptTruncatesSaltToFirstTwoCharactersUnlikeCrypt();
+    testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
+    testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
+    testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();
     std::cout << "all tests passed\n";
     return 0;
 }

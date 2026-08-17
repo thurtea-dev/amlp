@@ -3,6 +3,65 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): README.md rewritten, then 7 more efuns
+implemented (Phase 0 row 0.13: 211 registered, up from 204).**
+`README.md` replaced entirely with new, more accurate top-level content
+(build/run instructions, language feature summary, efun/apply status,
+layout). Verified the Applies section against real `src/apply/ApplyTable.cpp`
+and actual call sites before writing it rather than trusting the given
+draft as-is: `catch_tell()` had drifted from "recognized but not yet
+fired" to genuinely fired (the immediately-preceding session's own
+`tell_object()` implementation calls it), corrected to list it under
+"currently fired" instead. All 20 other entries in `ApplyTable::known()`
+checked against real call sites the same way and confirmed accurate.
+
+Row 0.13 batch: Lil's conformance suite remains fully exhausted (checked
+again, nothing new); re-ran the same real-call-site-frequency-against-
+`efun_defs.c` methodology from the immediately preceding batch. Found and
+implemented: `reset_eval_cost` (real call site,
+`mudlib/command/speed.c`'s own `START` benchmarking macro; `F_SET_EVAL_LIMIT
+| F_ALIAS_FLAG`, the same code as the already-implemented
+`set_eval_limit()`, with a real default argument of 0), `strwidth`
+(`F_SIZEOF | F_ALIAS_FLAG`, the same code as `sizeof()`/`strlen()` --
+despite the name, real FluffOS's own implementation has no actual
+display-width/wide-character logic of its own), `remove_shadow` (real,
+splices an object out of whatever shadow chain it is part of, reusing
+the exact same neighbor-reconnect logic
+`ObjectManager::destructObject()`'s own non-cascade shadow-splice branch
+already has, just without the destruct), `oldcrypt` (real, the same
+system `crypt(3)` call as the already-implemented `crypt()` but forced
+to the classic two-character DES salt, confirmed directly against
+`packages/contrib.c`'s own `f_oldcrypt()`), `next_bit` (real, the fourth
+member of the `set_bit`/`clear_bit`/`test_bit` family, same 6-bit-per-
+character encoding -- confirmed a real, easy-to-miss boundary asymmetry
+directly against `f_next_bit()`: `start <= 0` scans inclusively from bit
+0, `start > 0` scans strictly after `start`), and `element_of`/`shuffle`
+(both real, found in `packages/contrib.c`, no real call sites in this
+mudlib but implemented as the natural array-utility siblings func_spec.c
+defines alongside the array efuns already here -- `element_of` picks a
+uniformly random element, throwing on an empty array; `shuffle` is an
+in-place Fisher-Yates permutation that mutates and returns the same
+array object, matching this driver's own already-established array-
+reference-aliasing semantics).
+
+Not implemented, flagged rather than rushed: `pluralize` (real, found in
+`packages/contrib.c`, but a large, ~440-line English-pluralization
+algorithm with many irregular-word special cases and an "of"-phrase
+handling branch -- zero real call sites in this mudlib to validate a
+port against, not a quick single-session addition) and `unique_mapping`
+(real, found in `mapping.c`, a hash-table-grouping algorithm of similar
+complexity, also zero real call sites). `translate`/`event` re-checked
+against the current bundled Lil mudlib the same way `tell_object`/
+`tell_room`/`shout` were in the immediately preceding batch (both were
+previously excluded only because the old, now-removed nightmare3 mudlib
+shadowed them with simul_efuns) -- unlike those three, `translate`/
+`event` have zero real call sites anywhere in the current mudlib either
+way, so they stay unimplemented, not reinstated.
+
+7 new regression tests (`test/test_lexer.cpp`). Full suite: 548 tests
+passing, up from 541, no regressions, stable across three consecutive
+runs.
+
 **2026-08-22 (continued): Phase 1 planning docs corrected, then 7 more
 efuns implemented (Phase 0 row 0.13: 204 registered, up from 197).**
 Two-part session. First part was documentation only, no Phase 1

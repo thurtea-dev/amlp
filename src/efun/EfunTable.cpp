@@ -743,6 +743,12 @@ void registerCoreEfuns() {
     };
     t.registerEfun("sizeof", sizeofImpl);
     t.registerEfun("strlen", sizeofImpl);
+    // int strwidth(string) -- real efun_defs.c: F_SIZEOF | F_ALIAS_FLAG,
+    // the exact same code as sizeof() (func_spec.c's own "int strwidth
+    // sizeof(string);" alias line, confirmed directly), not a real
+    // display-width calculation of its own (no wide-character/ANSI-code
+    // awareness in real FluffOS's own implementation despite the name).
+    t.registerEfun("strwidth", sizeofImpl);
 
     // mixed *map_array map(mixed *arr, string | function func, ...) --
     // real func_spec.cpp signature ("map_array map(...)": map_array is
@@ -2648,6 +2654,20 @@ void registerCoreEfuns() {
         vm.setMaxEvalCost(std::get<int64_t>(args[0].data));
         return Value{};
     });
+    // int reset_eval_cost(void) -- real efun_defs.c: F_SET_EVAL_LIMIT |
+    // F_ALIAS_FLAG, the exact same code as set_eval_limit() above, with a
+    // real default argument of 0 (func_spec.c's own "int reset_eval_cost
+    // set_eval_limit(int default: 0);"), confirmed directly, not two
+    // separate implementations. Real, live call site:
+    // mudlib/command/speed.c's own "START" benchmarking macro
+    // ("reset_eval_cost(); set_eval_limit(0x7fffffff); ...").
+    t.registerEfun("reset_eval_cost", [](VM& vm, std::vector<Value>& args) -> Value {
+        int64_t limit = (!args.empty() && std::holds_alternative<int64_t>(args[0].data))
+                             ? std::get<int64_t>(args[0].data)
+                             : 0;
+        vm.setMaxEvalCost(limit);
+        return Value{};
+    });
 
     // void destruct(object ob) -- removes ob from the object table
     // (VM::destructObject(), a thin wrapper over the ObjectManager
@@ -3164,6 +3184,35 @@ void registerCoreEfuns() {
         if (!ob) return Value{};
         auto target = ob->shadowing().lock();
         return target ? Value(target) : Value{};
+    });
+
+    // int remove_shadow(void|object ob default: this_object()) -- real
+    // packages/contrib.c's own f_remove_shadow(), confirmed directly:
+    // splices ob out of whatever shadow chain it is part of (whether ob
+    // is itself a shadow, or is being shadowed, or both), the exact same
+    // "reconnect its neighbors to each other directly" unlink already
+    // implemented for ObjectManager::destructObject()'s own non-cascade
+    // shadow-splice branch -- reused here without the destruct, since
+    // real remove_shadow() only breaks the link, it never destructs
+    // anything. Returns 1 on success, 0 if ob is null or was not part of
+    // any shadow relationship at all (real "ob->shadowing == 0 &&
+    // ob->shadowed == 0" guard).
+    t.registerEfun("remove_shadow", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            ob = vm.currentObject();
+        }
+        auto shadowedBy = ob ? ob->shadowedBy().lock() : nullptr;
+        auto shadowing = ob ? ob->shadowing().lock() : nullptr;
+        if (!ob || (!shadowedBy && !shadowing)) return Value(int64_t{0});
+
+        if (shadowing) shadowing->setShadowedBy(shadowedBy);
+        if (shadowedBy) shadowedBy->setShadowing(shadowing);
+        ob->setShadowing(std::weak_ptr<LpcObject>());
+        ob->setShadowedBy(std::weak_ptr<LpcObject>());
+        return Value(int64_t{1});
     });
 
     // object snoop(object by, void|object victim) -- Phase 0.13 (snoop
@@ -3849,6 +3898,37 @@ void registerCoreEfuns() {
         }
         char* result = ::crypt(str.c_str(), salt.c_str());
         if (!result) throw LpcRuntimeError("crypt: system crypt() failed");
+        return Value(std::string(result));
+    });
+
+    // string oldcrypt(string str, string|int salt) -- real
+    // packages/contrib.c's own f_oldcrypt(): the same system crypt(3)
+    // call as crypt() above, but always forced to the classic two-
+    // character DES salt (confirmed directly: "salt[0] = sp->u.string[0];
+    // salt[1] = sp->u.string[1];" only ever reads the first two salt
+    // characters, even when a longer one is supplied, and generates only
+    // two random characters otherwise -- unlike crypt()'s own real
+    // 8-character generated salt, which is long enough for the system
+    // crypt(3) to pick a modern hash scheme on its own).
+    t.registerEfun("oldcrypt", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("oldcrypt: expected a string argument");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        std::string salt;
+        if (args.size() > 1 && std::holds_alternative<std::string>(args[1].data) &&
+            std::get<std::string>(args[1].data).size() >= 2) {
+            salt = std::get<std::string>(args[1].data).substr(0, 2);
+        } else {
+            static const char choice[] =
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ./";
+            static const int choiceLen = static_cast<int>(sizeof(choice) - 1);
+            static std::mt19937 rng(std::random_device{}());
+            std::uniform_int_distribution<int> dist(0, choiceLen - 1);
+            for (int i = 0; i < 2; ++i) salt += choice[static_cast<size_t>(dist(rng))];
+        }
+        char* result = ::crypt(str.c_str(), salt.c_str());
+        if (!result) throw LpcRuntimeError("oldcrypt: system crypt() failed");
         return Value(std::string(result));
     });
 
@@ -5721,6 +5801,36 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(isSet ? 1 : 0));
     });
 
+    // int next_bit(string str, int start) -- real efuns_main.c's own
+    // f_next_bit(), same 6-bit-per-character encoding as set_bit/
+    // clear_bit/test_bit above: returns the index of the next *set* bit,
+    // or -1 if none remain. Confirmed directly, not assumed from the
+    // other three's own shape: the real scan is asymmetric at the
+    // boundary -- for start <= 0 it scans from bit 0 *inclusive* (so
+    // next_bit(str, 0) can legitimately return 0 if bit 0 is set), but
+    // for start > 0 it scans strictly *after* start (real "bit = 0x3f -
+    // ((1 << ((start % 6) + 1)) - 1)" masks out bit `start` itself and
+    // everything before it in that same character). No real call site in
+    // this mudlib -- implemented anyway as the natural fourth member of
+    // the real set_bit/clear_bit/test_bit/next_bit family func_spec.c
+    // defines together.
+    t.registerEfun("next_bit", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<int64_t>(args[1].data)) {
+            throw LpcRuntimeError("next_bit: expected (string, int) arguments");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        int64_t start = std::get<int64_t>(args[1].data);
+        int64_t len = static_cast<int64_t>(str.size());
+        if (len == 0 || start / 6 >= len) return Value(static_cast<int64_t>(-1));
+        int64_t begin = (start > 0) ? (start + 1) : 0;
+        for (int64_t bit = begin; bit < len * 6; ++bit) {
+            unsigned char ch = static_cast<unsigned char>(str[static_cast<size_t>(bit / 6)]);
+            if ((ch - ' ') & (1 << (bit % 6))) return Value(bit);
+        }
+        return Value(static_cast<int64_t>(-1));
+    });
+
     // int crc32(string) -- real crc32.c's own compute_crc32(): standard
     // reflected CRC-32 (polynomial 0xedb88320, confirmed directly against
     // crctab.h's own generated table), seeded to 0xFFFFFFFF, but with NO
@@ -6417,6 +6527,56 @@ void registerCoreEfuns() {
             }
         }
         return Value(result);
+    });
+
+    // mixed element_of(mixed *arr) -- real packages/contrib.c's own
+    // f_element_of(): returns one uniformly random element from arr,
+    // throwing "Can't take element from empty array." for an empty one
+    // (confirmed directly, not a silent 0 the way some other empty-array
+    // efuns in this driver are). Same random-number-generation approach
+    // already established for the random() efun above (a local static
+    // std::mt19937 -- this driver has no shared/seeded RNG service for
+    // efuns to draw from in common, matching random()'s own precedent
+    // rather than inventing a new one).
+    t.registerEfun("element_of", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("element_of: expected an array argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        if (!arr || arr->items.empty()) {
+            throw LpcRuntimeError("Can't take element from empty array.");
+        }
+        static std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<size_t> dist(0, arr->items.size() - 1);
+        return arr->items[dist(rng)];
+    });
+
+    // mixed *shuffle(mixed *arr) -- real packages/contrib.c's own
+    // f_shuffle()/shuffle(): an in-place Fisher-Yates shuffle (real "for
+    // (i = 0; i < args->size; i++) { j = random_number(i + 1); swap(i,
+    // j); }", confirmed directly -- the classic inside-out variant, not
+    // the more common backwards-scanning one, though both produce a
+    // uniform permutation), a no-op for fewer than two elements, and
+    // returns the *same* array object mutated in place -- matching this
+    // driver's own established array-aliasing semantics (see copy()'s
+    // own comment on arrays being shared by reference between variables
+    // until explicitly copied), the same by-reference mutation real
+    // FluffOS's own array_t reference gives it. A non-array argument
+    // returns an empty array rather than throwing, matching real
+    // f_shuffle()'s own "push_refed_array(&the_null_array)" fallback.
+    t.registerEfun("shuffle", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            return Value(std::make_shared<Array>());
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        if (!arr || arr->items.size() < 2) return Value(arr ? arr : std::make_shared<Array>());
+        static std::mt19937 rng(std::random_device{}());
+        for (size_t i = 0; i < arr->items.size(); ++i) {
+            std::uniform_int_distribution<size_t> dist(0, i);
+            size_t j = dist(rng);
+            if (i != j) std::swap(arr->items[i], arr->items[j]);
+        }
+        return Value(arr);
     });
 }
 
