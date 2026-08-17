@@ -3,6 +3,88 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): snoop family implemented (Phase 0 row 0.13:
+197 registered, up from 194).** The item the immediately-preceding entry
+flagged and deliberately left out ("sized more like its own row than a
+batch item, comparable to the original shadow() slice") -- taken on as
+that same self-contained slice, matching shadow()'s own treatment:
+`snoop(object, void|object)`, `query_snoop(object)`,
+`query_snooping(object)`. Confirmed directly against
+`fluffos-2.9-ds2.08`'s own `f_snoop()`/`new_set_snoop()`
+(`efuns_main.c`/`comm.c`) and `query_snoop()`/`query_snooping()`
+(`comm.c`) before writing anything, not assumed from this row's own
+original task description, which turned out to have two things wrong:
+the first argument is always "by" (the snooper), in both the 1-arg and
+2-arg forms -- never the target, contrary to that description's own
+"snoop(object target)" / "snoop(object target, object snooper)" naming --
+and there is no `master()->valid_snoop()` gate anywhere in real FluffOS at
+all (confirmed exhaustively against `applies.h`: `APPLY_VALID_SHADOW`
+exists, there is no `APPLY_VALID_SNOOP` entry, and `new_set_snoop()`
+itself never calls `apply()`/`master_ob` for permission). Real snoop
+authorization is left entirely to the mudlib layer; this driver adds no
+invented gate to match. The two real denial paths that do exist -- a
+non-interactive victim (a hard, catchable throw) and the anti-loop walk
+(a silent 0, covering both direct self-snoop and multi-hop cycles) -- are
+what "denial" coverage below actually tests instead.
+
+Output duplication (real `add_message()`/`add_vmessage()`'s own
+`handle_snoop()` call, confirmed against `comm.c`) is implemented as a new
+`deliverToConnection(VM&, Connection*, string)` free function
+(`src/net/SnoopRelay.{hpp,cpp}`, new files) that every text-outputting
+efun call site now routes through instead of calling `Connection::send()`
+directly (`write`, `receive`, `printf`, `message`, `say` in
+`EfunTable.cpp`, plus `Server::dispatchLine()`'s own `notify_fail()`
+dispatch) -- the closest this driver has to real add_message()/
+add_vmessage() being the one true chokepoint every output-producing efun
+funnels through. Confirmed this exact vendored build has `RECEIVE_SNOOP`
+defined in `options.h`, so duplicated text reaches the snooper via an
+ordinary `receive_snoop(string)` LPC apply, not a raw `"%"`-prefixed
+socket write (the other, not-compiled-in branch of that same `#ifdef`) --
+a snooper object that never defines `receive_snoop()` sees nothing at
+all, matching real apply()-to-an-undefined-function silence, not a gap.
+
+Snoop-relationship state is a new, deliberately symmetric
+`snoopedBy_`/`snooping_` weak_ptr pair on `LpcObject` (mirroring
+`shadowedBy_`/`shadowing_`'s own existing convention) rather than real
+`interactive_t::snooped_by`'s one-directional field plus an `all_users[]`
+linear scan for the reverse direction -- an internal representation
+choice only, not an observable semantics difference (`query_snoop()`/
+`query_snooping()` report identical results either way), made because
+this driver has no cross-module registry efun code can scan the way real
+`all_users[]` is scanned. Disconnect/destruct cleanup matches real
+semantics on both sides, confirmed against `comm.c`'s `remove_interactive()`
+and `simulate.c`'s `destruct_object()` separately (they are two distinct,
+complementary `ifndef NO_SNOOP` blocks in real FluffOS, not one):
+`Connection::close()` clears the victim side (whoever was snooping a
+closed connection's own object is unlinked, matching `remove_interactive()`
+running unconditionally on every close, net-death or destruct()-driven
+alike) and `ObjectManager::destructObject()` clears the snooper side
+(destructing an object that was itself snooping someone unlinks that
+relationship too, matching `destruct_object()`'s own `O_SNOOP` block,
+which runs regardless of whether the destructed object currently has a
+live connection).
+
+7 new regression tests (`test/test_lexer.cpp`): snoop start linking both
+directions with `query_snoop`/`query_snooping` reflecting them, output
+duplication (a real `receive_snoop()` call with matching text, confirmed
+via a stub snooper object storing what it received, alongside confirming
+the victim's own connection still gets the text too, not diverted),
+non-interactive-victim throw and self-snoop-loop denial, a 2-object snoop
+cycle denied by the anti-loop walk with the original legitimate snoop
+confirmed intact afterward, the 1-arg stop form, victim-disconnect
+cleanup, and snooper-destruct cleanup. Full suite: 535 tests passing, up
+from 528, no regressions.
+
+Known gap: `mudlib/single/tests/efuns/snoop.c` (the real, vendored
+FluffOS testsuite's own file) is itself a near-no-op ("maybe when it is
+possible for arbitrary objects to snoop.") -- it cannot meaningfully
+exercise a real interactive connection without one, which is exactly why
+this row needed its own C++-level regression tests (socketpair-backed
+`Connection`s) rather than relying on that suite the way most other 0.13
+batches have. `query_snoop.c`/`query_snooping.c` (the real testsuite's own
+trivial not-currently-snooping checks) already passed before this batch
+and still do.
+
 **2026-08-22 (continued): 4 more efuns implemented (Phase 0 row 0.13:
 194 registered, up from 190).** Same method as the same-day batch below:
 diffed `EfunTable.cpp`'s registered names against Lil's own real efun

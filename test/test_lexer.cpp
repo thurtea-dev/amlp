@@ -5710,6 +5710,258 @@ static void testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed() {
     std::cout << "testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed OK\n";
 }
 
+// --- snoop() / query_snoop() / query_snooping() (Phase 0.13, snoop family) -
+// Confirmed directly against fluffos-2.9-ds2.08's own f_snoop()/
+// new_set_snoop()/query_snoop()/query_snooping() (comm.c) before writing
+// any of this -- see EfunTable.cpp's own registration comment for the
+// full real-semantics writeup, including the one place these tests
+// deliberately deviate from this row's own original task description:
+// there is no master()->valid_snoop() apply anywhere in real FluffOS
+// (confirmed exhaustively against applies.h -- APPLY_VALID_SHADOW exists,
+// there is no APPLY_VALID_SNOOP at all), so "denial without master
+// approval" is covered here by the two real denial paths that do exist --
+// a non-interactive victim (a hard throw) and the anti-loop walk (a
+// silent 0) -- rather than a fabricated gate.
+
+static void testSnoopStartLinksBothDirectionsAndQueryReflectsThem() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sn1_victim.c",
+        "void create() {}\n"
+        "mixed who_snoops_me() { return query_snoop(this_object()); }\n");
+    harness.writeFile("/sn1_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n"
+        "mixed who_am_i_snooping() { return query_snooping(this_object()); }\n");
+    auto victim = harness.objects.cloneObject("/sn1_victim");
+    auto snooper = harness.objects.cloneObject("/sn1_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    amlp::Value started = harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(started.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(started.data) == victim);
+
+    amlp::Value who = harness.vm.callFunction(victim, "who_snoops_me", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(who.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(who.data) == snooper);
+
+    amlp::Value whoIAmSnooping = harness.vm.callFunction(snooper, "who_am_i_snooping", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(whoIAmSnooping.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(whoIAmSnooping.data) == victim);
+
+    ::close(fds[1]);
+    std::cout << "testSnoopStartLinksBothDirectionsAndQueryReflectsThem OK\n";
+}
+
+static void testSnoopOutputDuplicationCallsReceiveSnoopOnSnooperWithMatchingText() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sn2_victim.c",
+        "void create() {}\n"
+        "void speak(string s) { write(s); }\n");
+    harness.writeFile("/sn2_snooper.c",
+        "string got = \"\";\n"
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n"
+        "void receive_snoop(string s) { got += s; }\n"
+        "string get_got() { return got; }\n");
+    auto victim = harness.objects.cloneObject("/sn2_victim");
+    auto snooper = harness.objects.cloneObject("/sn2_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+
+    amlp::OutputContext::set(&conn);
+    harness.vm.callFunction(victim, "speak", {amlp::Value(std::string("hello there\n"))});
+    amlp::OutputContext::set(nullptr);
+
+    // The victim's own connection still receives the text normally --
+    // snoop duplicates output, it never diverts it.
+    char buf[64];
+    ssize_t n = ::recv(fds[1], buf, sizeof(buf), MSG_DONTWAIT);
+    assert(n > 0);
+    assert(std::string(buf, static_cast<size_t>(n)) == "hello there\n");
+
+    amlp::Value got = harness.vm.callFunction(snooper, "get_got", {});
+    assert(std::holds_alternative<std::string>(got.data));
+    assert(std::get<std::string>(got.data) == "hello there\n");
+
+    ::close(fds[1]);
+    std::cout << "testSnoopOutputDuplicationCallsReceiveSnoopOnSnooperWithMatchingText OK\n";
+}
+
+static void testSnoopDeniesNotInteractiveThrowsAndLoopReturnsFalsy() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sn3_plain.c", "void create() {}\n");
+    harness.writeFile("/sn3_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n");
+    auto plain = harness.objects.cloneObject("/sn3_plain");
+    auto snooper = harness.objects.cloneObject("/sn3_snooper");
+    assert(plain != nullptr && snooper != nullptr);
+
+    // Real "if (!victim->interactive) error(...)" -- a hard, catchable
+    // throw, not a silent 0. plain was never attached to any Connection.
+    bool threw = false;
+    try {
+        harness.vm.callFunction(snooper, "start", {amlp::Value(plain)});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    // Self-snoop: interactive, so the not-interactive check passes, but
+    // the anti-loop walk's very first step (tmp starts at by) already
+    // equals victim -- denied silently (0), never a throw.
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(snooper);
+    amlp::Value selfResult = harness.vm.callFunction(snooper, "start", {amlp::Value(snooper)});
+    assert(std::holds_alternative<std::monostate>(selfResult.data));
+
+    ::close(fds[1]);
+    std::cout << "testSnoopDeniesNotInteractiveThrowsAndLoopReturnsFalsy OK\n";
+}
+
+static void testSnoopChainCycleDeniedByAntiLoopWalk() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sn4_a.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n");
+    harness.writeFile("/sn4_b.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n"
+        "mixed who_snoops_me() { return query_snoop(this_object()); }\n");
+    auto a = harness.objects.cloneObject("/sn4_a");
+    auto b = harness.objects.cloneObject("/sn4_b");
+    assert(a != nullptr && b != nullptr);
+
+    int fdsA[2];
+    int fdsB[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsA) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsB) == 0);
+    amlp::Connection connA(fdsA[0]);
+    amlp::Connection connB(fdsB[0]);
+    connA.attach(a);
+    connB.attach(b);
+
+    // A snoops B first.
+    amlp::Value r1 = harness.vm.callFunction(a, "start", {amlp::Value(b)});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(r1.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(r1.data) == b);
+
+    // B now tries to snoop A -- would create a 2-cycle (A watching B, B
+    // watching A back). The anti-loop walk starting at B finds A one hop
+    // up (B->snoopedBy() == A) and denies.
+    amlp::Value r2 = harness.vm.callFunction(b, "start", {amlp::Value(a)});
+    assert(std::holds_alternative<std::monostate>(r2.data));
+
+    // The original, legitimate snoop survives the denied attempt intact.
+    amlp::Value stillA = harness.vm.callFunction(b, "who_snoops_me", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(stillA.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(stillA.data) == a);
+
+    ::close(fdsA[1]);
+    ::close(fdsB[1]);
+    std::cout << "testSnoopChainCycleDeniedByAntiLoopWalk OK\n";
+}
+
+static void testSnoopStopFormUnlinksAndReturnsByItself() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sn5_victim.c", "void create() {}\n");
+    harness.writeFile("/sn5_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n"
+        "mixed stop() { return snoop(this_object()); }\n"
+        "mixed who_am_i_snooping() { return query_snooping(this_object()); }\n");
+    auto victim = harness.objects.cloneObject("/sn5_victim");
+    auto snooper = harness.objects.cloneObject("/sn5_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    amlp::Value stopped = harness.vm.callFunction(snooper, "stop", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(stopped.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(stopped.data) == snooper);
+
+    amlp::Value afterStop = harness.vm.callFunction(snooper, "who_am_i_snooping", {});
+    assert(std::holds_alternative<std::monostate>(afterStop.data));
+
+    ::close(fds[1]);
+    std::cout << "testSnoopStopFormUnlinksAndReturnsByItself OK\n";
+}
+
+static void testSnoopVictimDisconnectClearsBothSidesOfTheRelationship() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sn6_victim.c", "void create() {}\n");
+    harness.writeFile("/sn6_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n"
+        "mixed who_am_i_snooping() { return query_snooping(this_object()); }\n");
+    auto victim = harness.objects.cloneObject("/sn6_victim");
+    auto snooper = harness.objects.cloneObject("/sn6_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    assert(victim->snoopedBy().lock() == snooper);
+
+    // Real remove_interactive(): closing the victim's connection --
+    // whether a genuine net death or a destruct()-driven close -- always
+    // unlinks whoever was snooping it, on both sides.
+    conn.close();
+
+    assert(!victim->snoopedBy().lock());
+    amlp::Value afterClose = harness.vm.callFunction(snooper, "who_am_i_snooping", {});
+    assert(std::holds_alternative<std::monostate>(afterClose.data));
+
+    ::close(fds[1]);
+    std::cout << "testSnoopVictimDisconnectClearsBothSidesOfTheRelationship OK\n";
+}
+
+static void testSnoopSnooperDestructedClearsVictimsSnoopedBy() {
+    ObjectVarHarness harness;
+    harness.writeFile("/sn7_victim.c",
+        "void create() {}\n"
+        "mixed who_snoops_me() { return query_snoop(this_object()); }\n");
+    harness.writeFile("/sn7_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n");
+    auto victim = harness.objects.cloneObject("/sn7_victim");
+    auto snooper = harness.objects.cloneObject("/sn7_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    amlp::Value before = harness.vm.callFunction(victim, "who_snoops_me", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(before.data));
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(before.data) == snooper);
+
+    // Real destruct_object(): "if (ob->flags & O_SNOOP) { scan all_users,
+    // clear snooped_by == ob }" -- destructing the snooper unlinks
+    // whoever it was watching too, not just the snooper's own state.
+    harness.vm.destructObject(snooper);
+
+    amlp::Value after = harness.vm.callFunction(victim, "who_snoops_me", {});
+    assert(std::holds_alternative<std::monostate>(after.data));
+
+    ::close(fds[1]);
+    std::cout << "testSnoopSnooperDestructedClearsVictimsSnoopedBy OK\n";
+}
+
 // --- telnet IAC negotiation, echo suppression, NAWS (Phase 0.8) ----------
 // AF_UNIX socketpair, same convention as the rest of this file's net
 // tests: fds[0] is what Connection reads from, fds[1] stands in for the
@@ -14403,6 +14655,13 @@ int main() {
     testShadowDeniedWhenMasterHasNoValidShadowApproval();
     testShadowQueryFormAndQueryShadowingReturnBothDirectionsOrZero();
     testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed();
+    testSnoopStartLinksBothDirectionsAndQueryReflectsThem();
+    testSnoopOutputDuplicationCallsReceiveSnoopOnSnooperWithMatchingText();
+    testSnoopDeniesNotInteractiveThrowsAndLoopReturnsFalsy();
+    testSnoopChainCycleDeniedByAntiLoopWalk();
+    testSnoopStopFormUnlinksAndReturnsByItself();
+    testSnoopVictimDisconnectClearsBothSidesOfTheRelationship();
+    testSnoopSnooperDestructedClearsVictimsSnoopedBy();
     testIacSequencesAreStrippedAndNeverReachDispatchedLines();
     testIacIacIsAnEscapedLiteral0xffDataByteNotACommand();
     testTelnetWillEchoAndNawsAreSilentlyAcceptedOtherOptionsRefused();

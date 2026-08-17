@@ -212,6 +212,26 @@ public:
     int totalLight() const { return totalLight_; }
     void setTotalLight(int v) { totalLight_ = v; }
 
+    // Real interactive_t::snooped_by (comm.h) is a per-*connection* field,
+    // one-directional: only "who is snooping me" is stored directly, and
+    // "who am I snooping" (query_snooping()) is derived by a linear scan
+    // over all_users[] for whichever entry's own snooped_by points back at
+    // this object (comm.c's own query_snoop()/query_snooping(), confirmed
+    // directly before implementing). This driver has no all_users[]
+    // equivalent efun code can scan (InteractiveRegistry lives in the net
+    // module, not reachable from here without a new cross-module
+    // dependency for what is otherwise a pure bookkeeping choice), so
+    // snoopedBy_/snooping_ are kept as a genuinely symmetric pair instead
+    // -- an internal representation difference only, not an observable
+    // semantics one: query_snoop()/query_snooping() report identical
+    // results either way, this is just an O(1) lookup instead of real
+    // FluffOS's own O(n) scan. Both weak_ptr, same non-owning convention
+    // as shadowedBy_/shadowing_ just above.
+    std::weak_ptr<LpcObject> snoopedBy() const { return snoopedBy_; }
+    void setSnoopedBy(std::weak_ptr<LpcObject> ob) { snoopedBy_ = std::move(ob); }
+    std::weak_ptr<LpcObject> snooping() const { return snooping_; }
+    void setSnooping(std::weak_ptr<LpcObject> ob) { snooping_ = std::move(ob); }
+
 private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
@@ -228,6 +248,8 @@ private:
     std::string livingName_;
     std::weak_ptr<LpcObject> shadowedBy_;
     std::weak_ptr<LpcObject> shadowing_;
+    std::weak_ptr<LpcObject> snoopedBy_;
+    std::weak_ptr<LpcObject> snooping_;
     bool isVirtual_ = false;
     int totalLight_ = 0;
 };

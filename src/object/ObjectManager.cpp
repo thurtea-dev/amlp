@@ -749,6 +749,26 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
     obj->setShadowing(std::weak_ptr<LpcObject>());
     obj->setShadowedBy(std::weak_ptr<LpcObject>());
 
+    // Real destruct_object() (simulate.c): "if (ob->flags & O_SNOOP) {
+    // for (i...) if (all_users[i] && all_users[i]->snooped_by == ob)
+    // all_users[i]->snooped_by = 0; ob->flags &= ~O_SNOOP; }" -- if the
+    // object being destructed was itself acting as a snooper, whoever it
+    // was watching is unlinked too, so a stale snoopedBy_ never survives
+    // pointing at a destructed object. This is the snooper-side half only
+    // (real code never touches ob->interactive->snooped_by here at all --
+    // that is remove_interactive()'s job, called separately from this
+    // same real function right after this block when ob->interactive is
+    // set; this driver's own equivalent is Connection::close(), reached
+    // via the "destruct" efun's own follow-up close() call, see its
+    // comment). Runs regardless of whether obj currently has a live
+    // connection, matching real code exactly -- the O_SNOOP flag (and
+    // this driver's own snooping_ field) is a plain object property, not
+    // tied to interactive_t.
+    if (auto victim = obj->snooping().lock()) {
+        victim->setSnoopedBy(std::weak_ptr<LpcObject>());
+    }
+    obj->setSnooping(std::weak_ptr<LpcObject>());
+
     obj->setDestructed(true);
 
     // real destruct_object() (simulate.c): "remove_living_name(ob);",

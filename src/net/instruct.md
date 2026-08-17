@@ -8,6 +8,7 @@
 | `Connection.cpp` + `include/.../Connection.hpp` | One player TCP connection: buffered reads, `input_to` state, `pendingNotifyFail_`, echo mode. |
 | `InteractiveRegistry.cpp` + `include/.../InteractiveRegistry.hpp` | Global map of live connections (for `users()`, `find_player()`, etc.). |
 | `OutputContext.cpp` + `include/.../OutputContext.hpp` | Thread-local current-output-connection pointer for `write()`/`printf()`. |
+| `SnoopRelay.cpp` + `include/.../SnoopRelay.hpp` | `deliverToConnection(VM&, Connection*, string)` -- the snoop-output-duplication chokepoint every text-outputting efun (`write`/`receive`/`printf`/`message`/`say`) and `Server::dispatchLine()`'s own `notify_fail()` dispatch route through instead of calling `Connection::send()` directly; fires `receive_snoop(string)` on `conn->boundObject()->snoopedBy()` if set. See `EfunTable.cpp`'s `snoop`/`query_snoop`/`query_snooping` registration for the full real-semantics writeup (Phase 0.13). |
 
 ## Files to read before touching this directory
 

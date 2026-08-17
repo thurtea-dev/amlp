@@ -46,6 +46,22 @@ void Connection::attach(std::shared_ptr<LpcObject> obj) {
 
 void Connection::close() {
     if (boundObject_) {
+        // Real remove_interactive() (comm.c): "if (ip->snooped_by) {
+        // ip->snooped_by->flags &= ~O_SNOOP; ip->snooped_by = 0; }" --
+        // runs unconditionally on every connection close (net death or a
+        // destruct()-driven close alike, both routes end up here), not
+        // just an explicit snoop(0) call. Once the victim is gone there is
+        // nothing left to duplicate output from, so any snooper watching
+        // it is unlinked. Deliberately one-directional: the closing
+        // object's own outgoing snoop (snooping_, if it was itself acting
+        // as a snooper) is untouched here, matching real remove_interactive()
+        // exactly -- that side is only ever cleared by an actual destruct
+        // (see ObjectManager::destructObject()'s own comment).
+        if (auto snooper = boundObject_->snoopedBy().lock()) {
+            snooper->setSnooping(std::weak_ptr<LpcObject>());
+        }
+        boundObject_->setSnoopedBy(std::weak_ptr<LpcObject>());
+
         InteractiveRegistry::remove(boundObject_);
         boundObject_.reset();
     }

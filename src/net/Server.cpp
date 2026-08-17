@@ -5,6 +5,7 @@
 #include "amlp/object/LpcObject.hpp"
 #include "amlp/net/OutputContext.hpp"
 #include "amlp/net/SocketRegistry.hpp"
+#include "amlp/net/SnoopRelay.hpp"
 #include "amlp/core/Errors.hpp"
 
 #include <iostream>
@@ -319,12 +320,12 @@ void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
     if (!claimed) {
         if (auto pending = conn.takePendingNotifyFail()) {
             if (auto* msg = std::get_if<std::string>(&pending->data)) {
-                conn.send(*msg);
+                deliverToConnection(vm, &conn, *msg);
             } else if (auto* closure = std::get_if<std::shared_ptr<Closure>>(&pending->data)) {
                 if (*closure) {
                     Value result = vm.callClosure(*closure, {});
                     if (auto* resultMsg = std::get_if<std::string>(&result.data)) {
-                        conn.send(*resultMsg);
+                        deliverToConnection(vm, &conn, *resultMsg);
                     }
                 }
             }

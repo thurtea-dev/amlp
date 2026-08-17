@@ -23,3 +23,10 @@ reference/fluffos-2.9-ds2.08/packages/packages.a
 # Python bytecode caches
 __pycache__/
 *.pyc
+
+# Scratch comparison clones (temp/dgd, temp/fluffos, temp/ldmud) -- other
+# reference drivers' own real source trees, pulled locally for Phase 1
+# dialect-planning research the same way reference/fluffos-2.9-ds2.08 is
+# vendored for Phase 0, but not vendored into this repo the way that one
+# is: no citation/attribution setup done for them, so never sync via git.
+temp/

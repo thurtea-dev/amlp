@@ -8,6 +8,7 @@
 #include "amlp/net/Connection.hpp"
 #include "amlp/net/InteractiveRegistry.hpp"
 #include "amlp/net/SocketRegistry.hpp"
+#include "amlp/net/SnoopRelay.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
 #include <algorithm>
 #include <chrono>
@@ -674,11 +675,11 @@ bool regexFindNext(pcre2_code* code, const std::string& subject, size_t byteOffs
 void registerCoreEfuns() {
     auto& t = EfunTable::instance();
 
-    t.registerEfun("write", [](VM&, std::vector<Value>& args) -> Value {
+    t.registerEfun("write", [](VM& vm, std::vector<Value>& args) -> Value {
         if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
             const std::string& s = std::get<std::string>(args[0].data);
             if (Connection* conn = OutputContext::current()) {
-                conn->send(s);
+                deliverToConnection(vm, conn, s);
             } else {
                 std::cout << s;
             }
@@ -1341,11 +1342,11 @@ void registerCoreEfuns() {
     // since every call into an interactive object's code (logon(),
     // input_to() dispatch, etc) happens with that connection's
     // OutputContext set for its whole duration.
-    t.registerEfun("receive", [](VM&, std::vector<Value>& args) -> Value {
+    t.registerEfun("receive", [](VM& vm, std::vector<Value>& args) -> Value {
         if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
             const std::string& s = std::get<std::string>(args[0].data);
             if (Connection* conn = OutputContext::current()) {
-                conn->send(s);
+                deliverToConnection(vm, conn, s);
             }
         }
         return Value{};
@@ -1875,7 +1876,7 @@ void registerCoreEfuns() {
         Value formatted = sprintfImpl(vm, args);
         if (auto* s = std::get_if<std::string>(&formatted.data)) {
             if (Connection* conn = OutputContext::current()) {
-                conn->send(*s);
+                deliverToConnection(vm, conn, *s);
             } else {
                 std::cout << *s;
             }
@@ -1925,14 +1926,14 @@ void registerCoreEfuns() {
     // project's own throwaway scheduler-verification command
     // (cmds/mortal/_testscheduler.c, not part of the game) producing no
     // output at all despite the call_out itself firing correctly.
-    t.registerEfun("message", [](VM&, std::vector<Value>& args) -> Value {
+    t.registerEfun("message", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.size() < 2 || !std::holds_alternative<std::string>(args[1].data)) {
             throw LpcRuntimeError("message: expected (mixed type, string msg, mixed targets, ...) arguments");
         }
         const std::string& text = std::get<std::string>(args[1].data);
 
-        auto sendTo = [&text](const std::shared_ptr<LpcObject>& target) {
-            if (Connection* conn = InteractiveRegistry::find(target)) conn->send(text);
+        auto sendTo = [&vm, &text](const std::shared_ptr<LpcObject>& target) {
+            if (Connection* conn = InteractiveRegistry::find(target)) deliverToConnection(vm, conn, text);
         };
 
         if (args.size() > 2 && std::holds_alternative<std::shared_ptr<LpcObject>>(args[2].data)) {
@@ -1953,7 +1954,7 @@ void registerCoreEfuns() {
         // driver's nearest equivalent being whichever connection is
         // currently active.
         if (Connection* conn = OutputContext::current()) {
-            conn->send(text);
+            deliverToConnection(vm, conn, text);
         }
         return Value{};
     });
@@ -3162,6 +3163,132 @@ void registerCoreEfuns() {
         }
         if (!ob) return Value{};
         auto target = ob->shadowing().lock();
+        return target ? Value(target) : Value{};
+    });
+
+    // object snoop(object by, void|object victim) -- Phase 0.13 (snoop
+    // family). Confirmed directly against fluffos-2.9-ds2.08's own
+    // f_snoop() (efuns_main.c) and new_set_snoop() (comm.c), not the task
+    // description that first proposed this row: that description's own
+    // "snoop(object target)" / "snoop(object target, object snooper)"
+    // naming has the roles backwards from the real efun -- real
+    // func_spec.c's signature is "object snoop(object, void | object);",
+    // and f_snoop() resolves the *first* argument as "by" (the snooper)
+    // in both the 1-arg and 2-arg forms, never as the target.
+    //
+    // 1-arg form, snoop(by): always a *stop* -- unlinks whatever by is
+    // currently snooping, if anything (real new_set_snoop(by, 0), the
+    // "if (by->flags & O_SNOOP) { scan all_users, clear snooped_by==by }"
+    // branch). This is the real, only way a wizard's own "snoop" command
+    // (typically "snoop(this_player())") turns itself back off -- there
+    // is no separate "unsnoop()" efun. Returns by itself on success (real
+    // f_snoop() leaves that stack slot untouched on this path), 0 only if
+    // by is already destructed. Also reached by a literal snoop(by, 0)
+    // -- real func_spec.c's "void | object" second parameter accepts the
+    // 0 literal as a coerced null object, landing in new_set_snoop()'s
+    // own victim-is-NULL branch exactly like the 1-arg form; matched here
+    // by only treating args[1] as a real victim when it actually holds a
+    // non-null object.
+    //
+    // 2-arg form, snoop(by, victim): by starts snooping victim.
+    // Confirmed real checks, in order: victim must be interactive (real
+    // "if (!victim->interactive) error(...)" -- a hard, catchable LPC
+    // error, not a silent 0, matched here) and the anti-loop walk (real
+    // "tmp = by; while (tmp) { if (tmp == victim) return 0; tmp =
+    // tmp->interactive ? tmp->interactive->snooped_by : 0; }" -- walks up
+    // the chain of "whoever is currently snooping tmp", denying (return
+    // 0, no throw) if victim ever appears in it; this is what stops both
+    // a direct self-snoop and a multi-hop snoop cycle in one check). On
+    // approval, any previous snoop *by* was running and whoever was
+    // previously snooping *victim* are both unlinked first, matching real
+    // new_set_snoop()'s own two "terminate previous" scans, then the new
+    // link is made. Returns victim on success, 0 on denial.
+    //
+    // Deliberately NOT gated on any master()->valid_snoop() apply, unlike
+    // shadow()'s own valid_shadow() gate just above -- confirmed
+    // exhaustively against this exact reference build: applies.h defines
+    // APPLY_VALID_SHADOW (36) but has no APPLY_VALID_SNOOP entry at all,
+    // new_set_snoop() itself never calls apply()/master_ob for
+    // permission, and func_spec.c's own snoop() signature carries no such
+    // hook either. This is a real, load-bearing difference from shadow(),
+    // not an oversight in either direction: real FluffOS leaves snoop
+    // authorization entirely to the mudlib layer (a wizard-only command
+    // wrapping this efun with its own check before ever calling it), and
+    // this driver matches that by adding no invented gate here.
+    t.registerEfun("snoop", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("snoop: expected an object as first argument");
+        }
+        auto by = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!by || by->isDestructed()) return Value{};
+
+        bool hasVictim = args.size() > 1 &&
+                          std::holds_alternative<std::shared_ptr<LpcObject>>(args[1].data) &&
+                          std::get<std::shared_ptr<LpcObject>>(args[1].data);
+        if (!hasVictim) {
+            if (auto prev = by->snooping().lock()) {
+                prev->setSnoopedBy(std::weak_ptr<LpcObject>());
+            }
+            by->setSnooping(std::weak_ptr<LpcObject>());
+            return Value(by);
+        }
+
+        auto victim = std::get<std::shared_ptr<LpcObject>>(args[1].data);
+        if (victim->isDestructed()) return Value{};
+        if (!InteractiveRegistry::find(victim)) {
+            throw LpcRuntimeError("snoop: Second argument of snoop() is not interactive!");
+        }
+
+        auto tmp = by;
+        while (tmp) {
+            if (tmp == victim) return Value{};
+            tmp = tmp->snoopedBy().lock();
+        }
+
+        if (auto prevVictim = by->snooping().lock()) {
+            prevVictim->setSnoopedBy(std::weak_ptr<LpcObject>());
+        }
+        if (auto prevSnooper = victim->snoopedBy().lock()) {
+            prevSnooper->setSnooping(std::weak_ptr<LpcObject>());
+        }
+        victim->setSnoopedBy(by);
+        by->setSnooping(victim);
+        return Value(victim);
+    });
+
+    // object query_snoop(object ob) -- real comm.c's own query_snoop():
+    // "if (!ob->interactive) return 0; return ob->interactive->snooped_by;"
+    // -- who is currently snooping ob, or 0 if ob is not itself
+    // interactive (or nobody is snooping it). Mandatory argument, no
+    // default, matching real func_spec.c's "object query_snoop(object);"
+    // (DEFAULT_NONE) exactly -- unlike query_shadowing() just above,
+    // which does default to this_object().
+    t.registerEfun("query_snoop", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("query_snoop: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob || !InteractiveRegistry::find(ob)) return Value{};
+        auto snooper = ob->snoopedBy().lock();
+        return snooper ? Value(snooper) : Value{};
+    });
+
+    // object query_snooping(object ob) -- real comm.c's own
+    // query_snooping(): "if (!(ob->flags & O_SNOOP)) return 0;" then
+    // scans all_users for whichever entry's own snooped_by points back at
+    // ob. Unlike query_snoop(), real code does not require ob itself to
+    // be interactive -- any object, connected or not, can be the "by" of
+    // a snoop() call (new_set_snoop() never checks by->interactive
+    // either), so this driver's own snooping_ field (set purely by
+    // snoop() regardless of ob's own connection state) is read directly,
+    // with no InteractiveRegistry check to match.
+    t.registerEfun("query_snooping", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("query_snooping: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob) return Value{};
+        auto target = ob->snooping().lock();
         return target ? Value(target) : Value{};
     });
 
@@ -5782,7 +5909,7 @@ void registerCoreEfuns() {
         };
         auto sendTo = [&](const std::shared_ptr<LpcObject>& ob) {
             if (!ob || isAvoided(ob)) return;
-            if (Connection* conn = InteractiveRegistry::find(ob)) conn->send(text);
+            if (Connection* conn = InteractiveRegistry::find(ob)) deliverToConnection(vm, conn, text);
         };
 
         auto origin = resolveCommandGiver(vm);
