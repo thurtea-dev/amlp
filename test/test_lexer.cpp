@@ -16,6 +16,9 @@
 #include "amlp/net/InteractiveRegistry.hpp"
 #include "amlp/net/SocketRegistry.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
+#include "amlp/dialect/LpcDialect.hpp"
+#include "amlp/dialect/FluffOsBootApi.hpp"
+#include "amlp/dialect/LdmudBootApi.hpp"
 #include <algorithm>
 #include <cassert>
 #include <iostream>
@@ -16546,6 +16549,81 @@ static void testDestructShadowCascadeAlsoClosesTheCascadedObjectsOwnSockets() {
     std::cout << "testDestructShadowCascadeAlsoClosesTheCascadedObjectsOwnSockets OK\n";
 }
 
+// Phase 1 dialect work begins here. LpcDialect/BootApi round trip plus
+// the first corrected fact carried over from the 2026-08-22 cross-driver
+// comparison session recorded in src/dialect/instruct.md and
+// src/apply/instruct.md Phase 1.16: real LDMud's master trust-root UID
+// apply is "get_master_uid", not FluffOS's "get_root_uid" -- an earlier
+// draft of this project's own docs had attributed the FluffOS name to
+// LDMud too. connectApply()/netDeadApply() are deliberately not covered
+// here -- see BootApi.hpp's own comment on why those two are still open.
+
+static void testLpcDialectNameAndFromStringRoundTripAllThreeDialects() {
+    assert(std::string(amlp::dialectName(amlp::LpcDialect::FluffOS)) == "fluffos");
+    assert(std::string(amlp::dialectName(amlp::LpcDialect::LdMud)) == "ldmud");
+    assert(std::string(amlp::dialectName(amlp::LpcDialect::DGD)) == "dgd");
+
+    assert(amlp::dialectFromString("fluffos") == amlp::LpcDialect::FluffOS);
+    assert(amlp::dialectFromString("ldmud") == amlp::LpcDialect::LdMud);
+    assert(amlp::dialectFromString("dgd") == amlp::LpcDialect::DGD);
+
+    bool threw = false;
+    try {
+        amlp::dialectFromString("not_a_real_dialect");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testLpcDialectNameAndFromStringRoundTripAllThreeDialects OK\n";
+}
+
+static void testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence() {
+    amlp::Config config;
+    amlp::FluffOsBootApi fluffApi(config);
+    amlp::LdmudBootApi ldmudApi(config);
+
+    // Real FluffOS: applies.h APPLY_GET_ROOT_UID, fired from master.c's
+    // own "apply_master_ob(APPLY_GET_ROOT_UID, 0)".
+    assert(fluffApi.masterUidApply() == "get_root_uid");
+
+    // Real LDMud: renamed in 3.2.1@40, doc/master/get_master_uid's own
+    // HISTORY line. This is the actual corrected fact -- an earlier
+    // draft of this project's own docs said LdmudBootApi should return
+    // "get_root_uid" here too, which stopped being real LDMud behavior
+    // many releases before the 3.6.8 clone this was checked against.
+    assert(ldmudApi.masterUidApply() == "get_master_uid");
+    assert(ldmudApi.masterUidApply() != fluffApi.masterUidApply());
+
+    // Every other apply name in this trimmed interface is shared between
+    // the two dialects (real per src/dialect/instruct.md) -- confirms
+    // masterUidApply() is a genuine, isolated divergence, not a symptom
+    // of the two classes disagreeing on everything.
+    assert(fluffApi.logonApply() == ldmudApi.logonApply());
+    assert(fluffApi.compileObjectApply() == ldmudApi.compileObjectApply());
+    assert(fluffApi.privsFileApply() == ldmudApi.privsFileApply());
+    assert(fluffApi.heartBeatErrorApply() == ldmudApi.heartBeatErrorApply());
+    assert(fluffApi.hasAutoObject() == ldmudApi.hasAutoObject());
+
+    std::cout << "testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence OK\n";
+}
+
+static void testBootApiMasterFileAndSimulEfunFileReadThroughConfig() {
+    amlp::Config config;
+    amlp::FluffOsBootApi fluffApi(config);
+    amlp::LdmudBootApi ldmudApi(config);
+
+    // Config's own default masterFile_ ("/master") and empty
+    // simulEfunFile_ (real semantics: empty means "no simul_efun tier
+    // configured", per Config.hpp's own comment) flow through unchanged.
+    assert(fluffApi.masterFile() == config.masterFile());
+    assert(ldmudApi.masterFile() == config.masterFile());
+    assert(!fluffApi.simulEfunFile().has_value());
+    assert(!ldmudApi.simulEfunFile().has_value());
+
+    std::cout << "testBootApiMasterFileAndSimulEfunFileReadThroughConfig OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -17144,6 +17222,9 @@ int main() {
     testFetchAndStoreVariableRoundTripByNameAndThrowOnUnknownName();
     testSocketReleaseAndAcquireHandOffOwnershipAndCallbacks();
     testSocketReleaseRevertsWhenNeverAcquiredAndRejectsTheWrongCaller();
+    testLpcDialectNameAndFromStringRoundTripAllThreeDialects();
+    testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence();
+    testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
     std::cout << "all tests passed\n";
     return 0;
 }

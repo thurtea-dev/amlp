@@ -3,6 +3,113 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-24 (continued): Phase 1 begins -- `LpcDialect` enum, a trimmed
+`BootApi` interface, and `FluffOsBootApi`/`LdmudBootApi` implemented,
+carrying forward the LDMud `get_master_uid` correction recorded in
+`src/dialect/instruct.md`/`src/apply/instruct.md` (594 tests, up from
+591).**
+
+Row 0.13's non-`parse_*` scope closed and `parse_*` filed as its own
+0.13a; the prior entry's dedicated-session candidate was the natural
+next real implementation work, and per this session's own instruction,
+picked up straight from the corrections `src/dialect/instruct.md`/
+`src/apply/instruct.md` already record rather than re-researching LDMud/
+DGD from scratch.
+
+**Correction picked: LDMud's master trust-root UID apply is
+`"get_master_uid"`, not FluffOS's `"get_root_uid"`** (renamed in LDMud
+3.2.1@40, `doc/master/get_master_uid`'s own HISTORY line: "Introduced in
+3.2.1@40 replacing get_root_uid()."; both names independently confirmed
+real, `applies.h`'s own `APPLY_GET_ROOT_UID` and `master.c`'s own
+`apply_master_ob(APPLY_GET_ROOT_UID, 0)` for the FluffOS side). Chosen as
+the smallest and safest item on record: a single, unambiguous string
+fact with no downstream design question attached, unlike every other
+recorded correction --
+`shadow()`'s signature difference and `bind_lambda()`'s real name are
+explicitly deferred to whichever session actually implements LDMud
+shadow/closure semantics; the `replaces`-directive-vs-`replace_program()`
+mismatch needs row 1.6 itself rescoped before anyone touches code; and
+`disconnect`/`net_dead`/DGD's three-way `connect` fork are exactly the
+open design question both instruct.md files say explicitly to resolve
+before writing `ApplyTable`'s real dispatch code, not to pick up as a
+first slice.
+
+**What was built.** `src/dialect/` now exists as compiled code (previously
+only `instruct.md`): `LpcDialect.hpp`/`.cpp` (the enum plus
+`dialectName()`/`dialectFromString()`, taken verbatim from the recorded
+spec, nothing to correct there), `BootApi.hpp` (the abstract interface
+from `src/apply/instruct.md`'s own Phase 1.4, deliberately missing
+`connectApply()`/`netDeadApply()` -- both instruct.md files flag those
+two as an unresolved single-string-shape problem across all three
+dialects' connect/disconnect and say explicitly to resolve that before
+writing dispatch code; everything else in the documented interface is
+settled and included), plus a new `masterUidApply()` method carrying the
+actual corrected fact, and `FluffOsBootApi`/`LdmudBootApi` concrete
+implementations (`get_root_uid` / `get_master_uid` respectively, all
+other apply names identical between the two, matching the record).
+`DgdBootApi` and `DialectFactory` are not part of this pass -- DGD's own
+`compileObjectApply()` mapping is a separate open question (no
+virtual-object concept, nearest analog is `call_object`) and building a
+factory with no consumer yet would be scope creep past "smallest
+correction." `ApplyTable`/`VM::applyMaster()` call sites (`Server.cpp`'s
+`"connect"`, `ObjectManager.cpp`'s `"compile_object"`/`"privs_file"`)
+are untouched -- routing them through `BootApi` is exactly the dispatch
+work both instruct.md files say to hold until the connect/disconnect
+shape question is resolved, so it stays out of scope here too.
+
+New `src/dialect` CMake target wired into the top-level `CMakeLists.txt`
+and `test/CMakeLists.txt` link lines, same pattern as every other
+`src/*` library in this repo.
+
+Three new regression tests (594 total, up from 591, all passing across
+three consecutive runs plus `ctest`): `LpcDialect` enum/string round trip
+including the throw-on-unknown case, the actual correction itself
+(`LdmudBootApi::masterUidApply() == "get_master_uid"`,
+`FluffOsBootApi::masterUidApply() == "get_root_uid"`, and the two
+asserted unequal to each other, plus every other trimmed-interface
+method asserted equal between the two dialects to confirm this is an
+isolated divergence and not the two classes silently disagreeing on
+everything), and `BootApi::masterFile()`/`simulEfunFile()` reading
+through `Config` correctly for both.
+
+ROADMAP.md rows 1.1, 1.4, and 1.16 updated to `[ ]` with partial-progress
+notes rather than flipped to `[x]` -- none of the three rows' full scope
+(a config-driven dialect switch; full pluggable apply dispatch; LDMud's
+complete master apply surface) is done, only this one slice of each.
+
+**2026-08-24 (continued): row 0.13's non-`parse_*` scope formally closed
+in ROADMAP.md; `parse_*` filed as its own explicit sub-row, 0.13a.
+Bookkeeping only, no code changed.**
+
+With the prior entry's 40-name non-`parse_*` accounting confirmed
+genuine and stable across this whole session (all 40 re-verified as
+architecture-mismatch or zero-call-site exclusions, none reclassified),
+there is no further batch work left against that portion of row 0.13 --
+closing it out is the accurate status, not a re-scope. ROADMAP.md's row
+0.13 checkbox flipped to `[x]` with a summary of the final accounting:
+240 registered against the vendored reference build's own 270 real
+`efun_defs.c` names, the real (`comm -23`) gap of 40 non-`parse_*` names
+all confirmed genuine exclusions, plus the 8-name `parse_*` package now
+tracked separately.
+
+The `parse_*` package itself (`parse_init`, `parse_refresh`,
+`parse_sentence`, `parse_add_rule`, `parse_add_synonym`,
+`parse_my_rules`, `parse_dump`, `parse_remove`) gets its own row, 0.13a,
+carrying forward the scoping detail already on record from the
+2026-08-23/2026-08-24 entries below: real source is `packages/parser.c`
+(3419 lines, FluffOS's genuine natural-language sentence/grammar-rule
+parser package, confirmed implemented rather than unverifiable), 66
+combined call-site hits across the 8 names in the vendored mudlib
+corpora, sized well beyond a normal batch item -- comparable to or
+larger than everything else row 0.13 has implemented combined -- so it
+stays the one deliberately deferred dedicated-session candidate,
+unstarted, pending its own explicit go-ahead.
+
+No code touched this pass. Full suite re-run to confirm nothing
+regressed under the documentation-only change: 591 tests passing (`ctest`
+plus a direct run of the test binary), unchanged from the prior entry,
+no regressions.
+
 **2026-08-24 (continued): row 0.13 batch -- `socket_release`/
 `socket_acquire` implemented (238 to 240), correcting a second real
 methodological miss this session, this time a scope-difficulty call
