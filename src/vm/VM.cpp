@@ -1,0 +1,1983 @@
+#include "amlp/vm/VM.hpp"
+#include "amlp/object/ObjectManager.hpp"
+#include "amlp/object/LpcObject.hpp"
+#include "amlp/config/Config.hpp"
+#include "amlp/core/Errors.hpp"
+#include "amlp/efun/EfunTable.hpp"
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <optional>
+#include <utility>
+
+namespace amlp {
+
+namespace {
+
+// Real F_LOCAL/F_GLOBAL/F_INDEX (interpret.c): every time a value is
+// read out of storage -- a local, an object variable, an array element,
+// or a mapping value -- and it turns out to hold a reference to a
+// destructed object, the storage itself is rewritten to a real int 0
+// right there ("assign_svalue(s, &const0u)") before the read completes,
+// not just for this one read: permanently, so every later read of the
+// same slot is already a plain 0 with no check needed. This is the
+// actual, narrow mechanism behind real LPC's "a destructed object reads
+// back as 0" semantics -- confirmed by reading interpret.c directly,
+// not guessed: no other opcode (comparison, branch, arithmetic) checks
+// O_DESTRUCTED at all (eoperators.c's own f_eq(), for one confirmed
+// example, does a raw pointer compare on a T_OBJECT operand with no
+// destructed check whatsoever), because by the time a value reaches one
+// of those, it has already been coerced here if it needed to be. Array
+// range-slicing (array.c's slice_array()) does NOT coerce either,
+// confirmed by the same reading -- a destructed element copied into a
+// freshly sliced sub-array stays a raw object reference until that new
+// array's own element is itself read through one of these same points.
+// Wiring this in at exactly PushLocal/PushObjectVar/Index (both the
+// array and mapping cases) is therefore not a narrowed-down practical
+// subset of real semantics, it is the complete mechanism -- closing the
+// "any stale object-typed value silently reads back as 0" gap this
+// project's own Known Stubs list had flagged as broader, unfixed scope.
+void coerceIfDestructed(Value& v) {
+    if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&v.data)) {
+        if (*ob && (*ob)->isDestructed()) {
+            v = Value(static_cast<int64_t>(0));
+        }
+    }
+}
+
+// Pushes obj as the current object for as long as this guard is alive,
+// on both of VM's call-tracking stacks -- real FluffOS's
+// setup_fake_frame() (interpret.c), which runs unconditionally at the
+// top of call_function_pointer() before its type-specific switch (i.e.
+// for every closure kind, not just the ones that recurse into more LPC
+// bytecode): "previous_ob = current_object; current_object =
+// fun->hdr.owner". VM::run() uses this for every LPC function
+// activation; VM::callClosure() additionally needs it around a
+// closure's own core-efun invocation specifically (see callClosure()'s
+// own comment) -- unlike the local/simul_efun-function branches, that
+// path does not go through run() at all, so without this guard
+// vm.currentObject()/previous_object() would still reflect whichever
+// object's run() frame happens to be innermost (whoever called
+// evaluate()), not the closure's own owner, breaking any efun that
+// looks at "the current object" (save_object() being exactly the one
+// that surfaced this live: secure/daemon/account_d.c's own "unguarded((:
+// save_object, path :))" was saving master.c's own variables instead of
+// account_d.c's).
+//
+// Object-change detection mirrors real FRAME_OB_CHANGE: only push a new
+// objectChangeStack_ entry when obj actually differs from the
+// immediately enclosing frame, not on every same-object call.
+class ObjectFrameGuard {
+public:
+    ObjectFrameGuard(std::vector<std::shared_ptr<amlp::LpcObject>>& callStack,
+                      std::vector<std::shared_ptr<amlp::LpcObject>>& objectChangeStack,
+                      const std::shared_ptr<amlp::LpcObject>& obj)
+        : callStack_(callStack), objectChangeStack_(objectChangeStack) {
+        objectChanged_ = callStack_.empty() || callStack_.back() != obj;
+        if (objectChanged_) {
+            objectChangeStack_.push_back(callStack_.empty() ? nullptr : callStack_.back());
+        }
+        callStack_.push_back(obj);
+    }
+    ~ObjectFrameGuard() {
+        callStack_.pop_back();
+        if (objectChanged_) objectChangeStack_.pop_back();
+    }
+    ObjectFrameGuard(const ObjectFrameGuard&) = delete;
+    ObjectFrameGuard& operator=(const ObjectFrameGuard&) = delete;
+
+private:
+    std::vector<std::shared_ptr<amlp::LpcObject>>& callStack_;
+    std::vector<std::shared_ptr<amlp::LpcObject>>& objectChangeStack_;
+    bool objectChanged_ = false;
+};
+
+// RAII push/pop of VM's commandGiverStack_ (real save_command_giver()/
+// restore_command_giver(), add_action.c), used around each leg of
+// VM::moveObject()'s init()-calling sequence so a thrown exception (an
+// init() body's own runtime error) still pops correctly rather than
+// leaving a stale command_giver behind for whatever runs next.
+class CommandGiverGuard {
+public:
+    CommandGiverGuard(amlp::VM& vm, const std::shared_ptr<amlp::LpcObject>& ob) : vm_(vm) {
+        vm_.pushCommandGiver(ob);
+    }
+    ~CommandGiverGuard() { vm_.popCommandGiver(); }
+    CommandGiverGuard(const CommandGiverGuard&) = delete;
+    CommandGiverGuard& operator=(const CommandGiverGuard&) = delete;
+
+private:
+    amlp::VM& vm_;
+};
+
+// Real FluffOS's T_UNDEFINED is a *subtype* of T_NUMBER (a number whose
+// value already is 0, just tagged specially so undefinedp() can detect
+// it) -- not a separate value kind that arithmetic has to special-case.
+// This driver's own monostate plays the same "no value" role (a missing
+// mapping key, per Index's own comment, or a declared-but-unassigned
+// object variable/local before this driver's LpcObject.cpp/VM.cpp own
+// fix made those a real 0 directly), so it needs to participate in
+// arithmetic exactly like a real 0 too, while remaining distinguishable
+// from one via undefinedp()/nullp() specifically. Returns true and sets
+// out to 0.0 for monostate, true and the numeric value for int64_t/
+// double, false (leaving out untouched) for anything else. Surfaced
+// live: std/living.c's own query_stats() doing "stats[stat] + x" where
+// stats[stat] is a missing-key monostate for a fresh character whose
+// stats mapping has not been rolled yet.
+bool asArithmeticOperand(const amlp::Value& v, double& out) {
+    if (auto* i = std::get_if<int64_t>(&v.data)) {
+        out = static_cast<double>(*i);
+        return true;
+    }
+    if (auto* d = std::get_if<double>(&v.data)) {
+        out = *d;
+        return true;
+    }
+    if (std::holds_alternative<std::monostate>(v.data)) {
+        out = 0.0;
+        return true;
+    }
+    return false;
+}
+
+// Formats an int64_t/double/monostate Value for string+number
+// concatenation (OpCode::Add's own "string" +/- int/float branches),
+// matching real interpret.c's F_ADD exactly: "%ld" for an int, "%f" for
+// a float (C's default six decimal places, not a shortest round-trip
+// representation). monostate (this driver's own missing-mapping-key/
+// no-value encoding, see asArithmeticOperand's own comment) formats as
+// plain "0", the same real-0 treatment asArithmeticOperand already
+// gives it for numeric +/-/*. Caller guarantees v actually holds one of
+// these three kinds.
+std::string formatNumberForConcat(const amlp::Value& v) {
+    if (auto* i = std::get_if<int64_t>(&v.data)) {
+        return std::to_string(*i);
+    }
+    if (std::holds_alternative<std::monostate>(v.data)) {
+        return "0";
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%f", std::get<double>(v.data));
+    return std::string(buf);
+}
+
+// Resolves a bare function-call name against a program's own functions
+// first, then depth-first against each program it inherits (which may
+// itself inherit further -- see Bytecode.hpp's CompiledProgram comment).
+// This is the run-time half of OpCode::Call; the compile-time half is
+// CodeGen::emitCallExpr(), which never tries to decide locally-vs-
+// inherited-vs-efun itself.
+struct FunctionLookupResult {
+    const CompiledProgram* program = nullptr;
+    const FunctionEntry* fn = nullptr;
+};
+
+FunctionLookupResult findFunctionInChain(const CompiledProgram& program, const std::string& name) {
+    for (const auto& fn : program.functions) {
+        if (fn.name == name) return FunctionLookupResult{&program, &fn};
+    }
+    for (const auto& parent : program.inheritedPrograms) {
+        if (!parent) continue;
+        FunctionLookupResult found = findFunctionInChain(*parent, name);
+        if (found.program) return found;
+    }
+    return FunctionLookupResult{};
+}
+
+// Run-time half of OpCode::CallParent (see Bytecode.hpp's own comment
+// and Ast.hpp's CallExpr::parentCall): resolves "::name(...)"/
+// "qualifier::name(...)", which must skip *this* program's own
+// functions entirely and search only inherited ones, even if this
+// program itself defines a same-named function (the entire point of the
+// syntax -- e.g. an overridden create() explicitly calling its parent's
+// create() too). Bare form (no qualifier) walks every immediate parent
+// depth-first via the same findFunctionInChain() the plain Call opcode
+// uses, just starting one level down; a qualifier restricts the search
+// to the one immediate parent whose own "inherit" path's last path
+// component matches it (e.g. "daemon::create()" for
+// "inherit \"/std/daemon\";").
+std::string pathBasename(const std::string& path) {
+    size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+FunctionLookupResult findParentFunction(const CompiledProgram& program, const std::string& name,
+                                         const std::string* qualifier) {
+    if (!qualifier) {
+        for (const auto& parent : program.inheritedPrograms) {
+            if (!parent) continue;
+            FunctionLookupResult found = findFunctionInChain(*parent, name);
+            if (found.program) return found;
+        }
+        return FunctionLookupResult{};
+    }
+
+    for (size_t i = 0; i < program.inherits.size() && i < program.inheritedPrograms.size(); ++i) {
+        if (pathBasename(program.inherits[i]) != *qualifier) continue;
+        const auto& parent = program.inheritedPrograms[i];
+        if (!parent) continue;
+        return findFunctionInChain(*parent, name);
+    }
+    return FunctionLookupResult{};
+}
+
+// Ports FluffOS's inter_sscanf() (interpret.c) for: literal text, "%%",
+// "%s", "%d", "%x", "%f", the "%*" skip modifier (matches but does not
+// consume an output slot), and "%s" directly adjacent to another
+// specifier with no literal text between them (real inter_sscanf's own
+// per-specifier lookahead, ported below in adjacentSscanfBoundary()).
+// "%(regexp)" is deliberately still not implemented -- this mudlib's
+// sscanf() calls never use it (confirmed by grep) -- and throws rather
+// than silently mishandling it if some other file ever does.
+struct SscanfOutcome {
+    int64_t matchCount = 0;
+    std::vector<Value> assigned; // one entry per *consumed* (non-skip) slot, in order
+};
+
+// Real interpret.c's own per-specifier lookahead for "%s" directly
+// followed by another "%<spec>" with no literal text between them: since
+// there is nothing literal to delimit where the %s match ends, the driver
+// instead scans ahead in the input for where the *next* specifier's own
+// pattern would plausibly start, and uses that as the %s boundary. Ported
+// directly from inter_sscanf()'s own case-by-case scan loops (interpret.c,
+// the "if (*fmt++ == '%')" block after the %s handling), not guessed --
+// each case below mirrors one real loop exactly. `spec` is the character
+// identifying the *next* specifier (its own optional leading "%*" skip
+// flag, if any, has already been looked past by the caller -- it plays no
+// part in finding the boundary, only in whether that next specifier's own
+// value later gets assigned, which is handled by the normal top-of-loop
+// specifier logic once control returns there).
+size_t adjacentSscanfBoundary(char spec, const std::string& in0, size_t ip) {
+    const size_t inLen = in0.size();
+    size_t pos = ip;
+    switch (spec) {
+        case 'x':
+            // Real loop: skip to the next '0', then check whether it
+            // starts a real "0x"/"0X" + hex-digit sequence; if not,
+            // skip past it and keep looking.
+            while (pos < inLen) {
+                while (pos < inLen && in0[pos] != '0') ++pos;
+                if (pos >= inLen) break;
+                char c1 = (pos + 1 < inLen) ? in0[pos + 1] : '\0';
+                char c2 = (pos + 2 < inLen) ? in0[pos + 2] : '\0';
+                if ((c1 == 'x' || c1 == 'X') &&
+                    std::isxdigit(static_cast<unsigned char>(c2))) {
+                    break;
+                }
+                pos += 2;
+            }
+            return pos < inLen ? pos : inLen;
+        case 'd':
+            while (pos < inLen && !std::isdigit(static_cast<unsigned char>(in0[pos]))) ++pos;
+            return pos;
+        case 'f':
+            while (pos < inLen) {
+                char c = in0[pos];
+                if (std::isdigit(static_cast<unsigned char>(c))) break;
+                if (c == '.' && pos + 1 < inLen &&
+                    std::isdigit(static_cast<unsigned char>(in0[pos + 1]))) {
+                    break;
+                }
+                ++pos;
+            }
+            return pos;
+        case '%':
+            while (pos < inLen && in0[pos] != '%') ++pos;
+            return pos;
+        case 's':
+            // Real error text: "Illegal to have 2 adjacent %s's in
+            // format string in sscanf()".
+            throw LpcRuntimeError("sscanf: illegal to have two adjacent %s specifiers");
+        case '(':
+            throw NotImplementedError("sscanf: \"%s\" adjacent to \"%(regexp)\"");
+        default:
+            throw NotImplementedError(
+                std::string("sscanf: \"%s\" adjacent to unsupported format specifier '%") +
+                spec + "'");
+    }
+}
+
+SscanfOutcome runSscanf(const std::string& in0, const std::string& fmt0, size_t maxAssigns) {
+    SscanfOutcome out;
+    size_t ip = 0, fp = 0;
+    const size_t inLen = in0.size(), fmtLen = fmt0.size();
+
+    for (;;) {
+        // Match literal text up to the next '%' (or end of format).
+        while (fp < fmtLen && fmt0[fp] != '%') {
+            if (ip >= inLen || in0[ip] != fmt0[fp]) return out;
+            ++ip; ++fp;
+        }
+
+        if (fp >= fmtLen) {
+            // Format exhausted. Any leftover input becomes one final match
+            // in the next output slot, if one is still available.
+            if (ip < inLen && out.assigned.size() < maxAssigns) {
+                out.assigned.emplace_back(Value(in0.substr(ip)));
+                ++out.matchCount;
+            }
+            return out;
+        }
+
+        ++fp; // consume '%'
+        if (fp < fmtLen && fmt0[fp] == '%') {
+            // Literal "%%".
+            if (ip >= inLen || in0[ip] != '%') return out;
+            ++ip; ++fp;
+            ++out.matchCount;
+            continue;
+        }
+        if (fp >= fmtLen) {
+            throw LpcRuntimeError("sscanf: format string cannot end in '%'");
+        }
+
+        bool skip = (fmt0[fp] == '*');
+        if (skip) ++fp;
+        if (fp >= fmtLen) {
+            throw LpcRuntimeError("sscanf: format string cannot end in '%'");
+        }
+        char spec = fmt0[fp++];
+
+        if (spec == 'd' || spec == 'x') {
+            // Real inter_sscanf(): "case 'x': base = 16; /* fallthrough */
+            // case 'd':" -- both go through the same strtol(), only the
+            // base differs. std::strtoll(..., 16) accepts both a bare hex
+            // digit sequence and an optional leading "0x"/"0X", matching
+            // real strtol()'s own base-16 behavior.
+            const char* start = in0.c_str() + ip;
+            char* endPtr = nullptr;
+            long long value = std::strtoll(start, &endPtr, spec == 'x' ? 16 : 10);
+            if (endPtr == start) return out; // no digits matched
+            ip += static_cast<size_t>(endPtr - start);
+            if (!skip) {
+                if (out.assigned.size() >= maxAssigns) {
+                    throw LpcRuntimeError("sscanf: too few output arguments for format string");
+                }
+                out.assigned.emplace_back(Value(static_cast<int64_t>(value)));
+            }
+            ++out.matchCount;
+            continue;
+        }
+
+        if (spec == 'f') {
+            const char* start = in0.c_str() + ip;
+            char* endPtr = nullptr;
+            double value = std::strtod(start, &endPtr);
+            if (endPtr == start) return out; // no float matched
+            ip += static_cast<size_t>(endPtr - start);
+            if (!skip) {
+                if (out.assigned.size() >= maxAssigns) {
+                    throw LpcRuntimeError("sscanf: too few output arguments for format string");
+                }
+                out.assigned.emplace_back(Value(value));
+            }
+            ++out.matchCount;
+            continue;
+        }
+
+        if (spec != 's') {
+            throw NotImplementedError(
+                std::string("sscanf: format specifier '%") + spec +
+                "' (only %s, %d, %x, %f, %% are supported)");
+        }
+
+        // %s. If the format is now exhausted, the rest of in_string is the
+        // match (real inter_sscanf's "we have reached the end of the
+        // format string" case).
+        if (fp >= fmtLen) {
+            if (!skip) {
+                if (out.assigned.size() >= maxAssigns) {
+                    throw LpcRuntimeError("sscanf: too few output arguments for format string");
+                }
+                out.assigned.emplace_back(Value(in0.substr(ip)));
+            }
+            ++out.matchCount;
+            return out;
+        }
+
+        if (fmt0[fp] == '%') {
+            // "%s" directly followed by another "%<spec>" with no literal
+            // text in between -- real inter_sscanf()'s own lookahead case.
+            // Identify the next specifier's own character (looking past
+            // its optional "%*" skip flag, which plays no part in finding
+            // the boundary -- see adjacentSscanfBoundary()'s own comment),
+            // find where its pattern would start in the remaining input,
+            // and use that as the end of this %s match. Deliberately does
+            // NOT consume the next specifier here: fp is left pointing at
+            // its own leading '%', so the top of this same loop processes
+            // it as an entirely ordinary specifier on the next iteration,
+            // starting at the boundary just computed -- observably
+            // identical to real inter_sscanf() parsing both together
+            // inline, without duplicating every specifier's own parsing
+            // logic a second time here.
+            size_t lookFp = fp + 1;
+            if (lookFp < fmtLen && fmt0[lookFp] == '*') ++lookFp;
+            char nextSpec = (lookFp < fmtLen) ? fmt0[lookFp] : '\0';
+            size_t boundary = adjacentSscanfBoundary(nextSpec, in0, ip);
+
+            if (!skip) {
+                if (out.assigned.size() >= maxAssigns) {
+                    throw LpcRuntimeError("sscanf: too few output arguments for format string");
+                }
+                out.assigned.emplace_back(Value(in0.substr(ip, boundary - ip)));
+            }
+            ip = boundary;
+            ++out.matchCount;
+            continue;
+        }
+
+        // %s terminated by literal text: find where that literal text
+        // next occurs in the remaining input, and take everything before
+        // it as the match.
+        size_t delimStart = fp;
+        while (fp < fmtLen && fmt0[fp] != '%') ++fp;
+        std::string delim = fmt0.substr(delimStart, fp - delimStart);
+
+        size_t found = in0.find(delim, ip);
+        if (found == std::string::npos) return out;
+
+        if (!skip) {
+            if (out.assigned.size() >= maxAssigns) {
+                throw LpcRuntimeError("sscanf: too few output arguments for format string");
+            }
+            out.assigned.emplace_back(Value(in0.substr(ip, found - ip)));
+        }
+        ip = found + delim.size();
+        ++out.matchCount;
+        // fp already sits at the '%' (or fmtLen) that starts the next
+        // segment; the top of the loop picks up from there.
+    }
+}
+
+} // namespace
+
+VM::VM(ObjectManager& objects, Config& config)
+    : objects_(objects), config_(config),
+      maxEvalCost_(config.maxEvalCost()) {}
+
+void VM::setMaxEvalCost(int64_t limit) {
+    maxEvalCost_ = (limit < 0) ? config_.maxEvalCost() : limit;
+}
+
+Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
+                        const std::string& functionName,
+                        std::vector<Value> args) {
+    if (!obj) return Value{};
+
+    // real apply()'s own "DEBUG_CHECK(ob->flags & O_DESTRUCTED, ...)"
+    // gate (interpret.c): every "call into an object from outside" path
+    // goes through this one function -- call_other, applyMaster(),
+    // Scheduler's call_out()/heart_beat() firing (via a locked weak_ptr,
+    // which can still succeed on a destructed-but-still-referenced
+    // object), and moveObject()'s own init() propagation all share it --
+    // so a single check here closes the "a destructed object still
+    // responds to call_other()/keeps firing heart_beat()" class of bugs
+    // everywhere at once, matching real semantics: a destructed target
+    // silently does nothing, not an error.
+    if (obj->isDestructed()) return Value{};
+
+    // Shadow chain (Phase 0.6): real apply_low()'s own two-phase
+    // mechanism (interpret.c), confirmed directly before implementing,
+    // not assumed from instruct.md's own simplified "call the shadow,
+    // check truthy, else fall through" description, which gets the real
+    // condition wrong -- it is whether the function is *defined* on a
+    // given link of the chain, never the truthiness of what it returns.
+    //
+    // Phase 1: walk to the outermost still-active shadow. Real "while
+    // (ob->shadowed && ob->shadowed != current_object &&
+    // !(ob->shadowed->flags & O_DESTRUCTED)) ob = ob->shadowed;" -- the
+    // "!= current_object" guard is real and load-bearing: without it, a
+    // shadow's own function calling back into its victim (e.g. via
+    // call_other to reach the real, unshadowed implementation) would
+    // immediately re-enter itself instead, since it IS current_object at
+    // that point.
+    std::shared_ptr<LpcObject> target = obj;
+    {
+        auto caller = currentObject();
+        auto shadow = target->shadowedBy().lock();
+        while (shadow && shadow != caller && !shadow->isDestructed()) {
+            target = shadow;
+            shadow = target->shadowedBy().lock();
+        }
+    }
+
+    // Phase 2: search target's own inherit chain (same resolution
+    // external entry points always use, see the comment below); if the
+    // function is not *defined* there and target itself shadows
+    // something further in (a multi-shadow chain), retry one step
+    // toward the base victim -- real "goto retry_for_shadow" after the
+    // "if (ob->shadowing) { ob = ob->shadowing; ... }" check. This
+    // terminates at the original, unshadowed obj once shadowing() is
+    // unset, exactly matching real semantics: the base object's own
+    // program is always the last one tried.
+    //
+    // External entry points (call_other, ObjectManager's create() call,
+    // applyMaster()) must resolve inherited-but-not-locally-overridden
+    // functions the same way a bare in-file call does, or calling an
+    // object that only picked up a function via "inherit" (extremely
+    // common in this mudlib, e.g. every DAEMON-inheriting command) would
+    // silently do nothing instead of running it. Unlike OpCode::Call's
+    // resolution, this deliberately does not fall back to the efun table
+    // -- call_other("some/object", "sizeof") calling the sizeof() efun on
+    // an unrelated object would not be a call_other at all.
+    FunctionLookupResult found;
+    for (;;) {
+        found = findFunctionInChain(target->program(), functionName);
+        if (found.program) break;
+        auto next = target->shadowing().lock();
+        if (!next) break;
+        target = next;
+    }
+    if (!found.program) return Value{};
+    return run(*found.program, *found.fn, std::move(args), target);
+}
+
+Value VM::callFunctionInProgram(const std::shared_ptr<LpcObject>& obj, const CompiledProgram& program,
+                                 const std::string& functionName, std::vector<Value> args) {
+    if (!obj) return Value{};
+    for (const auto& fn : program.functions) {
+        if (fn.name == functionName) {
+            return run(program, fn, std::move(args), obj);
+        }
+    }
+    return Value{};
+}
+
+bool VM::functionExists(const std::shared_ptr<LpcObject>& obj, const std::string& functionName) const {
+    if (!obj || obj->isDestructed()) return false;
+    return findFunctionInChain(obj->program(), functionName).program != nullptr;
+}
+
+Value VM::applyMaster(const std::string& applyName, std::vector<Value> args) {
+    auto master = objects_.masterObject();
+    if (!master) {
+        throw LpcRuntimeError("applyMaster(" + applyName + "): master object not loaded");
+    }
+    return callFunction(master, applyName, std::move(args));
+}
+
+std::shared_ptr<LpcObject> VM::cloneObject(const std::string& filename) {
+    return objects_.cloneObject(filename);
+}
+
+void VM::destructObject(const std::shared_ptr<LpcObject>& obj) {
+    objects_.destructObject(obj);
+}
+
+std::shared_ptr<LpcObject> VM::masterObject() const {
+    return objects_.masterObject();
+}
+
+std::shared_ptr<LpcObject> VM::findObject(const std::string& filename) const {
+    // See VM.hpp's own comment: real find_object() compiles+loads on a
+    // miss, which is exactly ObjectManager::loadObject()'s existing
+    // cache-by-filename behavior (also used for the master and
+    // simul_efun objects at boot).
+    return objects_.loadObject(filename);
+}
+
+std::shared_ptr<LpcObject> VM::lookupObject(const std::string& filename) const {
+    return objects_.lookupLoadedObject(filename);
+}
+
+std::shared_ptr<LpcObject> VM::currentObject() const {
+    return callStack_.empty() ? nullptr : callStack_.back();
+}
+
+std::shared_ptr<LpcObject> VM::previousObject(int idx) const {
+    if (idx < 0 || static_cast<size_t>(idx) >= objectChangeStack_.size()) return nullptr;
+    return objectChangeStack_[objectChangeStack_.size() - 1 - static_cast<size_t>(idx)];
+}
+
+std::vector<std::shared_ptr<LpcObject>> VM::allPreviousObjects() const {
+    std::vector<std::shared_ptr<LpcObject>> result;
+    for (auto it = objectChangeStack_.rbegin(); it != objectChangeStack_.rend(); ++it) {
+        if (*it) result.push_back(*it);
+    }
+    return result;
+}
+
+std::shared_ptr<LpcObject> VM::commandGiver() const {
+    return commandGiverStack_.empty() ? nullptr : commandGiverStack_.back();
+}
+
+void VM::pushCommandGiver(const std::shared_ptr<LpcObject>& ob) {
+    commandGiverStack_.push_back(ob);
+}
+
+void VM::popCommandGiver() {
+    if (!commandGiverStack_.empty()) commandGiverStack_.pop_back();
+}
+
+std::string VM::currentVerb() const {
+    return verbStack_.empty() ? std::string() : verbStack_.back();
+}
+
+// See VM.hpp's own comment for the overall contract. The lazy-
+// resolve-by-name simplification here (versus real FluffOS's
+// FP_LOCAL/FP_SIMUL/FP_EFUN classification baked in at the "(: :)"
+// literal's own construction time) is safe for this driver's current
+// scope specifically because every closure actually reachable in this
+// mudlib is built and called within the same short-lived scope --
+// e.g. "unguarded((: file_size, p :))" constructs the closure and
+// hands it straight to unguarded(), which calls it immediately via
+// evaluate(); nothing stores one in an object variable, redefines the
+// named function in between, and calls it later expecting the
+// original binding to have survived. If that ever changes, this
+// comment is the place to revisit it.
+Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value> extraArgs) {
+    if (!closure) {
+        throw LpcRuntimeError("evaluate(): not a function value");
+    }
+    auto owner = closure->owner.lock();
+    // Previously only checked whether the weak_ptr had actually expired
+    // (the owner's last shared_ptr reference dropped) -- a real gap for
+    // an owner that was explicitly destruct()ed but is still kept alive
+    // by some other reference (e.g. sitting in an array/mapping/another
+    // object's variable), which is not at all an unusual thing for
+    // destruct() to leave behind. isDestructed() catches that case too.
+    if (!owner || owner->isDestructed()) {
+        throw LpcRuntimeError("evaluate(): owner of function pointer is destructed");
+    }
+
+    std::vector<Value> args;
+    args.reserve(closure->boundArgs.size() + extraArgs.size());
+    for (const auto& a : closure->boundArgs) args.push_back(a);
+    for (auto& a : extraArgs) args.push_back(std::move(a));
+
+    FunctionLookupResult found = findFunctionInChain(owner->program(), closure->functionName);
+    if (found.program) {
+        return run(*found.program, *found.fn, std::move(args), owner);
+    }
+
+    auto simulEfun = objects_.simulEfunObject();
+    if (simulEfun) {
+        FunctionLookupResult simulFound = findFunctionInChain(simulEfun->program(), closure->functionName);
+        if (simulFound.program) {
+            return run(*simulFound.program, *simulFound.fn, std::move(args), simulEfun);
+        }
+    }
+
+    if (EfunTable::instance().exists(closure->functionName)) {
+        // Unlike the local/simul_efun branches above, calling a core
+        // efun does not recurse into run() at all, so without this
+        // guard vm.currentObject() would still read whatever object's
+        // run() frame is innermost (whoever called evaluate()) instead
+        // of this closure's own owner -- see ObjectFrameGuard's own
+        // comment, this is exactly the live bug it fixes.
+        ObjectFrameGuard objectFrameGuard(callStack_, objectChangeStack_, owner);
+        return EfunTable::instance().call(closure->functionName, *this, args);
+    }
+
+    throw LpcRuntimeError("evaluate(): undefined function or efun: " + closure->functionName);
+}
+
+std::string VM::resolveMudlibPath(const std::string& lpcPath) const {
+    return config_.mudlibRoot() + lpcPath;
+}
+
+// See VM.hpp's own comment. Implements two of real setup_new_commands()'s
+// (add_action.c) three visitation legs -- the ones this mudlib's own
+// confirmed real usage needs (the destination handing its own verbs to
+// the mover, and already-present command-enabled occupants exchanging
+// init() calls with the mover) -- and skips the third (dest itself being
+// command-enabled, i.e. moving into another living object's own
+// inventory rather than a room): "rare" per the reference source's own
+// comment, and not reachable by anything this mudlib's own confirmed
+// boot/movement path does (every real move() call site moves a living
+// into a room, never into another living).
+//
+// Also simplified versus the reference source in one more way, flagged
+// rather than silently assumed safe: real setup_new_commands() rechecks
+// "if (item->super != dest) return;" after every single apply(), because
+// an init() body is free to move `item` again before returning (its own
+// comment: "Beware that init() in the room may have moved 'item' !").
+// This does not re-check that -- the occupant loop below iterates a
+// snapshot of dest's inventory taken before any init() runs, so it is
+// safe against the list itself changing size, but an init() that calls
+// move_object() on `item` mid-loop will still finish running the rest of
+// this function against the *old* dest/item relationship. No real init()
+// on this mudlib's confirmed path (Object.c, room/exits.c, room/
+// senses.c, living.c's own init_living()) calls move()/move_object() at
+// all, so this has not been reachable to verify against real behavior.
+void VM::moveObject(const std::shared_ptr<LpcObject>& item, const std::shared_ptr<LpcObject>& dest) {
+    // A destructed item/destination is never a valid move -- without
+    // this, an already-destructed-but-still-referenced object could be
+    // relinked back into a live room's inventory, undoing the unlink
+    // ObjectManager::destructObject() just did.
+    if (!item || !dest || item == dest || item->isDestructed() || dest->isDestructed()) return;
+
+    if (auto oldEnv = item->environment().lock()) {
+        auto& oldInv = oldEnv->inventory();
+        oldInv.erase(std::remove(oldInv.begin(), oldInv.end(), item), oldInv.end());
+    }
+    item->setEnvironment(dest);
+    dest->inventory().push_back(item);
+
+    // Leg 1: dest's own init() hands dest's actions to item (command_giver
+    // = item) -- e.g. a room's exits.c/senses.c registering movement and
+    // search verbs onto the player who just walked in.
+    if (item->commandsEnabled()) {
+        CommandGiverGuard guard(*this, item);
+        callFunction(dest, "init", {});
+    }
+
+    // Leg 2: every other object already present exchanges init() calls
+    // with the mover, in the same order real setup_new_commands() uses
+    // (an occupant's init() reaches item first, then item's own init()
+    // reaches the occupant) -- matters for which entry ends up more
+    // recently added, and therefore checked first at dispatch time.
+    // Snapshotting dest's inventory here (not iterating it live) avoids
+    // undefined iterator behavior if an init() call below moves anything
+    // else in or out of dest.
+    std::vector<std::shared_ptr<LpcObject>> occupants = dest->inventory();
+    for (auto& ob : occupants) {
+        if (ob == item) continue;
+        if (ob->commandsEnabled()) {
+            CommandGiverGuard guard(*this, ob);
+            callFunction(item, "init", {});
+        }
+        if (item->commandsEnabled()) {
+            CommandGiverGuard guard(*this, item);
+            callFunction(ob, "init", {});
+        }
+    }
+}
+
+namespace {
+// Splits a typed line into its first whitespace-delimited word (the
+// verb, real query_verb()'s raw material) and the remainder (the
+// argument string every add_action-registered function receives, real
+// LPC convention -- whitespace immediately following the verb is
+// consumed, not left as a leading space in the argument).
+// arg is std::nullopt when there is genuinely nothing after the verb
+// (a bare single-word command) -- distinct from a present-but-empty
+// string, matching real user_parser()'s own "push_undefined()" branch
+// (add_action.c) exactly (see dispatchCommand()'s own comment on why
+// this distinction is load-bearing, not cosmetic).
+std::pair<std::string, std::optional<std::string>> splitVerbAndArg(const std::string& line) {
+    size_t start = line.find_first_not_of(" \t");
+    if (start == std::string::npos) return {std::string(), std::nullopt};
+    size_t verbEnd = line.find_first_of(" \t", start);
+    if (verbEnd == std::string::npos) return {line.substr(start), std::nullopt};
+    std::string verb = line.substr(start, verbEnd - start);
+    size_t argStart = line.find_first_not_of(" \t", verbEnd);
+    if (argStart == std::string::npos) return {verb, std::nullopt};
+    return {verb, line.substr(argStart)};
+}
+} // namespace
+
+// See VM.hpp's own comment. real parse_command()/user_parser()
+// (add_action.c): walk giver's action table (built incrementally by
+// moveObject() above, not rebuilt here -- matches real semantics, the
+// table persists across commands until the next move) and call the
+// first matching handler that returns truthy, trying further matches if
+// one returns falsy.
+bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::string& line) {
+    if (!giver || giver->isDestructed()) return false;
+    auto [verb, arg] = splitVerbAndArg(line);
+    if (verb.empty()) return false;
+
+    // Snapshot: a handler is free to call add_action()/remove_action()
+    // on itself (this mudlib's own do_sit-style one-shot actions do),
+    // which would otherwise mutate giver->actions() out from under a
+    // live iteration.
+    std::vector<LpcObject::ActionEntry> actions = giver->actions();
+    for (const auto& entry : actions) {
+        bool matches;
+        if (entry.flag == 0) {
+            matches = (entry.verb == verb);
+        } else {
+            // V_SHORT (1) / V_NOSPACE (2): entry.verb only has to be a
+            // leading-characters prefix of the typed verb -- real
+            // semantics, and an empty entry.verb (living.c's own
+            // catch-all "add_action(\"cmd_hook\", \"\", 1)") trivially
+            // matches every typed verb, since every string starts with
+            // the empty prefix.
+            matches = verb.size() >= entry.verb.size() &&
+                verb.compare(0, entry.verb.size(), entry.verb) == 0;
+        }
+        if (!matches) continue;
+
+        auto owner = entry.owner.lock();
+        // real: an action whose owner died (or was explicitly
+        // destructed but is still referenced elsewhere) is skipped, not
+        // an error.
+        if (!owner || owner->isDestructed()) continue;
+
+        // real user_parser() (add_action.c): the argument construction is
+        // NOT relative to the matched entry's own verb length for either
+        // V_SHORT or the plain exact-match case -- only V_NOSPACE (flag
+        // 2) reslices relative to entry.verb; both other cases push
+        // whatever came after the *typed line's own first word*, or real
+        // "push_undefined()" (this driver's Value{} monostate) when there
+        // was nothing there at all ("buff[length] == ' '" is false).
+        // Confirmed by reading user_parser() directly: a bare one-word
+        // command ("look", no trailing text) must reach its handler with
+        // an *undefined* argument, never an empty string -- found live
+        // root-causing why "look" (and every other bare command) reached
+        // cmd_hook()/cmd_look() but still silently declined: cmd_look(str)
+        // checks "if(stringp(str))" first, and an empty string passes
+        // that check (stringp("") is true), routing into examine_object("")
+        // instead of the no-argument "this_player()->
+        // describe_current_room(1)" branch -- confirmed the actual reason
+        // a real room's own "look" command produced nothing at all,
+        // independent of and discovered after the Scheduler work this
+        // slice was actually about (see STATUS.md's own account of the
+        // live-testing trail that found this).
+        Value handlerArg;
+        if (entry.flag == 2 && !entry.verb.empty()) {
+            // V_NOSPACE: still always a real string (possibly empty),
+            // matching real "copy_and_push_string(&buff[strlen(s->verb)])"
+            // -- no undefined case for this flag. No real call site in
+            // this mudlib uses flag 2 (every real catch-all use found is
+            // flag 1), so this remains unverified live the way the flag-1
+            // path now is.
+            std::string rest = verb.substr(entry.verb.size());
+            handlerArg = Value(arg ? (rest.empty() ? *arg : rest + " " + *arg) : rest);
+        } else if (arg) {
+            handlerArg = Value(*arg);
+        }
+        // else: handlerArg stays default-constructed Value{} (monostate),
+        // matching real push_undefined() for a bare verb with nothing
+        // after it.
+
+        // real query_verb() always returns the full typed verb, not the
+        // matched prefix -- even for a V_SHORT/V_NOSPACE partial match.
+        verbStack_.push_back(verb);
+        CommandGiverGuard giverGuard(*this, giver);
+        Value result;
+        try {
+            result = callFunction(owner, entry.functionName, {handlerArg});
+        } catch (...) {
+            verbStack_.pop_back();
+            throw;
+        }
+        verbStack_.pop_back();
+
+        if (isTruthy(result)) return true;
+    }
+    return false;
+}
+
+Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
+              std::vector<Value> args, const std::shared_ptr<LpcObject>& obj) {
+    // Do NOT reset evalCost_ here. Real FluffOS accumulates instruction
+    // cost across all nested run()/apply() calls within one top-level
+    // dispatch; only Server::dispatchLine() and Scheduler::tick*() reset
+    // it, matching process_user_command()/call_heart_beat()/call_call_out()
+    // in the reference driver (interpret.c, backend.c, call_out.c).
+
+    // Tracks real FluffOS's current_object for the duration of this one
+    // LPC function activation (see VM.hpp's currentObject() comment).
+    // RAII rather than an explicit pop before every return: run() has
+    // several return points plus exception unwinding (a rethrown
+    // LpcRuntimeError with no active catch frame, or EvalCostError,
+    // both propagate straight out of the while loop below), and a
+    // destructor is the only pop that reliably covers all of them. See
+    // ObjectFrameGuard's own comment for the real-semantics citation.
+    ObjectFrameGuard objectFrameGuard(callStack_, objectChangeStack_, obj);
+
+    // Base offset to add to this program's own PushObjectVar/
+    // StoreObjectVar slot numbers before indexing obj->variables() (see
+    // Bytecode.hpp's CompiledProgram::ancestorBaseOffsets comment for the
+    // full citation). `program` is whichever specific file's bytecode is
+    // executing -- possibly several inherit levels below obj->program(),
+    // e.g. a leaf mixin like std/user/nmsh.c running as part of a
+    // std/user.c object -- while obj->variables() is always sized to
+    // obj->program()'s own fully-flattened total. `program`'s own slot
+    // numbers are relative only to its own direct inherit chain (correct
+    // when it runs standalone); the fast path (0 offset) covers a
+    // function belonging to obj->program() itself, which already uses
+    // absolute slots with no adjustment needed.
+    int objectVarBase = 0;
+    if (&program != &obj->program()) {
+        auto offsetIt = obj->program().ancestorBaseOffsets.find(&program);
+        if (offsetIt == obj->program().ancestorBaseOffsets.end()) {
+            throw LpcRuntimeError(
+                "internal error: no object-variable base offset recorded for an inherited program");
+        }
+        objectVarBase = offsetIt->second;
+    }
+
+    // Real int64_t 0 per slot, not monostate -- see LpcObject.cpp's own
+    // comment on variables_'s identical initialization for the citation;
+    // a declared-but-not-yet-assigned local reads as 0 in real LPC too,
+    // and the args loop below overwrites whichever slots are actually
+    // parameters immediately after anyway.
+    std::vector<Value> locals(fn.numLocals, Value(int64_t{0}));
+    for (size_t i = 0; i < args.size() && i < locals.size(); ++i) {
+        locals[i] = std::move(args[i]);
+    }
+
+    std::vector<Value> localStack;
+    size_t ip = fn.entryPoint;
+
+    // catch(expr) support (see Ast.hpp's CatchExpr and Bytecode.hpp's
+    // PushCatchFrame/PopCatchFrame comments). One stack per run() call
+    // (i.e. per LPC function invocation), not a VM-wide member: a
+    // function with no catch() of its own has an empty stack here and
+    // any error simply propagates out of this call via the rethrow
+    // below, exactly like today, which is also how a catch() in a
+    // *caller* still traps an error thrown deep inside a *callee* that
+    // has no catch() of its own -- the callee's own run() call finds its
+    // own catchFrames empty, rethrows, and the resulting C++ exception
+    // unwinds straight out of that nested run() call (see OpCode::Call
+    // below) back into this function's own try/catch, which does have
+    // an active frame. .back()/.pop_back() naturally gives innermost-
+    // first behavior for catch() nested within one function body too.
+    struct CatchFrame {
+        size_t resumeIp;
+        size_t stackDepth;
+    };
+    std::vector<CatchFrame> catchFrames;
+
+    while (ip < program.code.size()) {
+      try {
+        const Instruction& instr = program.code[ip];
+        ++evalCost_;
+        if (evalCost_ > maxEvalCost_) {
+            // Not LpcRuntimeError on purpose -- see EvalCostError's own
+            // comment, this must not be catchable by catch().
+            throw EvalCostError("eval cost exceeded");
+        }
+
+        switch (instr.op) {
+            case OpCode::PushConst: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("PushConst: bad string pool index");
+                }
+                localStack.emplace_back(Value(program.stringPool[instr.operand]));
+                ++ip;
+                break;
+            }
+
+            case OpCode::PushInt: {
+                localStack.emplace_back(Value(static_cast<int64_t>(instr.operand)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::PushFloat: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.floatPool.size()) {
+                    throw LpcRuntimeError("PushFloat: bad float pool index");
+                }
+                localStack.emplace_back(Value(program.floatPool[instr.operand]));
+                ++ip;
+                break;
+            }
+
+            case OpCode::PushLocal: {
+                if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= locals.size()) {
+                    throw LpcRuntimeError("PushLocal: bad local slot index");
+                }
+                coerceIfDestructed(locals[instr.operand]);
+                localStack.push_back(locals[instr.operand]);
+                ++ip;
+                break;
+            }
+
+            case OpCode::StoreLocal: {
+                if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= locals.size()) {
+                    throw LpcRuntimeError("StoreLocal: bad local slot index");
+                }
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("StoreLocal: stack underflow");
+                }
+                locals[instr.operand] = localStack.back();
+                localStack.pop_back();
+                ++ip;
+                break;
+            }
+
+            case OpCode::PushObjectVar: {
+                auto& vars = obj->variables();
+                int64_t slot = static_cast<int64_t>(objectVarBase) + instr.operand;
+                if (slot < 0 || static_cast<size_t>(slot) >= vars.size()) {
+                    throw LpcRuntimeError("PushObjectVar: bad object variable slot index");
+                }
+                coerceIfDestructed(vars[static_cast<size_t>(slot)]);
+                localStack.push_back(vars[static_cast<size_t>(slot)]);
+                ++ip;
+                break;
+            }
+
+            case OpCode::StoreObjectVar: {
+                auto& vars = obj->variables();
+                int64_t slot = static_cast<int64_t>(objectVarBase) + instr.operand;
+                if (slot < 0 || static_cast<size_t>(slot) >= vars.size()) {
+                    throw LpcRuntimeError("StoreObjectVar: bad object variable slot index");
+                }
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("StoreObjectVar: stack underflow");
+                }
+                vars[static_cast<size_t>(slot)] = localStack.back();
+                localStack.pop_back();
+                ++ip;
+                break;
+            }
+
+            case OpCode::Eq:
+            case OpCode::Neq: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("Eq/Neq: stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+                bool eq = valuesEqual(lhs, rhs);
+                bool result = (instr.op == OpCode::Eq) ? eq : !eq;
+                localStack.emplace_back(Value(static_cast<int64_t>(result ? 1 : 0)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Lt:
+            case OpCode::Lte:
+            case OpCode::Gt:
+            case OpCode::Gte: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("comparison: stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+
+                // asArithmeticOperand (not a bare int64_t/double check) so
+                // monostate -- this driver's own missing-mapping-key/no-
+                // value encoding -- compares as a real 0, consistent with
+                // the same treatment it already gets in +/-/* (see that
+                // function's own comment). Found live: secure/daemon/
+                // player.c's own sort_list(), "alpha[\"experience\"] >
+                // beta[\"experience\"]" -- a brand new character's own
+                // freshly-built mapping entry can have "experience" as a
+                // real int (query_exp() itself returns 0, not void), but
+                // the general case of comparing a possibly-missing
+                // mapping key must not throw where real LPC (which has
+                // no such distinction at the value level -- a missing
+                // key is simply int 0) would happily compare.
+                double lv, rv;
+                if (!asArithmeticOperand(lhs, lv)) {
+                    throw LpcRuntimeError("comparison: left operand is not numeric");
+                }
+                if (!asArithmeticOperand(rhs, rv)) {
+                    throw LpcRuntimeError("comparison: right operand is not numeric");
+                }
+
+                bool result = false;
+                switch (instr.op) {
+                    case OpCode::Lt:  result = lv < rv; break;
+                    case OpCode::Lte: result = lv <= rv; break;
+                    case OpCode::Gt:  result = lv > rv; break;
+                    case OpCode::Gte: result = lv >= rv; break;
+                    default: break;
+                }
+                localStack.emplace_back(Value(static_cast<int64_t>(result ? 1 : 0)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Not: {
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("Not: stack underflow");
+                }
+                Value v = localStack.back(); localStack.pop_back();
+                localStack.emplace_back(Value(static_cast<int64_t>(isTruthy(v) ? 0 : 1)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Sub:
+            case OpCode::Mul:
+            case OpCode::Div:
+            case OpCode::Mod: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("arithmetic: stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+
+                // real LPC's "arr1 - arr2": set difference, not numeric
+                // subtraction -- every element of arr1 that also occurs
+                // anywhere in arr2 (by value equality) is dropped, order
+                // and any non-matched duplicates preserved (confirmed
+                // against every real LPC driver's documented array "-"
+                // operator; grammar.y gives "-" the same F_SUBTRACT
+                // opcode regardless of operand type, dispatched on type
+                // at runtime the same way this driver's own Add opcode
+                // already special-cases string/array/mapping before its
+                // shared numeric path). Surfaced live: std/user.c's own
+                // register_channels() doing "channels - __RestrictedChannels".
+                if (instr.op == OpCode::Sub &&
+                    std::holds_alternative<std::shared_ptr<Array>>(lhs.data) &&
+                    std::holds_alternative<std::shared_ptr<Array>>(rhs.data)) {
+                    auto leftArr = std::get<std::shared_ptr<Array>>(lhs.data);
+                    auto rightArr = std::get<std::shared_ptr<Array>>(rhs.data);
+                    auto result = std::make_shared<Array>();
+                    if (leftArr) {
+                        for (const auto& item : leftArr->items) {
+                            bool excluded = false;
+                            if (rightArr) {
+                                for (const auto& other : rightArr->items) {
+                                    if (valuesEqual(item, other)) {
+                                        excluded = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!excluded) result->items.push_back(item);
+                        }
+                    }
+                    localStack.emplace_back(Value(result));
+                    ++ip;
+                    break;
+                }
+
+                bool eitherDouble = std::holds_alternative<double>(lhs.data) ||
+                                     std::holds_alternative<double>(rhs.data);
+
+                double lv, rv;
+                if (!asArithmeticOperand(lhs, lv)) {
+                    throw LpcRuntimeError("arithmetic: left operand is not numeric");
+                }
+                if (!asArithmeticOperand(rhs, rv)) {
+                    throw LpcRuntimeError("arithmetic: right operand is not numeric");
+                }
+
+                if ((instr.op == OpCode::Div || instr.op == OpCode::Mod) && rv == 0.0) {
+                    throw LpcRuntimeError(instr.op == OpCode::Div
+                        ? "Div: division by zero"
+                        : "Mod: modulo by zero");
+                }
+
+                double result = 0.0;
+                switch (instr.op) {
+                    case OpCode::Sub: result = lv - rv; break;
+                    case OpCode::Mul: result = lv * rv; break;
+                    case OpCode::Div: result = lv / rv; break;
+                    case OpCode::Mod: result = std::fmod(lv, rv); break;
+                    default: break;
+                }
+
+                if (eitherDouble) {
+                    localStack.emplace_back(Value(result));
+                } else {
+                    localStack.emplace_back(Value(static_cast<int64_t>(result)));
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::BitAnd: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("BitAnd: stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+
+                if (std::holds_alternative<std::shared_ptr<Array>>(lhs.data) &&
+                    std::holds_alternative<std::shared_ptr<Array>>(rhs.data)) {
+                    auto leftArr = std::get<std::shared_ptr<Array>>(lhs.data);
+                    auto rightArr = std::get<std::shared_ptr<Array>>(rhs.data);
+                    auto result = std::make_shared<Array>();
+                    // Set intersection: every element of the left array
+                    // that also occurs (by LPC value equality) anywhere in
+                    // the right array, preserving the left array's order
+                    // and duplicate count. This is a simplified stand-in
+                    // for FluffOS's intersect_array() (array.c), which
+                    // additionally sorts and de-duplicates its result --
+                    // not replicated here since nothing this driver
+                    // currently runs depends on that exact ordering, only
+                    // on membership (e.g. master.c's
+                    // "sizeof(privs & ok)").
+                    if (leftArr && rightArr) {
+                        for (const auto& item : leftArr->items) {
+                            bool found = false;
+                            for (const auto& other : rightArr->items) {
+                                if (valuesEqual(item, other)) { found = true; break; }
+                            }
+                            if (found) result->items.push_back(item);
+                        }
+                    }
+                    localStack.emplace_back(Value(result));
+                } else if (std::holds_alternative<int64_t>(lhs.data) &&
+                           std::holds_alternative<int64_t>(rhs.data)) {
+                    int64_t result = std::get<int64_t>(lhs.data) & std::get<int64_t>(rhs.data);
+                    localStack.emplace_back(Value(result));
+                } else {
+                    throw LpcRuntimeError("BitAnd: operands must both be ints or both be arrays");
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::BitOr:
+            case OpCode::BitXor: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("BitOr/BitXor: stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+
+                if (!std::holds_alternative<int64_t>(lhs.data) ||
+                    !std::holds_alternative<int64_t>(rhs.data)) {
+                    throw LpcRuntimeError(
+                        std::string(instr.op == OpCode::BitOr ? "BitOr" : "BitXor") +
+                        ": operands must both be ints (array union is not implemented this slice)");
+                }
+                int64_t result = (instr.op == OpCode::BitOr)
+                    ? (std::get<int64_t>(lhs.data) | std::get<int64_t>(rhs.data))
+                    : (std::get<int64_t>(lhs.data) ^ std::get<int64_t>(rhs.data));
+                localStack.emplace_back(Value(result));
+                ++ip;
+                break;
+            }
+
+            case OpCode::ForeachKeys: {
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("ForeachKeys: stack underflow");
+                }
+                Value v = localStack.back(); localStack.pop_back();
+                if (std::holds_alternative<std::shared_ptr<Array>>(v.data)) {
+                    localStack.push_back(v);
+                } else if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&v.data)) {
+                    auto keysArr = std::make_shared<Array>();
+                    if (*map) {
+                        for (const auto& entry : (*map)->entries) {
+                            keysArr->items.push_back(entry.first);
+                        }
+                    }
+                    localStack.emplace_back(Value(keysArr));
+                } else {
+                    throw LpcRuntimeError("foreach: collection must be an array or mapping");
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::Jump: {
+                if (instr.operand < 0 || static_cast<size_t>(instr.operand) > program.code.size()) {
+                    throw LpcRuntimeError("Jump: bad target");
+                }
+                ip = static_cast<size_t>(instr.operand);
+                break;
+            }
+
+            case OpCode::JumpIfFalse: {
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("JumpIfFalse: stack underflow");
+                }
+                Value cond = localStack.back();
+                localStack.pop_back();
+                if (!isTruthy(cond)) {
+                    if (instr.operand < 0 || static_cast<size_t>(instr.operand) > program.code.size()) {
+                        throw LpcRuntimeError("JumpIfFalse: bad target");
+                    }
+                    ip = static_cast<size_t>(instr.operand);
+                } else {
+                    ++ip;
+                }
+                break;
+            }
+
+            case OpCode::PushCatchFrame: {
+                if (instr.operand < 0 || static_cast<size_t>(instr.operand) > program.code.size()) {
+                    throw LpcRuntimeError("PushCatchFrame: bad resume target");
+                }
+                catchFrames.push_back(CatchFrame{
+                    static_cast<size_t>(instr.operand), localStack.size()});
+                ++ip;
+                break;
+            }
+
+            case OpCode::PopCatchFrame: {
+                // Only reached on normal completion of the guarded
+                // region -- see this opcode's own Bytecode.hpp comment.
+                // CodeGen always emits a matching PushCatchFrame before
+                // any PopCatchFrame, so an empty stack here would be a
+                // codegen bug, not a real runtime condition to recover
+                // from.
+                if (catchFrames.empty()) {
+                    throw LpcRuntimeError("PopCatchFrame: no active catch frame");
+                }
+                catchFrames.pop_back();
+                localStack.emplace_back(Value(static_cast<int64_t>(0)));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Add: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("Add: stack underflow");
+                }
+                Value rhs = localStack.back(); localStack.pop_back();
+                Value lhs = localStack.back(); localStack.pop_back();
+
+                if (std::holds_alternative<std::string>(lhs.data) &&
+                    std::holds_alternative<std::string>(rhs.data)) {
+                    localStack.emplace_back(
+                        Value(std::get<std::string>(lhs.data) + std::get<std::string>(rhs.data)));
+                } else if (std::holds_alternative<std::string>(lhs.data) &&
+                           (std::holds_alternative<int64_t>(rhs.data) ||
+                            std::holds_alternative<double>(rhs.data) ||
+                            std::holds_alternative<std::monostate>(rhs.data))) {
+                    // "string" + int/float -- confirmed against real
+                    // interpret.c's F_ADD (case T_STRING's own nested
+                    // T_NUMBER/T_REAL branches): the number is formatted
+                    // as text ("%ld"/"%f") and appended, not a type
+                    // error. Found live: daemon/terminal.c's own ESC(p)
+                    // macro (`sprintf("%c"+(p), 27)`) is called with a
+                    // bare int argument in several of its own table
+                    // entries (ESC(7), ESC(8)), building a format string
+                    // by string+int concatenation exactly like this.
+                    // monostate accepted here too, formatting as "0" --
+                    // the same missing-mapping-key value asArithmeticOperand
+                    // already treats as a real 0 for numeric +/-/*, so a
+                    // string+monostate concatenation must agree rather
+                    // than throw. Found live: std/money.c's own
+                    // query_money(), "return money[str];", called before
+                    // any currency has ever been added to a fresh
+                    // character's money mapping -- std/user.c's own
+                    // setup() logs "... + query_money(\"platinum\") + \" pl,
+                    // \" + ...".
+                    localStack.emplace_back(Value(
+                        std::get<std::string>(lhs.data) + formatNumberForConcat(rhs)));
+                } else if ((std::holds_alternative<int64_t>(lhs.data) ||
+                            std::holds_alternative<double>(lhs.data) ||
+                            std::holds_alternative<std::monostate>(lhs.data)) &&
+                           std::holds_alternative<std::string>(rhs.data)) {
+                    // int/float + "string" -- the symmetric case (same
+                    // interpret.c F_ADD, case T_NUMBER/T_REAL's own
+                    // nested T_STRING branch): the number is formatted
+                    // and prepended.
+                    localStack.emplace_back(Value(
+                        formatNumberForConcat(lhs) + std::get<std::string>(rhs.data)));
+                } else if (std::holds_alternative<std::shared_ptr<LpcObject>>(lhs.data) &&
+                           std::holds_alternative<std::string>(rhs.data)) {
+                    // object + "string" -- interpret.c's F_ADD, case
+                    // T_STRING's own T_OBJECT branch: the object's own
+                    // filename (real obname, "/"-prefixed) is prepended.
+                    // This driver's LpcObject::filename() already stores
+                    // the leading slash (see file_name() efun's own
+                    // comment), so no extra "/" is added here.
+                    auto ob = std::get<std::shared_ptr<LpcObject>>(lhs.data);
+                    localStack.emplace_back(Value(
+                        (ob ? ob->filename() : std::string()) + std::get<std::string>(rhs.data)));
+                } else if (std::holds_alternative<std::string>(lhs.data) &&
+                           std::holds_alternative<std::shared_ptr<LpcObject>>(rhs.data)) {
+                    // "string" + object -- interpret.c's F_ADD, case
+                    // T_OBJECT's own T_STRING branch: the object's own
+                    // filename is appended.
+                    auto ob = std::get<std::shared_ptr<LpcObject>>(rhs.data);
+                    localStack.emplace_back(Value(
+                        std::get<std::string>(lhs.data) + (ob ? ob->filename() : std::string())));
+                } else if (std::holds_alternative<std::shared_ptr<Array>>(lhs.data) &&
+                           std::holds_alternative<std::shared_ptr<Array>>(rhs.data)) {
+                    auto leftArr = std::get<std::shared_ptr<Array>>(lhs.data);
+                    auto rightArr = std::get<std::shared_ptr<Array>>(rhs.data);
+                    auto result = std::make_shared<Array>();
+                    if (leftArr) {
+                        result->items.insert(result->items.end(), leftArr->items.begin(), leftArr->items.end());
+                    }
+                    if (rightArr) {
+                        result->items.insert(result->items.end(), rightArr->items.begin(), rightArr->items.end());
+                    }
+                    localStack.emplace_back(Value(result));
+                } else if (double lv, rv; asArithmeticOperand(lhs, lv) && asArithmeticOperand(rhs, rv)) {
+                    bool eitherDouble = std::holds_alternative<double>(lhs.data) ||
+                                        std::holds_alternative<double>(rhs.data);
+                    if (eitherDouble) {
+                        localStack.emplace_back(Value(lv + rv));
+                    } else {
+                        localStack.emplace_back(Value(static_cast<int64_t>(lv + rv)));
+                    }
+                } else if (std::holds_alternative<std::shared_ptr<Mapping>>(lhs.data) &&
+                           std::holds_alternative<std::shared_ptr<Mapping>>(rhs.data)) {
+                    // real LPC "m1 + m2": union of both mappings, keys
+                    // from m2 winning on conflict (grammar.y/mapping.c's
+                    // own add_mapping() semantics -- confirmed by
+                    // reference source, matches every real LPC driver's
+                    // documented "+" on two mappings).
+                    auto leftMap = std::get<std::shared_ptr<Mapping>>(lhs.data);
+                    auto rightMap = std::get<std::shared_ptr<Mapping>>(rhs.data);
+                    auto result = std::make_shared<Mapping>();
+                    if (leftMap) result->entries = leftMap->entries;
+                    if (rightMap) {
+                        for (const auto& entry : rightMap->entries) {
+                            bool replaced = false;
+                            for (auto& existing : result->entries) {
+                                if (valuesEqual(existing.first, entry.first)) {
+                                    existing.second = entry.second;
+                                    replaced = true;
+                                    break;
+                                }
+                            }
+                            if (!replaced) result->entries.push_back(entry);
+                        }
+                    }
+                    localStack.emplace_back(Value(result));
+                } else {
+                    throw LpcRuntimeError(
+                        "Add: unsupported operand types (lhs kind " +
+                        std::to_string(lhs.data.index()) + ", rhs kind " +
+                        std::to_string(rhs.data.index()) + ")");
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::MakeArray: {
+                int argc = instr.argCount;
+                if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
+                    throw LpcRuntimeError("MakeArray: bad arg count");
+                }
+                auto arr = std::make_shared<Array>();
+                arr->items.assign(localStack.end() - argc, localStack.end());
+                localStack.erase(localStack.end() - argc, localStack.end());
+                localStack.emplace_back(Value(arr));
+                ++ip;
+                break;
+            }
+
+            case OpCode::MakeMapping: {
+                int entryCount = instr.argCount;
+                if (entryCount < 0 ||
+                    static_cast<size_t>(entryCount) * 2 > localStack.size()) {
+                    throw LpcRuntimeError("MakeMapping: bad arg count");
+                }
+                size_t total = static_cast<size_t>(entryCount) * 2;
+                size_t base = localStack.size() - total;
+                auto map = std::make_shared<Mapping>();
+                for (int i = 0; i < entryCount; ++i) {
+                    Value key = localStack[base + static_cast<size_t>(i) * 2];
+                    Value value = localStack[base + static_cast<size_t>(i) * 2 + 1];
+                    map->entries.emplace_back(std::move(key), std::move(value));
+                }
+                localStack.erase(localStack.end() - static_cast<long>(total), localStack.end());
+                localStack.emplace_back(Value(map));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Index: {
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("Index: stack underflow");
+                }
+                Value indexVal = localStack.back(); localStack.pop_back();
+                Value targetVal = localStack.back(); localStack.pop_back();
+                // See CodeGen.cpp's own comment: argCount is repurposed
+                // as a "from the end" flags bitmask for this opcode,
+                // bit 0 for the single index here.
+                bool indexFromEnd = (instr.argCount & 0x1) != 0;
+
+                if (auto* arr = std::get_if<std::shared_ptr<Array>>(&targetVal.data)) {
+                    if (!*arr) {
+                        throw LpcRuntimeError("Index: target array is null");
+                    }
+                    if (!std::holds_alternative<int64_t>(indexVal.data)) {
+                        throw LpcRuntimeError("Index: array index must be an integer");
+                    }
+                    int64_t i = std::get<int64_t>(indexVal.data);
+                    // real eoperators.c's f_index()/reverse indexing:
+                    // "<N" means index (length - N), computed against
+                    // the target's own runtime length.
+                    if (indexFromEnd) i = static_cast<int64_t>((*arr)->items.size()) - i;
+                    if (i < 0 || static_cast<size_t>(i) >= (*arr)->items.size()) {
+                        throw LpcRuntimeError("Index: array index out of bounds");
+                    }
+                    coerceIfDestructed((*arr)->items[static_cast<size_t>(i)]);
+                    localStack.push_back((*arr)->items[static_cast<size_t>(i)]);
+                } else if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&targetVal.data)) {
+                    if (!*map) {
+                        throw LpcRuntimeError("Index: target mapping is null");
+                    }
+                    bool hit = false;
+                    Value found;
+                    for (auto& entry : (*map)->entries) {
+                        if (valuesEqual(entry.first, indexVal)) {
+                            coerceIfDestructed(entry.second);
+                            found = entry.second;
+                            hit = true;
+                            break;
+                        }
+                    }
+                    localStack.push_back(hit ? found : Value{});
+                } else if (auto* str = std::get_if<std::string>(&targetVal.data)) {
+                    if (!std::holds_alternative<int64_t>(indexVal.data)) {
+                        throw LpcRuntimeError("Index: string index must be an integer");
+                    }
+                    int64_t i = std::get<int64_t>(indexVal.data);
+                    if (indexFromEnd) i = static_cast<int64_t>(str->size()) - i;
+                    if (i < 0 || static_cast<size_t>(i) >= str->size()) {
+                        throw LpcRuntimeError("Index: string index out of bounds");
+                    }
+                    unsigned char ch = static_cast<unsigned char>((*str)[static_cast<size_t>(i)]);
+                    localStack.push_back(Value(static_cast<int64_t>(ch)));
+                } else {
+                    throw LpcRuntimeError("Index: target is not an array, mapping, or string");
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::IndexAssign: {
+                if (localStack.size() < 3) {
+                    throw LpcRuntimeError("IndexAssign: stack underflow");
+                }
+                Value value = localStack.back(); localStack.pop_back();
+                Value indexVal = localStack.back(); localStack.pop_back();
+                Value targetVal = localStack.back(); localStack.pop_back();
+
+                if (auto* arr = std::get_if<std::shared_ptr<Array>>(&targetVal.data)) {
+                    if (!*arr) {
+                        throw LpcRuntimeError("IndexAssign: target array is null");
+                    }
+                    if (!std::holds_alternative<int64_t>(indexVal.data)) {
+                        throw LpcRuntimeError("IndexAssign: array index must be an integer");
+                    }
+                    int64_t i = std::get<int64_t>(indexVal.data);
+                    if (i < 0 || static_cast<size_t>(i) >= (*arr)->items.size()) {
+                        throw LpcRuntimeError("IndexAssign: array index out of bounds");
+                    }
+                    (*arr)->items[static_cast<size_t>(i)] = value;
+                } else if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&targetVal.data)) {
+                    if (!*map) {
+                        throw LpcRuntimeError("IndexAssign: target mapping is null");
+                    }
+                    bool found = false;
+                    for (auto& entry : (*map)->entries) {
+                        if (valuesEqual(entry.first, indexVal)) {
+                            entry.second = value;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        (*map)->entries.emplace_back(indexVal, value);
+                    }
+                } else {
+                    throw LpcRuntimeError("IndexAssign: target is not an array or mapping");
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::RangeIndex: {
+                if (localStack.size() < 3) {
+                    throw LpcRuntimeError("RangeIndex: stack underflow");
+                }
+                Value endVal = localStack.back(); localStack.pop_back();
+                Value startVal = localStack.back(); localStack.pop_back();
+                Value targetVal = localStack.back(); localStack.pop_back();
+
+                if (!std::holds_alternative<int64_t>(startVal.data)) {
+                    throw LpcRuntimeError("RangeIndex: start index must be an integer");
+                }
+                if (!std::holds_alternative<int64_t>(endVal.data)) {
+                    throw LpcRuntimeError("RangeIndex: end index must be an integer");
+                }
+                int64_t rawStart = std::get<int64_t>(startVal.data);
+                int64_t rawEnd = std::get<int64_t>(endVal.data);
+                // See CodeGen.cpp's own comment: argCount is repurposed
+                // as a "from the end" flags bitmask for this opcode,
+                // bit 0 for the start bound, bit 1 for the end bound.
+                bool startFromEnd = (instr.argCount & 0x1) != 0;
+                bool endFromEnd = (instr.argCount & 0x2) != 0;
+
+                // A literal negative start with no "<" prefix is still
+                // rejected exactly as before "from the end" indexing
+                // existed (this driver's own pre-existing behavior, not
+                // real modern FluffOS's -- real eoperators.c's
+                // OLD_RANGE_BEHAVIOR-gated auto-wrap is deprecated
+                // there too, "use arr[x..<y]" instead). Only a start
+                // that is negative *after* resolving "<N" against the
+                // target's own length clamps to 0 instead of throwing
+                // (real eoperators.c: "if (from < 0) from = 0;") -- a
+                // legitimate outcome for "<N" when N is at least the
+                // target's own length, not a caller mistake the way a
+                // bare negative literal is.
+                if (!startFromEnd && rawStart < 0) {
+                    throw LpcRuntimeError("RangeIndex: start index must be non-negative");
+                }
+
+                // real eoperators.c's f_range(): "if (code & 0x10) from
+                // = len - from;" / "if (code & 0x01) to = len - to;",
+                // each resolved against the target's own runtime length.
+                auto resolveBounds = [&](int64_t len) {
+                    int64_t start = startFromEnd ? (len - rawStart) : rawStart;
+                    int64_t end = endFromEnd ? (len - rawEnd) : rawEnd;
+                    if (start < 0) start = 0;
+                    return std::pair<int64_t, int64_t>(start, end);
+                };
+
+                if (auto* str = std::get_if<std::string>(&targetVal.data)) {
+                    int64_t len = static_cast<int64_t>(str->size());
+                    auto [start, end] = resolveBounds(len);
+                    int64_t clampedEnd = std::min(end, len - 1);
+                    if (start > clampedEnd) {
+                        localStack.push_back(Value(std::string()));
+                    } else {
+                        localStack.push_back(Value(str->substr(
+                            static_cast<size_t>(start),
+                            static_cast<size_t>(clampedEnd - start + 1))));
+                    }
+                } else if (auto* arr = std::get_if<std::shared_ptr<Array>>(&targetVal.data)) {
+                    if (!*arr) {
+                        throw LpcRuntimeError("RangeIndex: target array is null");
+                    }
+                    int64_t len = static_cast<int64_t>((*arr)->items.size());
+                    auto [start, end] = resolveBounds(len);
+                    int64_t clampedEnd = std::min(end, len - 1);
+                    auto result = std::make_shared<Array>();
+                    for (int64_t i = start; i <= clampedEnd; ++i) {
+                        result->items.push_back((*arr)->items[static_cast<size_t>(i)]);
+                    }
+                    localStack.push_back(Value(result));
+                } else {
+                    throw LpcRuntimeError("RangeIndex: target is not an array or string");
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::Call: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("Call: bad function name index");
+                }
+                const std::string& funcName = program.stringPool[instr.operand];
+
+                int argc = instr.argCount;
+                if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
+                    throw LpcRuntimeError("Call: bad arg count for " + funcName);
+                }
+                std::vector<Value> callArgs(localStack.end() - argc, localStack.end());
+                localStack.erase(localStack.end() - argc, localStack.end());
+
+                // A bare (unqualified) call always resolves against
+                // obj->program() -- the object's own top-level, most-
+                // derived program -- never against `program` (whichever
+                // file's own bytecode happens to be currently executing).
+                // This matches real LPC's actual compile-time model, not
+                // C++-style non-virtual lexical scoping: FluffOS's own
+                // compiler.c define_new_function() flattens an object's
+                // entire inherit tree into ONE shared function table, and
+                // when a more-derived file redefines a name an ancestor
+                // already provided, that redefinition "is... considered
+                // to be THE new definition" for the whole object -- every
+                // unqualified call to that name resolves through the same
+                // table and reaches the override, including calls written
+                // inside the ancestor's own source. This is the standard
+                // Nightmare/LPC idiom of an ancestor defining a
+                // placeholder stub (e.g. std/user/nmsh.c's own
+                // "query_name() { return 0; }", one of several such
+                // stubs) that a real inheriting file (std/user.c) is
+                // meant to override -- confirmed live broken the other
+                // way: nmsh.c's own reset_prompt() calling query_name()
+                // was reaching nmsh.c's own stub instead of std/user.c's
+                // real override. A previous version of this opcode
+                // searched `program`'s own lexical scope first and only
+                // fell back to obj->program() when nothing was found at
+                // all (see std/user/nmsh.c's process_input() calling
+                // "query_client", a name nmsh.c neither defines nor
+                // inherits, only std/user.c does); searching
+                // obj->program() first still finds that case too, since
+                // obj->program()'s own depth-first walk necessarily
+                // covers every program in its inherit tree, `program`
+                // (whatever is currently executing) always among them --
+                // so a single top-level-first search is a strict
+                // superset of the old two-step logic, not just a
+                // different tradeoff.
+                //
+                // OpCode::CallParent ("::name()"/"qualifier::name()") is
+                // deliberately untouched: it is the explicit escape hatch
+                // for reaching a specific ancestor's own shadowed
+                // definition instead of the override, and must keep
+                // searching only the *inherited* programs, skipping
+                // `program` itself, exactly as it already does.
+                FunctionLookupResult found = findFunctionInChain(obj->program(), funcName);
+                if (found.program) {
+                    Value result = run(*found.program, *found.fn, std::move(callArgs), obj);
+                    localStack.push_back(std::move(result));
+                    ++ip;
+                    break;
+                }
+
+                // Tier 3: the configured simul_efun object, matching real
+                // FluffOS's own resolution order (local/inherited, then
+                // simul_efun, then the real efun table -- see lex.c's
+                // F_SIMUL_EFUN handling and function.c's
+                // call_simul_efun()). Unlike the local/inherited case
+                // above, this runs against the simul_efun object's own
+                // variables() (via "simulEfun" as the obj argument, not
+                // the caller's obj) -- a simul_efun function's object
+                // variables belong to the simul_efun object itself, this
+                // is not the same "shared flat variable space" situation
+                // inherit deliberately sets up.
+                auto simulEfun = objects_.simulEfunObject();
+                if (simulEfun) {
+                    FunctionLookupResult simulFound =
+                        findFunctionInChain(simulEfun->program(), funcName);
+                    if (simulFound.program) {
+                        Value result = run(*simulFound.program, *simulFound.fn,
+                                            std::move(callArgs), simulEfun);
+                        localStack.push_back(std::move(result));
+                        ++ip;
+                        break;
+                    }
+                }
+
+                if (EfunTable::instance().exists(funcName)) {
+                    Value result = EfunTable::instance().call(funcName, *this, callArgs);
+                    localStack.push_back(std::move(result));
+                } else {
+                    throw LpcRuntimeError("undefined function or efun: " + funcName);
+                }
+                ++ip;
+                break;
+            }
+
+            case OpCode::CallParent: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("CallParent: bad function name index");
+                }
+                const std::string& funcName = program.stringPool[instr.operand];
+
+                if (ip + 1 >= program.code.size() ||
+                    program.code[ip + 1].op != OpCode::CallParentQualifierSlot) {
+                    throw LpcRuntimeError("CallParent: missing qualifier data instruction");
+                }
+                int32_t qualifierIdx = program.code[ip + 1].operand;
+                std::string qualifierStorage;
+                const std::string* qualifier = nullptr;
+                if (qualifierIdx >= 0) {
+                    if (static_cast<size_t>(qualifierIdx) >= program.stringPool.size()) {
+                        throw LpcRuntimeError("CallParent: bad qualifier string index");
+                    }
+                    qualifierStorage = program.stringPool[qualifierIdx];
+                    qualifier = &qualifierStorage;
+                }
+
+                int argc = instr.argCount;
+                if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
+                    throw LpcRuntimeError("CallParent: bad arg count for " + funcName);
+                }
+                std::vector<Value> callArgs(localStack.end() - argc, localStack.end());
+                localStack.erase(localStack.end() - argc, localStack.end());
+
+                FunctionLookupResult found = findParentFunction(program, funcName, qualifier);
+                if (!found.program) {
+                    throw LpcRuntimeError(
+                        (qualifier ? (*qualifier + "::") : std::string("::")) + funcName +
+                        "(): undefined function in inherited program");
+                }
+                Value result = run(*found.program, *found.fn, std::move(callArgs), obj);
+                localStack.push_back(std::move(result));
+                ip += 2; // past CallParent and its CallParentQualifierSlot data instruction
+                break;
+            }
+
+            case OpCode::PushClosure: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("PushClosure: bad function name index");
+                }
+                const std::string& funcName = program.stringPool[instr.operand];
+
+                int argc = instr.argCount;
+                if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
+                    throw LpcRuntimeError("PushClosure: bad bound-arg count for " + funcName);
+                }
+                auto closure = std::make_shared<Closure>();
+                closure->owner = obj; // weak_ptr from shared_ptr, real current_object at bind time
+                closure->functionName = funcName;
+                closure->boundArgs.assign(localStack.end() - argc, localStack.end());
+                localStack.erase(localStack.end() - argc, localStack.end());
+
+                localStack.push_back(Value(closure));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Sscanf: {
+                int n = instr.operand;
+                if (n < 0) {
+                    throw LpcRuntimeError("Sscanf: bad var count");
+                }
+                if (localStack.size() < 2) {
+                    throw LpcRuntimeError("Sscanf: stack underflow");
+                }
+                Value formatVal = localStack.back(); localStack.pop_back();
+                Value targetVal = localStack.back(); localStack.pop_back();
+
+                if (!std::holds_alternative<std::string>(targetVal.data) ||
+                    !std::holds_alternative<std::string>(formatVal.data)) {
+                    throw LpcRuntimeError("sscanf: first two arguments must be strings");
+                }
+                if (ip + 1 + static_cast<size_t>(n) > program.code.size()) {
+                    throw LpcRuntimeError("Sscanf: truncated var-slot table");
+                }
+
+                SscanfOutcome outcome = runSscanf(std::get<std::string>(targetVal.data),
+                                                   std::get<std::string>(formatVal.data),
+                                                   static_cast<size_t>(n));
+
+                for (size_t i = 0; i < outcome.assigned.size(); ++i) {
+                    const Instruction& slotSpec = program.code[ip + 1 + i];
+                    bool isObjectVar = slotSpec.argCount != 0;
+                    int32_t slot = slotSpec.operand;
+                    if (isObjectVar) {
+                        auto& vars = obj->variables();
+                        if (slot < 0 || static_cast<size_t>(slot) >= vars.size()) {
+                            throw LpcRuntimeError("Sscanf: bad object variable slot index");
+                        }
+                        vars[static_cast<size_t>(slot)] = outcome.assigned[i];
+                    } else {
+                        if (slot < 0 || static_cast<size_t>(slot) >= locals.size()) {
+                            throw LpcRuntimeError("Sscanf: bad local slot index");
+                        }
+                        locals[static_cast<size_t>(slot)] = outcome.assigned[i];
+                    }
+                }
+
+                localStack.push_back(Value(outcome.matchCount));
+                ip += 1 + static_cast<size_t>(n);
+                break;
+            }
+
+            case OpCode::CallEfun: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("CallEfun: bad efun name index");
+                }
+                const std::string& efunName = program.stringPool[instr.operand];
+
+                int argc = instr.argCount;
+                if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
+                    throw LpcRuntimeError("CallEfun: bad arg count for " + efunName);
+                }
+
+                std::vector<Value> efunArgs(
+                    localStack.end() - argc, localStack.end());
+                localStack.erase(localStack.end() - argc, localStack.end());
+
+                Value result = EfunTable::instance().call(efunName, *this, efunArgs);
+                localStack.push_back(std::move(result));
+                ++ip;
+                break;
+            }
+
+            case OpCode::Pop: {
+                if (!localStack.empty()) localStack.pop_back();
+                ++ip;
+                break;
+            }
+
+            case OpCode::Dup: {
+                if (localStack.empty()) {
+                    throw LpcRuntimeError("Dup: stack underflow");
+                }
+                localStack.push_back(localStack.back());
+                ++ip;
+                break;
+            }
+
+            case OpCode::Return: {
+                if (localStack.empty()) return Value{};
+                return localStack.back();
+            }
+
+            case OpCode::Halt:
+                return Value{};
+
+            default:
+                throw NotImplementedError(
+                    "VM::run opcode " + std::to_string(static_cast<int>(instr.op)));
+        }
+      } catch (const LpcThrownValue& tv) {
+        // A real LPC throw(value) -- caught separately from the plain
+        // LpcRuntimeError case just below (this handler must come first;
+        // LpcThrownValue is-a LpcRuntimeError) specifically so the
+        // no-active-catch-frame path never flattens it into a rewrapped
+        // string LpcRuntimeError the way an ordinary runtime error is
+        // just below. Real throw(value) must reach the *nearest*
+        // catch(), anywhere up the call stack, with the exact value
+        // still intact -- rewrapping here would silently turn
+        // "throw(({\"ERR\", data}))" into a plain string by the time it
+        // reached a catch() one function call further up than this
+        // one's own (empty) catchFrames.
+        if (catchFrames.empty()) {
+            throw;
+        }
+
+        std::cerr << "[catch] " << obj->filename() << "::" << fn.name
+                   << "(): " << tv.what() << "\n";
+
+        CatchFrame frame = catchFrames.back();
+        catchFrames.pop_back();
+        localStack.resize(frame.stackDepth);
+        localStack.push_back(tv.value);
+        ip = frame.resumeIp;
+      } catch (const LpcRuntimeError& e) {
+        // No active catch() anywhere in this call: behave exactly as
+        // before catch() existed, propagate to whatever wraps this
+        // run() call (a caller's own active catch frame if this was a
+        // nested call, or the outermost ObjectManager/Server.cpp safety
+        // net if not -- see run()'s own comment above catchFrames).
+        // Tagging the file and function here (once, at the innermost
+        // frame that had no catch() of its own to absorb it) matches
+        // this driver's existing convention of naming the file in every
+        // other [object]-prefixed diagnostic -- without it, an uncaught
+        // error several calls deep only ever reports its own generic
+        // message, not where it actually happened.
+        if (catchFrames.empty()) {
+            throw LpcRuntimeError(obj->filename() + "::" + fn.name + "(): " + e.what());
+        }
+
+        // Log every trapped error to stderr before resuming, unconditionally.
+        // Confirmed against real FluffOS's own default build: simulate.c's
+        // error_handler() logs a caught error too (debug_message_with_location()
+        // + dump_trace()) whenever LOG_CATCHES is defined -- on by default in
+        // every shipped local_options.*, including this exact mudlib's own
+        // local_options.nm3, whose comment states the reason plainly: "newer
+        // libs use catch() a lot, and it's confusing if the errors don't show
+        // up in the logs." Without this, a catch() that is working exactly as
+        // intended silently hides its own root cause, which is what forced
+        // manual instrumentation to root-cause the do_alias() bug earlier this
+        // project. No line number: this driver discards line numbers after
+        // compilation (only the parser's own compile-time errors carry them),
+        // so object filename + function name + message is what's genuinely
+        // available, matching what [object]/[net] diagnostics already report
+        // elsewhere. Deliberately not also calling master()->error_handler()
+        // (real FluffOS's MUDLIB_ERROR_HANDLER path, mapping to the mapping/
+        // caught-flag apply this mudlib's own master.c already implements at
+        // secure/daemon/master.c:423) -- that is a materially larger feature,
+        // flagged as a follow-up rather than implemented speculatively here.
+        std::cerr << "[catch] " << obj->filename() << "::" << fn.name
+                   << "(): " << e.what() << "\n";
+
+        // Unwind to the innermost still-active catch() (LIFO, matching
+        // real FluffOS's own nested do_catch() call stack -- see
+        // catchFrames' own comment): discard whatever the guarded
+        // expression had partially pushed (real LPC's own stack-pointer
+        // restoration on longjmp, confirmed against interpret.c's
+        // do_catch()/restore_context()), push the error message as
+        // catch(expr)'s result, then resume right after the whole catch
+        // expression, exactly where PopCatchFrame's own success path
+        // would also have landed.
+        CatchFrame frame = catchFrames.back();
+        catchFrames.pop_back();
+        localStack.resize(frame.stackDepth);
+        localStack.emplace_back(Value(std::string(e.what())));
+        ip = frame.resumeIp;
+      }
+    }
+
+    return Value{};
+}
+
+} // namespace amlp

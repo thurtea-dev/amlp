@@ -1,0 +1,131 @@
+#pragma once
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <variant>
+#include <vector>
+#include "amlp/core/Errors.hpp"
+
+namespace amlp {
+
+class LpcObject;
+struct Array;
+struct Mapping;
+struct Closure;
+
+using ValueVariant = std::variant<
+    std::monostate,
+    int64_t,
+    double,
+    std::string,
+    std::shared_ptr<LpcObject>,
+    std::shared_ptr<Array>,
+    std::shared_ptr<Mapping>,
+    std::shared_ptr<Closure>
+>;
+
+struct Value {
+    ValueVariant data;
+
+    Value() = default;
+    template <typename T>
+    Value(T v) : data(std::move(v)) {}
+
+    bool isVoid() const { return std::holds_alternative<std::monostate>(data); }
+};
+
+bool isTruthy(const Value& v);
+bool valuesEqual(const Value& a, const Value& b);
+
+// throw(mixed) -- real FluffOS's own F_THROW (efuns_main.c's f_throw():
+// stores the argument into the single global "value to hand back to the
+// nearest catch()" (catch_value, interpret.h), then unwinds via the same
+// longjmp a runtime error already uses; func_spec.c: "void throw(mixed);"
+// -- a real efun, not special grammar the way catch() is). This driver's
+// catch() is already implemented as real C++ try/catch bracketing rather
+// than setjmp/longjmp (see VM::run()'s own PushCatchFrame/PopCatchFrame
+// handling), so throw()'s "carry an arbitrary value to the nearest
+// catch()" role is ported the same way: a dedicated exception type
+// carrying the real Value, deliberately kept as a subclass of
+// LpcRuntimeError rather than changing LpcRuntimeError's own payload
+// type -- every existing "throw LpcRuntimeError(...)" call site across
+// the compiler/VM/efun table, and every .what() call site that prints
+// one, keeps working completely unchanged; only VM::run()'s own
+// catch-frame handler needs to tell the two apart (see its own comment).
+class LpcThrownValue : public LpcRuntimeError {
+public:
+    explicit LpcThrownValue(Value v)
+        : LpcRuntimeError(describeForWhat(v)), value(std::move(v)) {}
+
+    Value value;
+
+private:
+    // Only used if this ever reaches an uncaught-error diagnostic path
+    // (the [object]/[net]-prefixed .what() printers) instead of a
+    // catch() -- real LPC throw() calls overwhelmingly carry a plain
+    // string, matching an ordinary error() message; a non-string thrown
+    // value gets a generic placeholder here rather than a full
+    // generic Value formatter nothing else in this driver has either.
+    static std::string describeForWhat(const Value& v) {
+        if (auto* s = std::get_if<std::string>(&v.data)) return *s;
+        return "thrown non-string value";
+    }
+};
+
+struct Array {
+    std::vector<Value> items;
+};
+
+struct Mapping {
+    std::vector<std::pair<Value, Value>> entries;
+};
+
+// A real LPC "function" value -- the "(: name, bound_args... :)" closure
+// literal (real FluffOS's funptr_t, see function.h: funptr_hdr_t's
+// "owner"/"args" fields plus a type-specific union for FP_EFUN/FP_LOCAL/
+// FP_SIMUL/FP_FUNCTIONAL). This driver only implements the bare-
+// identifier-name form real usage across this mudlib actually needs
+// (confirmed by grepping every "(:" call site, not guessed): an efun,
+// local function, or simul_efun referenced by its bare name, with zero
+// or more already-bound arguments. Real FluffOS resolves which of
+// those four kinds a name is *at construction time* (baked into the
+// funptr_t's own type tag via lex.c's identifier classification); this
+// driver instead stores just the bare name and re-resolves it lazily at
+// *call* time via the same tiered lookup (local/inherited -> simul_efun
+// -> efun table) OpCode::Call already uses. This is a deliberate
+// simplification, not an oversight: every closure actually reachable in
+// this mudlib is constructed and called within the same short-lived
+// scope (never persisted across a redefinition or module reload), so
+// the two approaches are behaviorally identical for anything this
+// driver runs -- see VM::callClosure()'s own comment. The general
+// "(: comma_expr :)" inline-lambda form -- which covers what looks
+// syntactically like an object-bound closure ("(: obj, \"func\" :)",
+// confirmed via grammar.y to actually be a plain comma expression, not
+// a dedicated call form -- see Ast.hpp's InlineLambdaExpr) and a bare
+// string-constant closure ("(: \"literal\" :)") -- is also implemented,
+// but not through this struct's functionName field: CodeGen compiles
+// its body to its own synthesized FunctionEntry and stores that
+// synthesized name here instead (see CodeGen.cpp's PendingLambda). Only
+// $1/$(name)-placeholder inline lambda parameters remain unimplemented:
+// nothing on this driver's current boot/login/account-creation path
+// uses them (see STATUS.md's closure recon notes for the full count).
+struct Closure {
+    // The object active when this closure literal was constructed
+    // (real funptr_hdr_t::owner, "current_object" at bind time).
+    // weak_ptr: a closure outliving its owner's destruction must fail
+    // at call time, not keep the object alive artificially, matching
+    // real call_function_pointer()'s own "Owner of function pointer is
+    // destructed" check.
+    std::weak_ptr<LpcObject> owner;
+    // The bare name written in the literal.
+    std::string functionName;
+    // Arguments already bound at construction time ("(: file_size, p
+    // :)"'s "p"). Placed *before* any additional call-time arguments
+    // when invoked -- confirmed against real FluffOS's own
+    // merge_arg_lists() (function.c): bound args are shifted in ahead
+    // of whatever is already on the stack from the call site, not
+    // appended after.
+    std::vector<Value> boundArgs;
+};
+
+} // namespace amlp

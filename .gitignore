@@ -1,24 +1,24 @@
-# Driver build tree (rebuild locally with cmake, never sync via git)
-driver/build/
-driver/build_debug/
+# Build tree (rebuild locally with cmake, never sync via git)
+build/
+build_debug/
 
-# Lil's own real, by-design runtime scratch file (driver/lil/command/
+# Lil's own real, by-design runtime scratch file (mudlib/command/
 # eval.c writes this on every "eval" command use, then relies on the
 # driver recompiling it fresh each time -- see ROADMAP.md's own
 # programCache_ invalidation row). Regenerated with arbitrary session
 # content any time eval is exercised, never meant to be tracked.
-driver/lil/tmp_eval_file.c
+mudlib/tmp_eval_file.c
 
 # Vendored FluffOS reference build tree artifacts (kept for citation only,
 # never compiled as part of this project's own build)
-driver/reference/fluffos-2.9-ds2.08/tmp/
-driver/reference/fluffos-2.9-ds2.08/obj/
-driver/reference/fluffos-2.9-ds2.08/driver
-driver/reference/fluffos-2.9-ds2.08/addr_server
-driver/reference/fluffos-2.9-ds2.08/portbind
-driver/reference/fluffos-2.9-ds2.08/edit_source
-driver/reference/fluffos-2.9-ds2.08/comptest
-driver/reference/fluffos-2.9-ds2.08/packages/packages.a
+reference/fluffos-2.9-ds2.08/tmp/
+reference/fluffos-2.9-ds2.08/obj/
+reference/fluffos-2.9-ds2.08/driver
+reference/fluffos-2.9-ds2.08/addr_server
+reference/fluffos-2.9-ds2.08/portbind
+reference/fluffos-2.9-ds2.08/edit_source
+reference/fluffos-2.9-ds2.08/comptest
+reference/fluffos-2.9-ds2.08/packages/packages.a
 
 # Python bytecode caches
 __pycache__/

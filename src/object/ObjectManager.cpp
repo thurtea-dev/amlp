@@ -1,0 +1,801 @@
+#include "amlp/object/ObjectManager.hpp"
+#include "amlp/object/LivingNameRegistry.hpp"
+#include "amlp/object/LiveObjectRegistry.hpp"
+#include "amlp/config/Config.hpp"
+#include "amlp/core/Errors.hpp"
+#include "amlp/compiler/Lexer.hpp"
+#include "amlp/compiler/Parser.hpp"
+#include "amlp/compiler/CodeGen.hpp"
+#include "amlp/vm/VM.hpp"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <cstdio>
+#include <cstdlib>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <algorithm>
+#include <vector>
+
+namespace amlp {
+
+namespace {
+
+struct PreprocessResult {
+    bool ok = false;
+    std::string output;
+    std::string errorOutput;
+};
+
+// FluffOS injects these into every compile itself (option_defs.c's
+// predefined-macro table), independent of anything the mudlib's own
+// headers define -- so real mudlib code freely uses them as bare
+// identifiers (e.g. secure/daemon/master.c's
+// "str+__SAVE_EXTENSION__") expecting the driver to have already
+// substituted them, the same way __FILE__/__LINE__ work in C. This
+// driver shells out to the system's real cpp instead of a bespoke
+// preprocessor, so the same effect is achieved by passing each one as a
+// "-D" flag. Values are copied verbatim from the FluffOS reference
+// driver's option_defs.c; entries with an empty value there are
+// feature-flags mudlib code checks with #ifdef, not values it expects to
+// read.
+struct PredefinedMacro { const char* name; const char* value; };
+constexpr PredefinedMacro kFluffosPredefinedMacros[] = {
+    {"__STRIP_BEFORE_PROCESS_INPUT__", ""},
+    {"__NO_LIGHT__", ""},
+    {"__CUSTOM_CRYPT__", ""},
+    {"__RECEIVE_SNOOP__", ""},
+    {"__ARGUMENTS_IN_TRACEBACK__", ""},
+    {"__NEXT_MALLOC_DEBUG__", ""},
+    {"__ARRAY_STATS__", ""},
+    {"__LOCALS_IN_TRACEBACK__", ""},
+    {"__SYSMALLOC__", ""},
+    {"__CFG_MAX_CALL_DEPTH__", "150"},
+    {"__SAVE_EXTENSION__", "\\\".o\\\""},
+    {"__LOG_CATCHES__", ""},
+    {"__NONINTERACTIVE_STDERR_WRITE__", ""},
+    {"__SMALL_STRING_SIZE__", "100"},
+    {"__CALLOUT_CYCLE_SIZE__", "32"},
+    {"__PACKAGE_MATH__", ""},
+    {"__PACKAGE_DEVELOP__", ""},
+    {"__SUPPRESS_ARGUMENT_WARNINGS__", ""},
+    {"__LARGEST_PRINTABLE_STRING__", "8192"},
+    {"__CFG_LIVING_HASH_SIZE__", "256"},
+    {"__CACHE_STATS__", ""},
+    {"__CONFIG_FILE_DIR__", "\\\"./\\\""},
+    {"__PARSE_DEBUG__", ""},
+    {"__TRAP_CRASHES__", ""},
+    {"__RESTRICTED_ED__", ""},
+    {"__STRING_STATS__", ""},
+    {"__CALLOUT_HANDLES__", ""},
+    {"__FLUFFOS__", ""},
+    {"__CFG_COMPILER_STACK_SIZE__", "600000"},
+    {"__LARGE_STRING_SIZE__", "1000"},
+    {"__HEARTBEAT_INTERVAL__", "1"},
+    {"__PACKAGE_MATRIX__", ""},
+    {"__PRIVS__", ""},
+    {"__COMMAND_BUF_SIZE__", "2000"},
+    {"__OLD_ED__", ""},
+    {"__PACKAGE_PARSER__", ""},
+    {"__THIS_PLAYER_IN_CALL_OUT__", ""},
+    {"__PACKAGE_CONTRIB__", ""},
+    {"__ALLOW_INHERIT_AFTER_GLOBAL_VARIABLES__", ""},
+    {"__CFG_MAX_LOCAL_VARIABLES__", "50"},
+    {"__MESSAGE_BUFFER_SIZE__", "4096"},
+    {"__NO_WIZARDS__", ""},
+    {"__SAVE_GZ_EXTENSION__", "\\\".o.gz\\\""},
+    {"__PACKAGE_SOCKETS__", ""},
+    {"__NUM_EXTERNAL_CMDS__", "100"},
+    {"__HEART_BEAT_CHUNK__", "32"},
+    {"__INTERACTIVE_CATCH_TELL__", ""},
+    {"__MAX_SAVE_SVALUE_DEPTH__", "100"},
+    {"__DEFAULT_PRAGMAS__", "0"},
+    {"__NO_ANSI__", ""},
+    {"__HAS_STATUS_TYPE__", ""},
+    {"__CFG_EVALUATOR_STACK_SIZE__", "3000"},
+    {"__PACKAGE_MUDLIB_STATS__", ""},
+    {"__WARN_TAB__", ""},
+    {"__ALLOW_INHERIT_AFTER_FUNCTION__", ""},
+    {"__APPLY_CACHE_BITS__", "11"},
+    {"__MUDLIB_ERROR_HANDLER__", ""},
+};
+
+// A second, smaller set of predefines FluffOS injects from lex.c's own
+// add_predefines() rather than option_defs.c's static table above --
+// still driver-injected the same way, but each one is computed at boot
+// (driver version string, build arch, etc) instead of being a fixed
+// per-build feature flag. Confirmed live: secure/SimulEfun/mud_info.c's
+// own "string mud_name() { return MUD_NAME; }" -- MUD_NAME (and
+// __PORT__, the other config-dependent one here) are handled separately
+// below since their value comes from this driver's own Config, not a
+// fixed literal.
+constexpr PredefinedMacro kFluffosRuntimePredefinedMacros[] = {
+    {"MUDOS", ""},
+    // No spaces in any of these three values (unlike real lex.c's own
+    // "FluffOS v2.9-ds2.08 for Linux." __VERSION__ string): the cpp
+    // invocation below is built as one unquoted shell command string via
+    // popen(), so an embedded space would get word-split into extra
+    // (nonexistent) input filenames -- "cpp: fatal error: too many input
+    // files" -- exactly like MUD_NAME below would if it were ever
+    // configured with a space in it. Not fixed at the quoting level
+    // here, just avoided in the one value this code controls.
+    {"__VERSION__", "\\\"2.9-ds2.08\\\""},
+    {"__ARCH__", "\\\"Linux\\\""},
+    {"__COMPILER__", "\\\"g++\\\""},
+    {"__OPTIMIZATION__", "\\\"-O2\\\""},
+    // sizeof(long) and the resulting max signed value on a 64-bit Linux
+    // build, matching real lex.c's own "sizeof(long)"/"(long)1<<63 - 1"
+    // computation rather than a value copied from someone else's build.
+    {"SIZEOFINT", "8"},
+    {"MAX_INT", "9223372036854775807"},
+    // HAS_ED / HAS_PRINTF / HAS_RUSAGE / HAS_DEBUG_LEVEL are deliberately
+    // not defined here: real lex.c only defines each one when the
+    // corresponding driver feature (the "ed" package, F_PRINTF, rusage
+    // reporting, debug levels) was actually compiled in, and none of
+    // those exist in this driver yet -- defining them would tell mudlib
+    // code a capability exists when calling it would just throw
+    // NotImplementedError.
+};
+
+// compiledFilename is the object being compiled's own normalized LPC
+// path (leading '/', no ".c" -- ObjectManager::compile()'s own
+// "filename", not the real on-disk path).
+std::string buildPredefinedMacroFlags(const Config& config, const std::string& compiledFilename) {
+    std::ostringstream flags;
+    for (const auto& macro : kFluffosPredefinedMacros) {
+        flags << " -D" << macro.name << "=" << macro.value;
+    }
+    for (const auto& macro : kFluffosRuntimePredefinedMacros) {
+        flags << " -D" << macro.name << "=" << macro.value;
+    }
+    flags << " -D__PORT__=" << config.port();
+    flags << " -DMUD_NAME=\\\"" << config.mudName() << "\\\"";
+
+    // __FILE__/__DIR__: real lex.c's own start_new_file() (confirmed
+    // directly, not guessed): "__FILE__" is "/" + current_file (the
+    // compiled object's own mudlib-relative path, WITH its ".c"
+    // extension -- confirmed against lil_0.3's own reference testsuite,
+    // single/tests/efuns/file_name.c's own "ASSERT(file_name() + \".c\"
+    // == __FILE__)"), and "__DIR__" is that same string truncated right
+    // after its own last '/', trailing slash kept. Explicitly defined
+    // here (a "-D" always overrides a same-named compiler built-in) since
+    // gcc's own cpp already predefines __FILE__ itself, to a value that
+    // is real but wrong for LPC purposes: this driver's own "# 1
+    // \"originalPath\"" line-marker rewrite (stageSourceForPreprocessing,
+    // needed so compile-error messages point at the real file) makes
+    // gcc's built-in __FILE__ resolve to that same real *host filesystem*
+    // absolute path, not the LPC-visible mudlib path any real mudlib
+    // code actually expects. gcc's cpp has no built-in __DIR__ at all (it
+    // is not a standard C macro), so without this it stays a bare,
+    // undefined identifier -- confirmed real and hard-failing, not
+    // theoretical: lil_0.3's own single/tests/efuns/shadow.c "new(__DIR__
+    // \"badshad\", 1)" could not compile at all (an undefined identifier
+    // directly followed by a string literal, with no operator between
+    // them for this driver's own already-working adjacent-string-literal
+    // concatenation, Parser.cpp's own parsePrimary(), to ever reach).
+    std::string lpcFile = compiledFilename + ".c";
+    std::string lpcDir = lpcFile.substr(0, lpcFile.find_last_of('/') + 1);
+    flags << " -D__FILE__=\\\"" << lpcFile << "\\\"";
+    flags << " -D__DIR__=\\\"" << lpcDir << "\\\"";
+    return flags.str();
+}
+
+// Real LPC/FluffOS resolves a quoted #include path that starts with '/'
+// against the mudlib root, the same convention as every other absolute
+// LPC path in this codebase (inherit "/path";, clone_object("/path"),
+// etc) -- confirmed live: secure/SimulEfun/SimulEfun.c #includes ~50
+// other files this way ("#include \"/secure/SimulEfun/identify.c\"").
+// A real system cpp has no concept of a mudlib root and treats a
+// leading '/' as the actual filesystem root, so without this rewrite it
+// fails outright ("No such file or directory"). This driver shells out
+// to a real cpp (see the module comment above runPreprocessor), so the
+// fix has to happen before cpp ever sees the source: rewrite each such
+// #include line to an actual absolute filesystem path by prepending the
+// mudlib root, here, on the raw source text.
+std::string rewriteAbsoluteIncludes(const std::string& source, const std::string& mudlibRoot) {
+    std::istringstream in(source);
+    std::ostringstream out;
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t hashPos = line.find_first_not_of(" \t");
+        if (hashPos != std::string::npos && line[hashPos] == '#') {
+            size_t incPos = line.find("include", hashPos + 1);
+            if (incPos != std::string::npos) {
+                size_t quotePos = line.find('"', incPos);
+                if (quotePos != std::string::npos && quotePos + 1 < line.size() &&
+                    line[quotePos + 1] == '/') {
+                    line.insert(quotePos + 1, mudlibRoot);
+                }
+            }
+        }
+        out << line << "\n";
+    }
+    return out.str();
+}
+
+struct StagedSource {
+    bool ok = false;
+    std::string tempPath;
+    std::string errorMessage;
+};
+
+// Writes the rewritten source (see rewriteAbsoluteIncludes()) to a fresh
+// temp file for cpp to actually read, so the on-disk mudlib source is
+// never touched. A synthetic "# 1 \"originalPath\"" line is prepended so
+// every line-marker cpp itself emits from here on still names the real
+// source file, not the temp path -- otherwise this driver's own
+// compile-error messages (and any manual line-marker unwinding) would
+// point at a throwaway /tmp file instead of the real one.
+//
+// globalIncludeFile (real FluffOS/MudOS's own "global include file"
+// runtime config option, ROADMAP row 0.14): when non-empty, an
+// "#include " line built from it is emitted first, ahead of the real
+// file's own content -- matching real lex.c's own start_new_file()
+// exactly: "if (*GLOBAL_INCLUDE_FILE) { ...; handle_include(gifile, 1);
+// } else refill_buffer();" runs before a single byte of the object's
+// own real source is read, for every compiled object, no exceptions.
+// The configured value is used verbatim, delimiters included (real
+// GLOBAL_INCLUDE_FILE already stores the raw config text with its own
+// leading '"'/'<' -- confirmed directly against handle_include()'s own
+// "delim = *name++ == '\"' ? '\"' : '>';", which derives the include
+// style from the value's own first character, not a separate flag), so
+// a driver.cfg entry of "global_include_file: <config.h>" or
+// "global_include_file: \"/some/header.h\"" both work exactly as
+// configured. The include line's own "# 1 \"originalPath\"" marker is
+// emitted *after* it, not before -- cpp's own line-tracking naturally
+// attributes anything the auto-included header itself does to that
+// header's own file, and once it returns, this second marker resets
+// numbering back to a clean line 1 for the real object's own content,
+// so a compile error inside the object itself still reports the exact
+// real line number, undisturbed by the extra line this injects ahead
+// of it. Also run through rewriteAbsoluteIncludes() (same as the real
+// file's own body just below) so an absolute-quoted-path form gets the
+// identical mudlib-root rewrite every other #include in this driver
+// already gets, rather than a second, divergent code path.
+StagedSource stageSourceForPreprocessing(const std::string& originalPath,
+                                          const std::string& mudlibRoot,
+                                          const std::string& globalIncludeFile) {
+    StagedSource result;
+
+    std::ifstream f(originalPath);
+    if (!f) {
+        result.errorMessage = "source file not found: " + originalPath;
+        return result;
+    }
+    std::ostringstream buf;
+    buf << f.rdbuf();
+    f.close();
+
+    std::string prefix;
+    if (!globalIncludeFile.empty()) {
+        prefix = rewriteAbsoluteIncludes("#include " + globalIncludeFile + "\n", mudlibRoot);
+    }
+
+    std::string rewritten = prefix + "# 1 \"" + originalPath + "\"\n" +
+        rewriteAbsoluteIncludes(buf.str(), mudlibRoot);
+
+    char tmpPathTemplate[] = "/tmp/amlp_src_XXXXXX";
+    int fd = mkstemp(tmpPathTemplate);
+    if (fd == -1) {
+        result.errorMessage = "failed to create temp file for staged source";
+        return result;
+    }
+    std::string tmpPath = tmpPathTemplate;
+
+    ssize_t written = write(fd, rewritten.data(), rewritten.size());
+    close(fd);
+    if (written < 0 || static_cast<size_t>(written) != rewritten.size()) {
+        std::remove(tmpPath.c_str());
+        result.errorMessage = "failed to write staged source to temp file";
+        return result;
+    }
+
+    result.ok = true;
+    result.tempPath = tmpPath;
+    return result;
+}
+
+// cpp emits line marker directives like `# 1 "file.h"`; the Lexer has no
+// concept of these and they are not real LPC syntax, so drop any line
+// whose first non-whitespace character is '#'.
+std::string stripLineMarkers(const std::string& text) {
+    std::istringstream in(text);
+    std::ostringstream out;
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t i = line.find_first_not_of(" \t");
+        if (i != std::string::npos && line[i] == '#') continue;
+        out << line << "\n";
+    }
+    return out.str();
+}
+
+// Real FluffOS's own "include directories" mudos.cfg setting is a
+// colon-separated *list*, not a single path (confirmed directly against
+// rc.c's own "CONFIG_STR(__INCLUDE_DIRS__)"/set_inc_list(), and against
+// this actual mudlib's own historical config, bin/mudos.cfg: "include
+// directories : /secure/include:/include") -- lex.c consults every
+// entry in order for a "#include <...>" (angle-bracket) lookup, not just
+// the first. This driver's own Config previously modeled includeDir()
+// as one single path, silently dropping every entry after the first --
+// confirmed real and reachable, not theoretical: this mudlib's own
+// "/include" (holding chat.h and vehicle.h, distinct from the ~50
+// headers under "/secure/include") is never searched at all, so any
+// file "#include <vehicle.h>"-ing (std/rifts_vehicle.c, real: driven by
+// cmds/mortal/_drive.c, and inherited by two real domain vehicle
+// objects) fails outright with "No such file or directory" the instant
+// it is loaded. Splitting on ':' here, one -I per entry (each resolved
+// against the mudlib root the same way the prior single-path code
+// already did), matches that real list semantics exactly rather than
+// hardcoding a second fixed path -- an operator listing three or more
+// directories in a future driver.cfg is handled the same way with no
+// further code change.
+std::vector<std::string> splitIncludeDirs(const std::string& raw, const std::string& mudlibRoot) {
+    std::vector<std::string> dirs;
+    size_t start = 0;
+    while (start <= raw.size()) {
+        size_t colon = raw.find(':', start);
+        std::string entry = raw.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
+        if (!entry.empty()) {
+            if (entry[0] != '/') entry = mudlibRoot + "/" + entry;
+            dirs.push_back(entry);
+        }
+        if (colon == std::string::npos) break;
+        start = colon + 1;
+    }
+    return dirs;
+}
+
+PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vector<std::string>& includeDirs,
+                                  const std::string& originalSourceDir, const Config& config,
+                                  const std::string& compiledFilename) {
+    PreprocessResult result;
+
+    char errPathTemplate[] = "/tmp/amlp_cpp_stderr_XXXXXX";
+    int errFd = mkstemp(errPathTemplate);
+    if (errFd == -1) {
+        result.errorOutput = "failed to create temp file for cpp stderr output";
+        return result;
+    }
+    close(errFd);
+    std::string errPath = errPathTemplate;
+
+    // sourcePath is a staged copy in /tmp (see stageSourceForPreprocessing),
+    // not the real file's own directory, so a same-directory quoted
+    // #include (e.g. secure/SimulEfun/SimulEfun.c's own "#include
+    // \"SimulEfun.h\"") would otherwise resolve against /tmp instead of
+    // where the real file lives. Passing the original directory as an
+    // extra -I restores that lookup.
+    std::string cmd = "cpp -I '" + originalSourceDir + "'";
+    for (const auto& dir : includeDirs) {
+        cmd += " -I '" + dir + "'";
+    }
+    cmd += buildPredefinedMacroFlags(config, compiledFilename) +
+           " -x c '" + sourcePath + "' 2>'" + errPath + "'";
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        result.errorOutput = "failed to launch cpp preprocessor";
+        std::remove(errPath.c_str());
+        return result;
+    }
+
+    std::ostringstream outBuf;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), pipe)) > 0) {
+        outBuf.write(buf, static_cast<std::streamsize>(n));
+    }
+    int status = pclose(pipe);
+
+    std::ifstream errFile(errPath);
+    std::ostringstream errBuf;
+    errBuf << errFile.rdbuf();
+    std::remove(errPath.c_str());
+    result.errorOutput = errBuf.str();
+
+    // Success is the exit code alone, not "stderr is empty": cpp writes
+    // real warnings there too (e.g. GCC's cpp warns, but does not fail,
+    // on the "#endif LABEL" trailing-token style used throughout this
+    // mudlib's own secure/include/debug.h), and treating every warning
+    // as a hard preprocessing failure was rejecting files with no actual
+    // error in them (hit live loading secure/SimulEfun/SimulEfun.c).
+    bool exitedOk = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    result.output = stripLineMarkers(outBuf.str());
+    result.ok = exitedOk;
+    return result;
+}
+
+} // namespace
+
+ObjectManager::ObjectManager(Config& config) : config_(config) {}
+
+std::string ObjectManager::normalizeFilename(const std::string& filename) {
+    if (filename.size() >= 2 && filename.compare(filename.size() - 2, 2, ".c") == 0) {
+        return filename.substr(0, filename.size() - 2);
+    }
+    return filename;
+}
+
+std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFilename) {
+    std::string filename = normalizeFilename(rawFilename);
+    auto cached = programCache_.find(filename);
+    if (cached != programCache_.end()) return cached->second;
+
+    if (compiling_.count(filename)) {
+        std::cerr << "[object] inherit cycle detected involving " << filename << "\n";
+        return nullptr;
+    }
+    compiling_.insert(filename);
+    struct InProgressGuard {
+        std::unordered_set<std::string>& set;
+        const std::string& filename;
+        ~InProgressGuard() { set.erase(filename); }
+    } inProgressGuard{compiling_, filename};
+
+    std::string path = config_.mudlibRoot() + filename + ".c";
+    std::ifstream f(path);
+    if (!f) {
+        std::cerr << "[object] source file not found: " << path << "\n";
+        return nullptr;
+    }
+    f.close();
+
+    std::vector<std::string> includeDirs = splitIncludeDirs(config_.includeDir(), config_.mudlibRoot());
+
+    StagedSource staged =
+        stageSourceForPreprocessing(path, config_.mudlibRoot(), config_.globalIncludeFile());
+    if (!staged.ok) {
+        std::cerr << "[object] " << staged.errorMessage << "\n";
+        return nullptr;
+    }
+    std::string originalSourceDir = path.substr(0, path.find_last_of('/'));
+    PreprocessResult preprocessed =
+        runPreprocessor(staged.tempPath, includeDirs, originalSourceDir, config_, filename);
+    std::remove(staged.tempPath.c_str());
+    if (!preprocessed.ok) {
+        std::cerr << "[object] preprocessing failed for " << path << ":\n"
+                   << preprocessed.errorOutput << "\n";
+        return nullptr;
+    }
+
+    try {
+        Lexer lexer(preprocessed.output);
+        auto tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto ast = parser.parseProgram();
+
+        // Resolve "inherit \"path\";" targets by recursively compiling each
+        // one (reusing this same cache, so a file inherited by several
+        // others is only compiled once) *before* generating this file's
+        // own code, so CodeGen can flatten the parents' object variables
+        // in ahead of this file's own -- see CodeGen::generate()'s
+        // inheritedObjectVarNames parameter. Only single-level lookups are
+        // done directly here; each parent's *own* inherits, if any, were
+        // already resolved recursively when that parent itself went
+        // through this same function, so multi-level chains still work
+        // (see Bytecode.hpp's CompiledProgram::inheritedPrograms comment).
+        // Alongside the flattened name list, also build ancestorBaseOffsets
+        // (see Bytecode.hpp's own comment on that member): for each direct
+        // parent, its own object variables start at "base" within this
+        // file's flattened layout (the count of inherited names collected
+        // so far); every ancestor *that parent* itself already knows about
+        // (its own ancestorBaseOffsets, from when it was compiled) is
+        // re-recorded here shifted by that same base, composing offsets
+        // correctly across arbitrarily deep chains, not just one level of
+        // direct siblings.
+        std::vector<std::shared_ptr<CompiledProgram>> parents;
+        std::vector<std::string> inheritedObjectVarNames;
+        std::unordered_map<const CompiledProgram*, int> ancestorBaseOffsets;
+        for (const auto& inheritPath : ast->inherits) {
+            auto parentProgram = compile(inheritPath);
+            if (!parentProgram) {
+                std::cerr << "[object] " << path << ": failed to compile inherited file \""
+                          << inheritPath << "\"\n";
+                return nullptr;
+            }
+            int base = static_cast<int>(inheritedObjectVarNames.size());
+            ancestorBaseOffsets[parentProgram.get()] = base;
+            for (const auto& entry : parentProgram->ancestorBaseOffsets) {
+                ancestorBaseOffsets[entry.first] = base + entry.second;
+            }
+            parents.push_back(parentProgram);
+            inheritedObjectVarNames.insert(inheritedObjectVarNames.end(),
+                                            parentProgram->objectVarNames.begin(),
+                                            parentProgram->objectVarNames.end());
+        }
+
+        CodeGen codegen;
+        auto program = std::make_shared<CompiledProgram>(
+            codegen.generate(*ast, inheritedObjectVarNames));
+        program->inheritedPrograms = std::move(parents);
+        program->ancestorBaseOffsets = std::move(ancestorBaseOffsets);
+
+        programCache_[filename] = program;
+        return program;
+    } catch (const LpcRuntimeError& e) {
+        std::cerr << "[object] compile error in " << path << ": " << e.what() << "\n";
+        return nullptr;
+    } catch (const std::exception& e) {
+        std::cerr << "[object] unexpected error compiling " << path << ": " << e.what() << "\n";
+        return nullptr;
+    }
+}
+
+bool ObjectManager::loadMasterObject() {
+    master_ = loadObject(config_.masterFile());
+    return master_ != nullptr;
+}
+
+bool ObjectManager::loadSimulEfunObject() {
+    if (config_.simulEfunFile().empty()) return false;
+    simulEfunObject_ = loadObject(config_.simulEfunFile());
+    return simulEfunObject_ != nullptr;
+}
+
+bool ObjectManager::sourceFileExists(const std::string& rawFilename) const {
+    std::string filename = normalizeFilename(rawFilename);
+    std::string path = config_.mudlibRoot() + filename + ".c";
+    struct stat st;
+    // Matches real int_load_object()'s own check (simulate.c): "stat(
+    // real_name, &c_st) == -1 || S_ISDIR(c_st.st_mode)" -- a directory
+    // sharing the requested name does not count as a source file
+    // either.
+    return ::stat(path.c_str(), &st) == 0 && !S_ISDIR(st.st_mode);
+}
+
+std::shared_ptr<LpcObject> ObjectManager::loadVirtualObject(const std::string& filename) {
+    // See simulate.c's load_virtual_object(): "if (!master_ob) { ...
+    // return 0; }" -- no master loaded yet (e.g. this call is itself
+    // trying to load the master file), nothing to ask.
+    if (!master_ || !vm_) return nullptr;
+
+    if (virtualCompiling_.count(filename)) {
+        std::cerr << "[object] compile_object() recursion detected for " << filename << "\n";
+        return nullptr;
+    }
+    virtualCompiling_.insert(filename);
+    struct InProgressGuard {
+        std::unordered_set<std::string>& set;
+        const std::string& filename;
+        ~InProgressGuard() { set.erase(filename); }
+    } inProgressGuard{virtualCompiling_, filename};
+
+    // real simulate.c: "push_malloced_string(add_slash(name));
+    // push_number(clone); ... apply_master_ob(APPLY_COMPILE_OBJECT,
+    // argc);" -- clone is 0 here (int_load_object()'s own call site
+    // always passes 0; only clone_object() on an already-virtual
+    // object passes a nonzero clone count, a path this driver does not
+    // implement -- see loadVirtualObject()'s own header comment).
+    // master.c's own compile_object(string str) declares only one
+    // parameter, so the extra int argument is simply unused by it, the
+    // same non-strict-arg-count LPC calling convention every other
+    // apply in this driver already relies on.
+    Value result;
+    try {
+        result = vm_->applyMaster("compile_object", {Value(filename), Value(int64_t{0})});
+    } catch (const std::exception& e) {
+        std::cerr << "[object] compile_object(" << filename << ") failed: " << e.what() << "\n";
+        return nullptr;
+    }
+
+    if (!std::holds_alternative<std::shared_ptr<LpcObject>>(result.data)) {
+        // Real driver: "if (!v || (v->type != T_OBJECT)) return 0;" --
+        // compile_object() declining (returning 0/void) means this
+        // path genuinely does not exist, virtual or otherwise. Not
+        // logged as an error here: this is the normal "no such object"
+        // outcome for the overwhelming majority of missing-file
+        // lookups, which are not virtual paths at all.
+        return nullptr;
+    }
+    auto ob = std::get<std::shared_ptr<LpcObject>>(result.data);
+    if (!ob) return nullptr;
+
+    // real load_virtual_object(): renames the returned object to the
+    // requested virtual path and reinserts it into the object hash
+    // under that name (SETOBNAME + enter_object_hash()) -- from this
+    // point on the object IS "filename" as far as file_name()/
+    // base_name() and any later find_object()/load_object() for the
+    // same path are concerned, indistinguishable from having been
+    // compiled there directly.
+    ob->rebindFilename(filename);
+    loaded_[filename] = ob;
+    // real object.h O_VIRTUAL: set once an object is confirmed to have
+    // actually come back from compile_object() rather than a direct
+    // on-disk compile -- backs virtualp().
+    ob->setIsVirtual(true);
+    return ob;
+}
+
+std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& rawFilename) {
+    std::string filename = normalizeFilename(rawFilename);
+    auto existing = loaded_.find(filename);
+    if (existing != loaded_.end()) return existing->second;
+
+    if (!sourceFileExists(filename)) {
+        auto virtualObj = loadVirtualObject(filename);
+        if (virtualObj) return virtualObj;
+        std::cerr << "[object] source file not found: "
+                   << config_.mudlibRoot() << filename << ".c"
+                   << " (and compile_object() did not provide a virtual object)\n";
+        return nullptr;
+    }
+
+    auto program = compile(filename);
+    if (!program) return nullptr;
+
+    auto obj = std::make_shared<LpcObject>(filename, program);
+    loaded_[filename] = obj;
+    LiveObjectRegistry::add(obj);
+    initPrivsForObject(obj, filename);
+
+    // A runtime error thrown out of create() (a missing efun, a bad
+    // sscanf(), etc.) must fail this one object's load, not crash the
+    // whole driver process -- compile()'s own try/catch below only covers
+    // the lex/parse/codegen phase, not this call, since compiling a file
+    // successfully and having its create() throw are different failures
+    // (see the compile-error path's own [object] message for the other
+    // one).
+    if (vm_) {
+        try {
+            runObjectVarInitializers(obj, *program);
+            vm_->callFunction(obj, "create", {});
+        } catch (const std::exception& e) {
+            std::cerr << "[object] create() failed for " << filename << ": " << e.what() << "\n";
+            loaded_.erase(filename);
+            return nullptr;
+        }
+    }
+
+    return obj;
+}
+
+void ObjectManager::runObjectVarInitializers(const std::shared_ptr<LpcObject>& obj,
+                                              const CompiledProgram& program) {
+    if (!vm_) return;
+    for (const auto& parent : program.inheritedPrograms) {
+        if (parent) runObjectVarInitializers(obj, *parent);
+    }
+    vm_->callFunctionInProgram(obj, program, "$objvarinit", {});
+}
+
+std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFilename) {
+    std::string filename = normalizeFilename(rawFilename);
+    auto program = compile(filename);
+    if (!program) return nullptr;
+
+    auto obj = std::make_shared<LpcObject>(filename, program);
+    LiveObjectRegistry::add(obj);
+    initPrivsForObject(obj, filename);
+
+    if (vm_) {
+        try {
+            runObjectVarInitializers(obj, *program);
+            vm_->callFunction(obj, "create", {});
+        } catch (const std::exception& e) {
+            std::cerr << "[object] create() failed for " << filename << ": " << e.what() << "\n";
+            return nullptr;
+        }
+    }
+
+    return obj;
+}
+
+void ObjectManager::initPrivsForObject(const std::shared_ptr<LpcObject>& obj, const std::string& filename) {
+    if (!vm_ || !master_ || !obj) return;
+    Value result;
+    try {
+        result = vm_->applyMaster("privs_file", {Value(filename)});
+    } catch (const std::exception&) {
+        // Real driver: any non-string result (including a thrown/failed
+        // apply) just leaves privs unset, not a hard failure.
+        return;
+    }
+    if (auto* s = std::get_if<std::string>(&result.data)) {
+        obj->setPrivs(*s);
+    }
+}
+
+std::shared_ptr<LpcObject> ObjectManager::lookupLoadedObject(const std::string& rawFilename) const {
+    auto it = loaded_.find(normalizeFilename(rawFilename));
+    return it != loaded_.end() ? it->second : nullptr;
+}
+
+void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
+    if (!obj || obj->isDestructed()) return;
+
+    // Shadow chain cleanup (Phase 0.6), confirmed directly against real
+    // destruct_object()'s own two-branch shadow handling (simulate.c),
+    // not guessed. Real semantics are asymmetric, not a plain unlink in
+    // both cases:
+    //
+    // If obj is the base victim of a chain (something shadows it, and
+    // it does not itself shadow anything -- real "ob->shadowed &&
+    // !ob->shadowing"), destructing it cascades: the ENTIRE chain is
+    // destructed too, walking from the outermost shadow down to obj
+    // itself, each one severed from its neighbors before its own
+    // recursive destructObject() call. This function then returns
+    // without doing its own further processing, since the recursive
+    // call for obj itself (the last iteration) already did it -- exact
+    // mirror of the real source's own "return;" right after that loop.
+    auto shadowedBy = obj->shadowedBy().lock();
+    if (shadowedBy && !obj->shadowing().lock()) {
+        auto top = shadowedBy;
+        while (auto next = top->shadowedBy().lock()) top = next;
+        while (top) {
+            auto below = top->shadowing().lock();
+            if (below) below->setShadowedBy(std::weak_ptr<LpcObject>());
+            top->setShadowing(std::weak_ptr<LpcObject>());
+            auto current = top;
+            top = below;
+            destructObject(current);
+        }
+        return;
+    }
+    // Otherwise (obj is itself a shadow, or has no shadow relationship
+    // at all) destructing it just splices it out of the middle of
+    // whatever chain it was part of -- a real doubly-linked-list
+    // unlink, reconnecting its neighbors to each other directly, then
+    // falls through to the normal destruction steps below for obj
+    // itself. A no-shadow-relationship object naturally no-ops both
+    // branches here (both fields are already null).
+    if (auto shadowing = obj->shadowing().lock()) {
+        shadowing->setShadowedBy(shadowedBy);
+    }
+    if (shadowedBy) {
+        shadowedBy->setShadowing(obj->shadowing());
+    }
+    obj->setShadowing(std::weak_ptr<LpcObject>());
+    obj->setShadowedBy(std::weak_ptr<LpcObject>());
+
+    obj->setDestructed(true);
+
+    // real destruct_object() (simulate.c): "remove_living_name(ob);",
+    // right alongside its own environment-unlink step just below --
+    // without this, a destructed object with a still-live shared_ptr
+    // reference elsewhere (the exact case this driver's own O_DESTRUCTED
+    // guard was written for) would keep matching find_player()/
+    // find_living() lookups after being destructed, contradicting
+    // LivingNameRegistry::find()'s own isDestructed() check, which is a
+    // second, redundant layer of defense for a stale weak_ptr entry that
+    // is never cleaned up otherwise, not a substitute for this.
+    LivingNameRegistry::remove(obj);
+
+    // Real obj_list unthreading (simulate.c's own destruct_object()):
+    // this driver's own LiveObjectRegistry equivalent -- objects()/
+    // livings() must stop returning this object the instant it is
+    // destructed, not merely once its last shared_ptr reference happens
+    // to drop. LiveObjectRegistry::all() also independently filters on
+    // isDestructed() (the same redundant-defense-for-a-stale-entry
+    // reasoning as LivingNameRegistry::find() above), so this call is
+    // an active cleanup, not the only thing standing between a
+    // destructed object and a false-positive match.
+    LiveObjectRegistry::remove(obj);
+
+    // real destruct_object() (simulate.c): "ob->super = 0; ob->next_inv
+    // = 0; ob->contains = 0;" -- unlinks the object from its environment
+    // and severs its own inventory pointer, done immediately, not lazily.
+    // This is the environment-unlink half of that (closes the actual
+    // confirmed bug: a destructed object stayed visible in
+    // all_inventory()/environment() results indefinitely, since nothing
+    // ever removed it from its old environment's own inventory vector).
+    // Not replicated here: real destruct_object()'s own contents-
+    // relocation loop, which calls each contained item's own real
+    // move()/APPLY_MOVE apply to relocate it out to the destructed
+    // object's environment before severing -- a materially bigger
+    // feature (an LPC-level apply cascade during what is otherwise a
+    // pure bookkeeping operation) nothing confirmed live needs yet; a
+    // destructed object's own remaining inventory is simply left
+    // attached to it rather than relocated or dropped, flagged here
+    // rather than silently assumed equivalent.
+    if (auto env = obj->environment().lock()) {
+        auto& inv = env->inventory();
+        inv.erase(std::remove(inv.begin(), inv.end(), obj), inv.end());
+    }
+    obj->setEnvironment(std::weak_ptr<LpcObject>());
+
+    loaded_.erase(obj->filename());
+}
+
+} // namespace amlp

@@ -1,4 +1,4 @@
-# AetherMUD - Claude Code Prompts
+# AMLP - Claude Code Prompts
 
 Ready-to-paste prompts for continuing the world-class LPC driver development.
 Copy the block for the phase/task you want and paste it directly into Claude Code.
@@ -14,8 +14,8 @@ Copy the block for the phase/task you want and paste it directly into Claude Cod
 
 **Always run the full test suite before and after each prompt:**
 ```bash
-cmake -B driver/build -S driver && cmake --build driver/build
-ctest --test-dir driver/build --output-on-failure
+cmake -B build -S . && cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 ---
@@ -25,14 +25,14 @@ ctest --test-dir driver/build --output-on-failure
 ### P0-A: `sscanf` full format set
 
 ```
-Read docs/ROADMAP.md (Phase 0 row 0.2) and driver/src/efun/instruct.md
-(Phase 0 task 0.2). Then read driver/src/efun/EfunTable.cpp and find
+Read ROADMAP.md (Phase 0 row 0.2) and src/efun/instruct.md
+(Phase 0 task 0.2). Then read src/efun/EfunTable.cpp and find
 the sscanf implementation. The current gaps are: %f (float), %x (hex
 int), %(regexp) capture, and adjacent %s%... without a literal between.
 
 Implement each missing format specifier one at a time, with a regression
-test per specifier added to driver/tests/test_lexer.cpp. Reference the
-real implementation in driver/reference/fluffos-2.9-ds2.08/
+test per specifier added to test/test_lexer.cpp. Reference the
+real implementation in reference/fluffos-2.9-ds2.08/
 efuns_main.c f_sscanf() and sscanf_regexp(). Build and confirm all
 existing tests still pass after each specifier is added.
 ```
@@ -40,8 +40,8 @@ existing tests still pass after each specifier is added.
 ### P0-B: FluffOS `.o` save format
 
 ```
-Read docs/ROADMAP.md (Phase 0 row 0.7) and driver/src/efun/instruct.md
-(Phase 0 task 0.7). Then read driver/src/efun/EfunTable.cpp and find
+Read ROADMAP.md (Phase 0 row 0.7) and src/efun/instruct.md
+(Phase 0 task 0.7). Then read src/efun/EfunTable.cpp and find
 the save_object/restore_object implementation. The current format is
 a custom binary format incompatible with FluffOS .o files.
 
@@ -63,9 +63,9 @@ run full test suite.
 ### P0-C: Full telnet IAC negotiation
 
 ```
-Read docs/ROADMAP.md (Phase 0 row 0.8) and driver/src/net/instruct.md
-(Phase 0 task 0.8). Then read driver/src/net/Connection.cpp and
-driver/src/net/Connection.hpp.
+Read ROADMAP.md (Phase 0 row 0.8) and src/net/instruct.md
+(Phase 0 task 0.8). Then read src/net/Connection.cpp and
+src/net/Connection.hpp.
 
 Implement:
 1. IAC parser in Connection::pollLines() - strip all \xFF sequences
@@ -81,14 +81,14 @@ Implement:
 
 Reference: RFC 854 (Telnet), RFC 857 (Echo), RFC 1073 (NAWS),
 and fluffos-2.9-ds2.08/comm.c telnet_neg(). Add tests using socketpair()
-in driver/tests/test_net.cpp. Build and run full test suite.
+in test/test_net.cpp. Build and run full test suite.
 ```
 
 ### P0-D: `map`/`filter`/`sort_array` as closure consumers
 
 ```
-Read docs/ROADMAP.md (Phase 0 row 0.9) and driver/src/efun/instruct.md
-(Phase 0 task 0.9). Then read driver/src/efun/EfunTable.cpp and find
+Read ROADMAP.md (Phase 0 row 0.9) and src/efun/instruct.md
+(Phase 0 task 0.9). Then read src/efun/EfunTable.cpp and find
 the existing map_array/filter_array/sort_array implementations.
 
 Verify each one:
@@ -108,10 +108,10 @@ f_sort_array(). Build and run full test suite.
 ### P0-E: Grow efun table to FluffOS parity (~300)
 
 ```
-Read docs/ROADMAP.md (Phase 0 row 0.13) and driver/src/efun/instruct.md
+Read ROADMAP.md (Phase 0 row 0.13) and src/efun/instruct.md
 (Tier 1 list in Phase 0 task 0.13).
 
-Audit the current driver/src/efun/EfunTable.cpp against the reference
+Audit the current src/efun/EfunTable.cpp against the reference
 list in fluffos-2.9-ds2.08/func_spec.c. Produce a list of the 20 most-
 called efuns that are not yet implemented, ordered by real usage count
 across the mudlib (grep for call sites in mudlib/nightmare3_fluffos_v2/).
@@ -127,7 +127,7 @@ Build and run full test suite.
 ### P0-F: PCRE regexp efuns
 
 ```
-Read docs/ROADMAP.md (Phase 0 row 0.11) and driver/src/efun/instruct.md
+Read ROADMAP.md (Phase 0 row 0.11) and src/efun/instruct.md
 (Phase 0 task 0.11).
 
 Add PCRE2 as a dependency (pkg_check_modules(PCRE2 REQUIRED libpcre2-8)
@@ -150,13 +150,13 @@ full test suite.
 ### P1-A: Dialect scaffold (start here first)
 
 ```
-Read docs/ROADMAP.md Phase 1 section and driver/src/dialect/instruct.md.
-Also read driver/src/config/instruct.md (Phase 1 tasks), driver/src/apply/
-instruct.md (Phase 1 task 1.4), and driver/src/compiler/instruct.md
+Read ROADMAP.md Phase 1 section and src/dialect/instruct.md.
+Also read src/config/instruct.md (Phase 1 tasks), src/apply/
+instruct.md (Phase 1 task 1.4), and src/compiler/instruct.md
 (Phase 1 tasks).
 
 Create the dialect foundation:
-1. Create driver/src/dialect/ as a new CMake library
+1. Create src/dialect/ as a new CMake library
 2. Implement LpcDialect.hpp with the enum and dialectFromString()
 3. Add dialect config key to Config (default "fluffos")
 4. Implement FluffOsBootApi, LdmudBootApi, DgdBootApi, DialectFactory
@@ -165,15 +165,15 @@ Create the dialect foundation:
 
 Do NOT yet implement dialect-specific lexer/parser/VM changes - only
 the enum, config, and boot API abstraction. Add tests in
-driver/tests/test_dialect_fluffos.cpp confirming that the FluffOS boot
+test/test_dialect_fluffos.cpp confirming that the FluffOS boot
 API returns the correct apply names. Build and run full test suite.
 ```
 
 ### P1-B: LDMud `#'symbol` and `lambda()` closure kinds
 
 ```
-Read docs/ROADMAP.md Phase 1 rows 1.7 and 1.8, driver/src/vm/instruct.md
-(Phase 1 tasks 1.7 and 1.8), and driver/src/compiler/instruct.md
+Read ROADMAP.md Phase 1 rows 1.7 and 1.8, src/vm/instruct.md
+(Phase 1 tasks 1.7 and 1.8), and src/compiler/instruct.md
 (Phase 1 tasks 1a and 1b for LDMud).
 
 Prerequisite: Phase 1-A must be merged first.
@@ -187,15 +187,15 @@ Implement (LDMud dialect mode only, guard with LpcDialect::LdMud checks):
 6. VM::callClosure(): handle LdmudSymbol by resolving on first call
    and caching the result
 
-Add tests in driver/tests/test_dialect_ldmud.cpp. Build and run
+Add tests in test/test_dialect_ldmud.cpp. Build and run
 full test suite (all 374+ existing tests must still pass).
 ```
 
 ### P1-C: DGD `nil` type and `atomic` functions
 
 ```
-Read docs/ROADMAP.md Phase 1 rows 1.10 and 1.12, driver/src/vm/instruct.md
-(Phase 1 tasks 1.10 and 1.12), and driver/src/compiler/instruct.md
+Read ROADMAP.md Phase 1 rows 1.10 and 1.12, src/vm/instruct.md
+(Phase 1 tasks 1.10 and 1.12), and src/compiler/instruct.md
 (Phase 1 tasks for DGD).
 
 Prerequisite: Phase 1-A must be merged first.
@@ -210,7 +210,7 @@ Implement (DGD dialect mode only):
 7. atomic modifier: FunctionEntry::isAtomic flag; VM::callFunction()
    checkpoints and rolls back on error for atomic functions
 
-Add tests in driver/tests/test_dialect_dgd.cpp covering: nil != 0,
+Add tests in test/test_dialect_dgd.cpp covering: nil != 0,
 nil coercion rules, atomic function rollback on error. Build and run
 full test suite.
 ```
@@ -218,8 +218,8 @@ full test suite.
 ### P1-D: DGD driver+auto object boot path
 
 ```
-Read docs/ROADMAP.md Phase 1 row 1.15, driver/src/apply/instruct.md
-(Phase 1 task 1.15), and driver/src/dialect/instruct.md.
+Read ROADMAP.md Phase 1 row 1.15, src/apply/instruct.md
+(Phase 1 task 1.15), and src/dialect/instruct.md.
 
 Prerequisite: Phase 1-A and Phase 1-C must be merged.
 
@@ -243,7 +243,7 @@ Build and run full test suite.
 ### P2-A: Apply cache
 
 ```
-Read docs/ROADMAP.md Phase 2 row 2.9 and driver/src/apply/instruct.md
+Read ROADMAP.md Phase 2 row 2.9 and src/apply/instruct.md
 (Phase 2 task 2.9).
 
 Implement an apply cache on VM:
@@ -262,9 +262,9 @@ Build and run full test suite.
 ### P2-B: World statedump
 
 ```
-Read docs/ROADMAP.md Phase 2 row 2.1 and driver/src/persist/instruct.md.
+Read ROADMAP.md Phase 2 row 2.1 and src/persist/instruct.md.
 
-Create driver/src/persist/ as a new CMake library. Implement:
+Create src/persist/ as a new CMake library. Implement:
 1. StateSerializer::dumpState() using CBOR via nlohmann/json::to_cbor()
    - Serialize all live objects (filename + variable values by name)
    - Serialize all pending call_outs (target, function, dueAt offset, args)
@@ -274,7 +274,7 @@ Create driver/src/persist/ as a new CMake library. Implement:
 4. Config::statedumpFile() key and statedumpInterval() periodic trigger
    in main.cpp's run loop
 
-Add tests in driver/tests/test_persist.cpp for full round-trip of all
+Add tests in test/test_persist.cpp for full round-trip of all
 Value kinds including nested arrays and mappings. Build and run full
 test suite.
 ```
@@ -282,9 +282,9 @@ test suite.
 ### P2-C: LSP server
 
 ```
-Read docs/ROADMAP.md Phase 2 row 2.19 and driver/src/lsp/instruct.md.
+Read ROADMAP.md Phase 2 row 2.19 and src/lsp/instruct.md.
 
-Create driver/src/lsp/ as a new CMake library. Implement the first two
+Create src/lsp/ as a new CMake library. Implement the first two
 LSP capabilities:
 1. JSON-RPC framing (Content-Length header, stdin/stdout transport)
 2. initialize request/response
@@ -294,7 +294,7 @@ LSP capabilities:
 Wire --lsp flag in main.cpp: when present, start LspServer::run()
 instead of the game server.
 
-Add tests in driver/tests/test_lsp.cpp: send didOpen with a syntax
+Add tests in test/test_lsp.cpp: send didOpen with a syntax
 error, assert correct diagnostic published. Build and run full
 test suite.
 ```
@@ -302,13 +302,13 @@ test suite.
 ### P2-D: LLVM JIT backend
 
 ```
-Read docs/ROADMAP.md Phase 2 row 2.11 and driver/src/jit/instruct.md.
+Read ROADMAP.md Phase 2 row 2.11 and src/jit/instruct.md.
 
 Prerequisites: Phase 0 and Phase 1 complete; interpreter 100% correct
 for all three dialects.
 
-Create driver/src/jit/ as an optional CMake library
-(option LPCDRIVER_ENABLE_JIT). Implement the first-pass JIT targeting
+Create src/jit/ as an optional CMake library
+(option AMLP_ENABLE_JIT). Implement the first-pass JIT targeting
 pure arithmetic functions only (no Call/CallEfun initially):
 1. JitCompiler class with hit counting and threshold
 2. BytecodeToIr.cpp: translate PushInt/PushFloat/PushLocal/StoreLocal/
@@ -317,9 +317,9 @@ pure arithmetic functions only (no Call/CallEfun initially):
    on hit
 4. Graceful fallback to interpreter on JIT compile failure
 
-Add tests in driver/tests/test_jit.cpp: enable JIT, run arithmetic
+Add tests in test/test_jit.cpp: enable JIT, run arithmetic
 function 200 times, verify identical output to interpreter. Build and
-run full test suite with and without LPCDRIVER_ENABLE_JIT.
+run full test suite with and without AMLP_ENABLE_JIT.
 ```
 
 ---
@@ -329,10 +329,10 @@ run full test suite with and without LPCDRIVER_ENABLE_JIT.
 ### P3-A: Security model
 
 ```
-Read docs/ROADMAP.md Phase 3 row 3.1 and driver/src/security/instruct.md.
+Read ROADMAP.md Phase 3 row 3.1 and src/security/instruct.md.
 
-Create driver/src/security/ as an optional CMake library
-(option LPCDRIVER_ENABLE_SECURITY, default OFF).
+Create src/security/ as an optional CMake library
+(option AMLP_ENABLE_SECURITY, default OFF).
 
 Implement SecurityManager with:
 1. FluffOsBootApi route: privs_file apply for path and call_other checks
@@ -341,38 +341,38 @@ Implement SecurityManager with:
 4. allowCallOther check in VM::callFunction() for cross-object calls
 5. query_privs() / set_privs() efuns
 
-Add tests in driver/tests/test_security.cpp for access-denied cases.
-Build and run full test suite with and without LPCDRIVER_ENABLE_SECURITY.
+Add tests in test/test_security.cpp for access-denied cases.
+Build and run full test suite with and without AMLP_ENABLE_SECURITY.
 ```
 
 ### P3-B: GMCP + MSDP protocols
 
 ```
-Read docs/ROADMAP.md Phase 3 row 3.4 and driver/src/proto/instruct.md.
-Also read driver/src/net/instruct.md Phase 3 task 3.4.
+Read ROADMAP.md Phase 3 row 3.4 and src/proto/instruct.md.
+Also read src/net/instruct.md Phase 3 task 3.4.
 
 Prerequisites: Phase 0.8 telnet IAC negotiation must be complete.
 
-Create driver/src/proto/ as a new CMake library. Implement:
+Create src/proto/ as a new CMake library. Implement:
 1. GmcpHandler: IAC SB 201 framing, onReceive(), send()
 2. MsdpHandler: IAC SB 69 MSDP_VAR/MSDP_VAL encoding
 3. Wire both into Connection: gmcpEnabled_, msdpEnabled_ flags,
    processTelnetOption() routing
 4. New efuns: gmcp_send(), msdp_send(), query_gmcp(), query_msdp()
 
-Add tests in driver/tests/test_proto.cpp using socketpair(). Build
+Add tests in test/test_proto.cpp using socketpair(). Build
 and run full test suite.
 ```
 
 ### P3-C: Generational GC (Layer 1 - no-op wrapper)
 
 ```
-Read docs/ROADMAP.md Phase 3 row 3.3 and driver/src/gc/instruct.md.
+Read ROADMAP.md Phase 3 row 3.3 and src/gc/instruct.md.
 
 This is the first layer of the 5-layer GC migration (Layer 1: no-op
 wrapper). DO NOT change any observable behavior.
 
-Create driver/src/gc/ as a new CMake library. Implement:
+Create src/gc/ as a new CMake library. Implement:
 1. GcObject header struct (Kind, generation, marked, pinned)
 2. GcHeap singleton with allocate(), addRoot(), removeRoot(), collect()
    - collect() is a no-op in Layer 1 (just logs what it would collect)
@@ -387,10 +387,10 @@ run full test suite.
 ### P3-D: Conformance test suite
 
 ```
-Read docs/ROADMAP.md Phase 3 row 3.5 and driver/tests/instruct.md
+Read ROADMAP.md Phase 3 row 3.5 and test/instruct.md
 (Phase 3 tasks).
 
-Create driver/tests/conformance/ directory. Implement a dialect-agnostic
+Create test/conformance/ directory. Implement a dialect-agnostic
 test runner that:
 1. Takes a directory of .c test files as input
 2. Compiles and runs each one via the driver's ObjectManager + VM
@@ -424,8 +424,8 @@ Read docs/stress-test/instruct.md for instructions on downloading and
 building the reference LPC drivers from dead-souls.net/files/.
 
 Set up the comparison benchmark:
-1. Build AetherMUD driver: cmake -B driver/build -S driver &&
-   cmake --build driver/build
+1. Build AMLP driver: cmake -B build -S . &&
+   cmake --build build
 2. Download and build FluffOS 2.9, LDMud, and DGD per the instructions
    in docs/stress-test/instruct.md
 3. Run the benchmark suite in docs/stress-test/bench/ against all four
@@ -435,18 +435,18 @@ Focus on: boot time, login time, call_out throughput, heartbeat
 throughput under load, memory usage after 1 hour of simulation.
 ```
 
-### STRESS-B: Boot a foreign mudlib on AetherMUD
+### STRESS-B: Boot a foreign mudlib on AMLP
 
 ```
 Read docs/stress-test/instruct.md. Download one of the dead-souls
 mudlib packages from dead-souls.net/files/ (pick Dead Souls 3.x).
 
-Attempt to boot it on the AetherMUD driver:
+Attempt to boot it on the AMLP driver:
 1. Point driver.cfg mudlib= at the dead-souls mudlib root
 2. Set master_file= to the dead-souls master path
-3. Run driver/build/lpcdriver etc/driver.cfg
+3. Run build/amlp etc/driver.cfg
 4. Document every compilation error that appears in the driver log
-5. For each error, determine if it is a gap in AetherMUD's efun
+5. For each error, determine if it is a gap in AMLP's efun
    table or a dialect difference
 
 Produce a gap report: docs/stress-test/dead-souls-gap-report.md
@@ -461,23 +461,23 @@ This report drives the next round of Phase 0 efun additions.
 ### UPDATE-STATUS: Sync STATUS.md after any implementation
 
 ```
-Read driver/STATUS.md and docs/ROADMAP.md. Then read all modified
-source files in the most recent git commit. Update driver/STATUS.md
+Read STATUS.md and ROADMAP.md. Then read all modified
+source files in the most recent git commit. Update STATUS.md
 with a dated entry describing exactly what was implemented:
 - What was verified against the reference source (cite filename + function)
 - What test was added and what it proves
 - What remains as a known stub or gap
 - Current test count
 
-Also update the checkbox in docs/ROADMAP.md for any completed row.
+Also update the checkbox in ROADMAP.md for any completed row.
 Commit the updated STATUS.md and ROADMAP.md.
 ```
 
 ### AUDIT-EFUNS: Efun coverage audit
 
 ```
-Read driver/src/efun/EfunTable.cpp and list every registered efun name.
-Read driver/reference/fluffos-2.9-ds2.08/func_spec.c and
+Read src/efun/EfunTable.cpp and list every registered efun name.
+Read reference/fluffos-2.9-ds2.08/func_spec.c and
 list every efun defined there. Produce a gap analysis:
 
 1. Efuns in func_spec.c but not in EfunTable.cpp (missing)
@@ -492,8 +492,8 @@ Write the result to docs/efun-coverage-audit.md.
 ### AUDIT-TESTS: Test coverage audit
 
 ```
-Read driver/tests/instruct.md and driver/tests/test_lexer.cpp (and
-any other test files in driver/tests/). Read driver/src/efun/EfunTable.cpp
+Read test/instruct.md and test/test_lexer.cpp (and
+any other test files in test/). Read src/efun/EfunTable.cpp
 and list every registered efun.
 
 For each registered efun, determine whether it has at least one
