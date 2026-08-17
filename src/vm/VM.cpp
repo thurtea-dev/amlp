@@ -15,7 +15,57 @@
 
 namespace amlp {
 
+// Real efuns_main.c's own origin_name(): "static const char *origins[] =
+// { "driver", "local", "call_other", "simul", "internal", "efun",
+// "function pointer", "functional" };" indexed by the bit position of
+// the real ORIGIN_* flag (origin.h) -- same order here, matching
+// Origin's own declaration order in VM.hpp exactly.
+const char* originName(Origin origin) {
+    switch (origin) {
+        case Origin::Driver: return "driver";
+        case Origin::Local: return "local";
+        case Origin::CallOther: return "call_other";
+        case Origin::SimulEfun: return "simul";
+        case Origin::Internal: return "internal";
+        case Origin::Efun: return "efun";
+        case Origin::FunctionPointer: return "function pointer";
+        case Origin::Functional: return "functional";
+    }
+    return "driver";
+}
+
 namespace {
+
+// RAII push/pop of VM's originStack_ (real caller_type, saved/restored
+// across push_control_stack()/pop_control_stack() -- see VM.hpp's own
+// originStack_ comment for the full citation). Used at every real call
+// path that pushes a genuine LPC frame, immediately before the run()
+// call it wraps, the same "guard object whose constructor pushes and
+// destructor pops" shape ObjectFrameGuard/CommandGiverGuard above
+// already establish.
+class OriginGuard {
+public:
+    OriginGuard(amlp::VM& vm, amlp::Origin origin) : vm_(vm) { vm_.pushOrigin(origin); }
+    ~OriginGuard() { vm_.popOrigin(); }
+    OriginGuard(const OriginGuard&) = delete;
+    OriginGuard& operator=(const OriginGuard&) = delete;
+
+private:
+    amlp::VM& vm_;
+};
+
+// Real function.c's own naming convention for a synthesized inline
+// lambda's own function-table entry ("$lambda#" + id, CodeGen.cpp's own
+// InlineLambdaExpr handling) -- the one case callClosure()'s own tiered
+// resolution needs to distinguish from an ordinary named local/inherited
+// function, matching real call_function_pointer()'s own FP_FUNCTIONAL
+// (anonymous) vs FP_LOCAL (named) split. "$" can never start a real LPC
+// identifier (confirmed directly, CodeGen.cpp's own comment), so this
+// prefix never collides with a real function name reached the ordinary
+// way.
+bool isSynthesizedLambdaName(const std::string& name) {
+    return name.rfind("$lambda#", 0) == 0;
+}
 
 // Real F_LOCAL/F_GLOBAL/F_INDEX (interpret.c): every time a value is
 // read out of storage -- a local, an object variable, an array element,
@@ -543,7 +593,8 @@ void VM::processPendingReplacePrograms() {
 
 Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
                         const std::string& functionName,
-                        std::vector<Value> args) {
+                        std::vector<Value> args,
+                        Origin origin) {
     if (!obj) return Value{};
 
     // real apply()'s own "DEBUG_CHECK(ob->flags & O_DESTRUCTED, ...)"
@@ -611,6 +662,14 @@ Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
         target = next;
     }
     if (!found.program) return Value{};
+    // See this method's own VM.hpp doc comment for why origin defaults
+    // to Origin::Driver and which real callers pass something else.
+    // Applies to whichever function actually gets run above -- shadow
+    // resolution changes *which object's own function* runs, never
+    // *why* this whole call happened in the first place, so the origin
+    // this call was made with is what the target's own frame gets,
+    // unconditionally.
+    OriginGuard originGuard(*this, origin);
     return run(*found.program, *found.fn, std::move(args), target);
 }
 
@@ -619,6 +678,14 @@ Value VM::callFunctionInProgram(const std::shared_ptr<LpcObject>& obj, const Com
     if (!obj) return Value{};
     for (const auto& fn : program.functions) {
         if (fn.name == functionName) {
+            // Real call___INIT()'s own "caller_type = ORIGIN_DRIVER;"
+            // (interpret.c), confirmed directly -- this method's only
+            // real caller is ObjectManager::runObjectVarInitializers()'s
+            // own per-inherit-level "$objvarinit" dispatch, the exact
+            // same real mechanism, so this is hardcoded rather than a
+            // parameter: there is no other real call site that would
+            // ever need a different origin here.
+            OriginGuard originGuard(*this, Origin::Driver);
             return run(program, fn, std::move(args), obj);
         }
     }
@@ -733,6 +800,21 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
 
     FunctionLookupResult found = findFunctionInChain(owner->program(), closure->functionName);
     if (found.program) {
+        // Real call_function_pointer()'s own real split (function.c):
+        // "case FP_LOCAL | FP_NOT_BINDABLE: ... caller_type = ORIGIN_LOCAL;"
+        // for an ordinary named local/inherited target, vs "case
+        // FP_FUNCTIONAL: ... caller_type = ORIGIN_FUNCTIONAL;" for an
+        // anonymous inline function -- confirmed directly, not assumed
+        // from "it's a closure, so FunctionPointer" (real
+        // ORIGIN_FUNCTION_POINTER is only ever the transient fake-frame
+        // value setup_fake_frame() sets moments earlier, always
+        // overwritten by one of these two before any genuine LPC bytecode
+        // actually runs). Distinguished here by real function.c's own
+        // synthesized-lambda naming convention (isSynthesizedLambdaName()
+        // above), the same "$"-prefixed-name signal CodeGen.cpp already
+        // uses to keep these apart at compile time.
+        OriginGuard originGuard(
+            *this, isSynthesizedLambdaName(found.fn->name) ? Origin::Functional : Origin::Local);
         return run(*found.program, *found.fn, std::move(args), owner);
     }
 
@@ -740,6 +822,11 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
     if (simulEfun) {
         FunctionLookupResult simulFound = findFunctionInChain(simulEfun->program(), closure->functionName);
         if (simulFound.program) {
+            // Real "case FP_SIMUL: call_simul_efun(...)" (function.c),
+            // which itself sets ORIGIN_SIMUL_EFUN via call_direct() --
+            // confirmed directly, same real citation OpCode::Call's own
+            // tier-3 branch above already uses.
+            OriginGuard originGuard(*this, Origin::SimulEfun);
             return run(*simulFound.program, *simulFound.fn, std::move(args), simulEfun);
         }
     }
@@ -751,6 +838,17 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
         // run() frame is innermost (whoever called evaluate()) instead
         // of this closure's own owner -- see ObjectFrameGuard's own
         // comment, this is exactly the live bug it fixes.
+        //
+        // Deliberately no OriginGuard here either: real "case FP_EFUN"
+        // (function.c) never overrides caller_type before running the
+        // raw efun body -- it stays whatever setup_fake_frame() left it
+        // as (transiently ORIGIN_FUNCTION_POINTER), a value the efun's
+        // own C code never observes since efuns cannot call origin() on
+        // themselves. This driver has no fake-frame mechanism to mirror
+        // that transient set at all, and nothing could tell the
+        // difference either way -- leaving originStack_ untouched here
+        // is behaviorally identical to real semantics, just without the
+        // unobservable intermediate step.
         ObjectFrameGuard objectFrameGuard(callStack_, objectChangeStack_, owner);
         return EfunTable::instance().call(closure->functionName, *this, args);
     }
@@ -938,7 +1036,20 @@ bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::str
         CommandGiverGuard giverGuard(*this, giver);
         Value result;
         try {
-            result = callFunction(owner, entry.functionName, {handlerArg});
+            // Real add_action.c's own user_parser(): "where = (current_object
+            // ? ORIGIN_EFUN : ORIGIN_DRIVER);", confirmed directly, with its
+            // own comment explaining why -- "If this is called directly
+            // from user input, then the origin is the driver and it will
+            // be allowed" (reaching even a static/protected handler),
+            // whereas a *nested* re-dispatch (this driver's own command()
+            // efun, called from within an already-running function, the
+            // only real way current_object ends up set at this exact
+            // point) is the narrower ORIGIN_EFUN. currentObject() here is
+            // exactly real current_object's own truthiness check: null at
+            // the true top-level entry (Server::dispatchLine(), no LPC
+            // frame active yet), set only when command() called back in.
+            Origin origin = currentObject() ? Origin::Efun : Origin::Driver;
+            result = callFunction(owner, entry.functionName, {handlerArg}, origin);
         } catch (...) {
             verbStack_.pop_back();
             throw;
@@ -1787,6 +1898,15 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 // `program` itself, exactly as it already does.
                 FunctionLookupResult found = findFunctionInChain(obj->program(), funcName);
                 if (found.program) {
+                    // Real F_CALL_FUNCTION_BY_ADDRESS's own "caller_type =
+                    // ORIGIN_LOCAL;" (interpret.c), confirmed directly: a
+                    // bare call resolving within the calling object's own
+                    // program, local or inherited, is always ORIGIN_LOCAL
+                    // -- this is the one real call site the row's only
+                    // known security-sensitive origin() check
+                    // (secure/daemon/chat.c's own "origin() !=
+                    // ORIGIN_LOCAL") actually needs to get right.
+                    OriginGuard originGuard(*this, Origin::Local);
                     Value result = run(*found.program, *found.fn, std::move(callArgs), obj);
                     localStack.push_back(std::move(result));
                     ++ip;
@@ -1809,6 +1929,10 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     FunctionLookupResult simulFound =
                         findFunctionInChain(simulEfun->program(), funcName);
                     if (simulFound.program) {
+                        // Real call_simul_efun()'s own "call_direct(
+                        // simul_efun_ob, ..., ORIGIN_SIMUL_EFUN, ...)"
+                        // (eoperators.c), confirmed directly.
+                        OriginGuard originGuard(*this, Origin::SimulEfun);
                         Value result = run(*simulFound.program, *simulFound.fn,
                                             std::move(callArgs), simulEfun);
                         localStack.push_back(std::move(result));
@@ -1817,6 +1941,21 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     }
                 }
 
+                // Deliberately no OriginGuard here: a bare call resolving
+                // to the core efun table never pushes a real LPC frame in
+                // real FluffOS either (no push_control_stack() anywhere
+                // in an ordinary efun dispatch, confirmed directly), so
+                // the origin stays whatever the calling function's own
+                // frame already has. The two real exceptions --
+                // call_other()/"->" and evaluate()/funcall()/"(*fp)(...)",
+                // both compiler-forced through this same efun-table path
+                // (CodeGen.cpp's own forceEfun) -- do their own explicit
+                // origin tagging entirely inside their own EfunTable.cpp
+                // registrations (see call_other's own vm.callFunction(...,
+                // Origin::CallOther) and callClosure()'s own tiered
+                // resolution respectively), not here: this opcode never
+                // needs to know which specific efun name it is about to
+                // dispatch.
                 if (EfunTable::instance().exists(funcName)) {
                     Value result = EfunTable::instance().call(funcName, *this, callArgs);
                     localStack.push_back(std::move(result));
@@ -1862,6 +2001,12 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                         (qualifier ? (*qualifier + "::") : std::string("::")) + funcName +
                         "(): undefined function in inherited program");
                 }
+                // Real F_CALL_INHERITED's own "caller_type = ORIGIN_LOCAL;"
+                // (interpret.c), confirmed directly -- an explicit
+                // "::name()"/"qualifier::name()" call reaches an inherited
+                // definition the same ORIGIN_LOCAL way a plain same-object
+                // bare call does.
+                OriginGuard originGuard(*this, Origin::Local);
                 Value result = run(*found.program, *found.fn, std::move(callArgs), obj);
                 localStack.push_back(std::move(result));
                 ip += 2; // past CallParent and its CallParentQualifierSlot data instruction

@@ -3,6 +3,218 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-23: full 55-name gap accounting produced and cross-checked
+against STATUS.md/instruct.md's own written record, then `origin()`
+implemented in full -- real per-call-path tagging through every genuine
+LPC frame this driver's VM creates, all 8 real `ORIGIN_*` values, each
+verified against `reference/fluffos-2.9-ds2.08` individually rather than
+assumed by resemblance to another (Phase 0 row 0.13: 233 registered, up
+from 232).**
+
+**Accounting task, before touching any code.** `grep -c registerEfun`
+against `EfunTable.cpp` reads 232 (233 after this session), but that
+count is not directly comparable to the real 270-name `efun_defs.c`
+target: 18 registered names are not literal `efun_defs.c` entries, for
+one of three legitimate, individually-confirmed reasons (six are real
+FluffOS names whose activating `#ifdef` is off in this exact vendored
+build -- `funcall`/`m_delete`/`query_once_interactive`/`strstr`
+(`COMPAT_32`), `set_light` (`NO_LIGHT` is defined here), `set_debug_level`
+(`DEBUG_MACRO`) -- kept because this driver's own bundled Lil test
+mudlib genuinely calls them; two, `regexplode`/`regexp_assoc`, are
+driver additions this row's own instruct.md/prompt.md explicitly asked
+for under those names despite neither being real, already self-
+documented as such at the time each was added; ten are unrelated to
+row 0.13 entirely -- `new` (real FluffOS treats this as a dedicated
+lexer keyword, never an efun-table entry) and the seven Rifts combat-
+math functions plus `query_screen_width`/`query_screen_height`, all
+driver additions from separate, earlier initiatives reusing the same
+registration mechanism). None of the 18 should count toward the 270
+tally. The real, authoritative gap is always `comm -23` between a fresh
+`efun_defs.c` name list and a fresh `registerEfun` name list -- 55 names
+as of the start of this session (56 before `query_num` landed last
+entry), not 232 vs 270's own naive difference. Recorded as a standing
+methodology note in `src/efun/instruct.md`'s own 0.13 section (with the
+three `mud_status`-family names -- `network_stats`/`dump_prog`/
+`memory_info` -- that turned out to have never gotten their own
+individual citation despite being assumed to fit that family by
+resemblance, now given one) so this does not need re-deriving from
+scratch by whoever runs the next pass.
+
+Every one of the 55 real gap names lands in exactly one of three
+categories, each with its own reasoning already on record (STATUS.md or
+`src/efun/instruct.md`, both cross-checked directly against the
+committed text before this report, not from memory):
+
+- **34 documented exclusions**, spanning six real reasons: shadowed
+  simul_efuns with no `efun::` delegation anywhere (`translate`, `event`
+  -- `pluralize` and `livings`/`tell_object` are the load-bearing
+  counter-examples already implemented, not exclusions); `TYPE_BUFFER`
+  architecture mismatch (`allocate_buffer`, `read_buffer`,
+  `write_buffer`, `bufferp`); `TYPE_CLASS` architecture mismatch
+  (`assemble_class`, `disassemble_class`, real bodies confirmed to
+  exist; `fetch_class_member`, `store_class_member`, folded into the
+  next category since they additionally have none); unverifiable --
+  real names with no implementation anywhere in this project's only
+  reference source (`debug_info`, `variables`, `functions`,
+  `fetch_variable`, `store_variable`, plus the two class-member names
+  just above); driver-internal-dump architecture mismatch (`mud_status`,
+  `cache_stats`, `malloc_status`, `dumpallobj`, `domain_stats`,
+  `author_stats`, `network_stats`, `dump_file_descriptors`, `dump_prog`,
+  `memory_info`, `memory_summary`, `program_info` -- twelve, all
+  individually confirmed real this session, three for the first time);
+  and one-off architecture/infrastructure gaps confirmed real but with
+  no equivalent this driver has (`get_char`/`ed`, raw-input/editor
+  infrastructure; `resolve`, async address-server IPC; `get_garbage`, no
+  GC concept; `socket_acquire`/`socket_release`, explicitly out of
+  "basics" scope per ROADMAP's own Tier 3 note; `set_reset`, no
+  `reset()`-apply mechanism exists at all).
+- **12 zero-call-site names already individually surveyed** in earlier
+  passes and re-confirmed still accurate: `zonetime`/
+  `is_daylight_savings_time` (real, deferred pending a clearer read of
+  `TZ` mutation safety against this driver's own event loop), `act_mxp`/
+  `has_mxp`/`request_term_type`/`start_request_term_type` (real, no
+  downstream MXP/TTYPE subnegotiation parsing exists to receive an
+  answer), and the six-member VRML-pose family (`rotate_x`, `rotate_y`,
+  `rotate_z`, `scale`, `id_matrix`, `lookat_rotate` -- real, zero
+  plausible use in a text-only MUD driver).
+- **2 remaining dedicated-session candidates** (down from 3 -- `origin`
+  itself was the third, taken on this session): the real `parse_*`
+  parser package (`packages/parser.c`, 3419 lines, 8 gap names:
+  `parse_refresh`/`parse_init`/`parse_sentence`/`parse_add_rule`/
+  `parse_add_synonym`/`parse_my_rules`/`parse_dump`/`parse_remove`) and
+  `reload_object` (fully implementable in principle, needs one new
+  `SocketRegistry` capability, zero real call sites to validate against).
+
+Nothing fell through a gap in this accounting -- every real name is
+accounted for, and the 18-name registered-count inflation is now a
+recorded fact rather than a silent discrepancy future reports could
+repeat.
+
+**`origin()` implementation.** Started from the architecture notes two
+sessions ago (all 8 real `ORIGIN_*` values and their real C set sites
+already enumerated) but re-verified every one directly against
+`reference/fluffos-2.9-ds2.08` before writing any dispatch logic, per
+this session's own explicit instruction -- and found the previous
+session's own flagged blocker was based on an incomplete premise.
+Real `caller_type` (`interpret.c`) is a single scalar saved/restored
+across the control stack around *every* function call
+(`push_control_stack()`/`pop_control_stack()`), confirmed directly; the
+real, narrower difficulty is that efuns themselves never get their own
+control-stack frame at all (no `push_control_stack()` call anywhere in
+an ordinary efun dispatch, confirmed directly) -- so a bare call
+resolving to the core efun table never changes the origin at all, and
+the two real exceptions genuinely observable through this driver's own
+single `OpCode::CallEfun` dispatch path (`call_other`/`"->"` and
+`evaluate`/`funcall`/`"(*fp)(...)"`, both compiler-forced through it per
+`CodeGen.cpp`'s own `forceEfun`) do their own origin tagging entirely
+inside their own `EfunTable.cpp` registrations, not at the opcode
+dispatch layer -- no name-based special case was needed at
+`OpCode::CallEfun` after all once this was traced through fully.
+
+New `Origin` enum (`VM.hpp`, 8 values) and `originName()` (`VM.cpp`,
+real `origin_name()`'s own exact string table), a new `originStack_`
+(`VM.hpp`), and a new `OriginGuard` RAII class (`VM.cpp`, matching the
+existing `ObjectFrameGuard`/`CommandGiverGuard` shape) pushed/popped at
+every real call path that pushes a genuine LPC frame:
+
+- `OpCode::Call`'s local/inherited tier -> `Origin::Local` (real
+  `F_CALL_FUNCTION_BY_ADDRESS`'s own `caller_type = ORIGIN_LOCAL`);
+  simul_efun tier -> `Origin::SimulEfun` (real `call_simul_efun()`'s own
+  `call_direct(simul_efun_ob, ..., ORIGIN_SIMUL_EFUN, ...)`); efun-table
+  tier -> no change at all, confirmed above.
+- `OpCode::CallParent` (`::name()`/`qualifier::name()`) -> `Origin::Local`
+  (real `F_CALL_INHERITED`'s own identical `ORIGIN_LOCAL` set).
+- `VM::callClosure()` (backs `evaluate`/`funcall`/`"(*fp)(...)"` and
+  every efun that invokes a closure argument) -> tiered exactly like
+  real `call_function_pointer()`'s own `FP_LOCAL`/`FP_SIMUL`/
+  `FP_FUNCTIONAL`/`FP_EFUN` split: a named local/inherited target is
+  `Origin::Local`, an anonymous `"(: ... :)"` target is
+  `Origin::Functional` (distinguished by real `function.c`'s own
+  synthesized-lambda naming convention, `"$lambda#"` + id -- new
+  `isSynthesizedLambdaName()`), a simul_efun target is
+  `Origin::SimulEfun`, and a target resolving to a core efun leaves the
+  origin unchanged (real `FP_EFUN`'s own behavior: `setup_fake_frame()`
+  sets a transient `ORIGIN_FUNCTION_POINTER` that no genuine LPC bytecode
+  ever actually runs under, since raw efun C code cannot call `origin()`
+  on itself -- this driver has no fake-frame mechanism to mirror that
+  transient step at all, and nothing could observe the difference either
+  way).
+- `VM::callFunction()` (the shared "invoke a function on an object from
+  outside the VM" entry point) gained a new `Origin origin =
+  Origin::Driver` parameter. Driver was chosen as the default because it
+  is correct for the clear majority of the ~30 real call sites into this
+  method across `Server.cpp`/`Scheduler.cpp`/`ObjectManager.cpp`/
+  `EfunTable.cpp` (confirmed individually, not assumed by category:
+  `logon()`, `process_input()`, `net_dead()`, `window_size()`, `create()`,
+  every master apply, `moveObject()`'s own `init()` propagation are all
+  real `ORIGIN_DRIVER`) -- the minority that need something else pass it
+  explicitly, each with its own citation at the call site: `call_other`'s
+  own implementation (`Origin::CallOther`, real `f__call_other()`'s own
+  `call_origin = ORIGIN_CALL_OTHER`); `map_array`/`filter_array`/
+  `sort_array`/`unique_array`/`unique_mapping`/`map_mapping`/
+  `filter_mapping`'s own string-form callback dispatch (`Origin::Efun`,
+  real `process_efun_callback()`/`call_efun_callback()`'s own
+  `ORIGIN_EFUN`, confirmed as the real, narrow meaning of that value --
+  a mudlib-*supplied callback argument* invoked from inside an efun's
+  own C body, not "any efun calling into LPC for any reason," a
+  distinction found the hard way: `present()`'s own `id()` check and
+  every master apply (`valid_hide`/`valid_shadow`/`valid_bind`,
+  `catch_tell`) all turned out to be real `ORIGIN_DRIVER` instead when
+  checked directly, not `ORIGIN_EFUN` as first assumed by the "efun
+  calls into LPC" pattern alone); socket read/write/close callback
+  firing and `input_to()`'s own string-form dispatch (`Origin::Internal`,
+  real `socket_efuns.c`'s own `safe_apply(..., ORIGIN_INTERNAL)` and
+  `comm.c`'s own `call_function_interactive()`'s identical
+  `apply(function, ob, ..., ORIGIN_INTERNAL)`); call_out's own
+  string-form firing (`Origin::Internal` too, real `call_out.c`'s own
+  `apply(cop->function.s, cop->ob, extra, ORIGIN_INTERNAL)` -- a real,
+  easy-to-miss distinction from heart_beat firing, which really is
+  `ORIGIN_DRIVER` (`backend.c`'s own `call_direct(ob, ...,
+  ORIGIN_DRIVER, 0)`) despite both being Scheduler-fired timers).
+- `VM::callFunctionInProgram()` (backs the synthesized `"$objvarinit"`
+  initializer) hardcodes `Origin::Driver` rather than taking a parameter
+  -- its one real caller (`ObjectManager::runObjectVarInitializers()`)
+  has no other real analog (real `call___INIT()`'s own `caller_type =
+  ORIGIN_DRIVER`).
+- `VM::dispatchCommand()`'s own internal handler-calling picks
+  `Origin::Driver` or `Origin::Efun` at runtime based on whether
+  `currentObject()` is already set, matching real `add_action.c`'s own
+  `user_parser()`: `"where = (current_object ? ORIGIN_EFUN :
+  ORIGIN_DRIVER);"`, with its own comment explaining why ("If this is
+  called directly from user input, then the origin is the driver and it
+  will be allowed") -- the true top-level entry
+  (`Server::dispatchLine()`, no LPC frame active yet) is Driver; a nested
+  re-dispatch (this driver's own `command()` efun, called from within an
+  already-running function, the only real way `currentObject()` ends up
+  set at this exact point) is the narrower Efun.
+
+8 new test functions (`test/test_lexer.cpp`), one per distinct
+`Origin::*` value rather than a couple of representative cases, per this
+session's own explicit instruction given how easy this efun is to get
+subtly wrong: `Local` (a bare same-object call), `CallOther` (an actual
+`->` dispatch), `SimulEfun` (a bare call resolving through the
+simul_efun tier), `Internal` (call_out string-form firing via a live
+`Scheduler`), `Efun` (a `map_array()` string-form callback), `Functional`
+(an inline `"(: origin() :)"` lambda invoked through `evaluate()`), and
+`Driver` (three real sub-cases in one test: a direct top-level call, a
+live heart_beat fire, and a real command dispatch through
+`Server::dispatchLine()` with a genuine `Connection`/`OutputContext`),
+plus a ninth, `FunctionPointer`, verified the only way it can be: a
+direct C++-level check that `originName()` still reports it correctly,
+since no genuine LPC call path in this driver (or, per the citation
+trail above, in real FluffOS either) ever actually produces it. Two
+real test-authoring mistakes caught by running the suite rather than
+assumed correct: the `Driver`/command-dispatch sub-case first tried
+`add_action()` from inside `create()` directly, which silently registers
+nothing (`resolveCommandGiver()`'s own fallback needs a live
+`Connection`/`OutputContext`, exactly the same constraint the existing
+`add_action`/`remove_action`/`query_notify_fail` test suite already
+documents and works around) -- fixed by matching that same established
+`Connection` + `OutputContext::set()` + `Server::dispatchLine()` pattern
+rather than inventing a new one. Full suite: 577 tests passing, up from
+569 before this session, no regressions, stable across three
+consecutive runs plus a full `ctest` pass.
+
 **2026-08-22 (continued): `query_num` implemented, the last real
 call-site-bearing item this row's six-corpus ranking still had left --
 everything else with real weight is now a previously-documented

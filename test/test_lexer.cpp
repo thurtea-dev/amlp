@@ -15737,6 +15737,245 @@ static void testQueryNumMatchesRealAssemblyOrderAcrossRepresentativeInputsAndLim
     std::cout << "testQueryNumMatchesRealAssemblyOrderAcrossRepresentativeInputsAndLimits OK\n";
 }
 
+// origin(): real efuns_main.c's own f_origin(), reading a single
+// per-call-path-tagged scalar (VM::currentOrigin()). Each test below
+// targets exactly one of the 8 real ORIGIN_* values through the one
+// real call path this driver verified it against reference source
+// (see EfunTable.cpp's own origin() registration comment and each real
+// call site's own citation in VM.cpp/EfunTable.cpp/Server.cpp/
+// Scheduler.cpp), not a couple of representative cases -- this is the
+// one efun in the whole row explicitly flagged as easy to get subtly
+// wrong, so every value gets its own dedicated, separately-named test.
+
+static void testOriginReturnsLocalForABareSameObjectCall() {
+    ObjectVarHarness harness;
+    harness.writeFile("/origin_local.c",
+        "string outer() { return probe(); }\n"
+        "string probe() { return origin(); }\n");
+    auto ob = harness.objects.cloneObject("/origin_local");
+    assert(ob != nullptr);
+
+    // outer() itself is reached with Origin::Driver (this call's own
+    // default) -- irrelevant here, not checked. What matters is
+    // probe()'s own origin, reached via a bare call *from LPC code*
+    // (outer() calling probe()), real F_CALL_FUNCTION_BY_ADDRESS's own
+    // "caller_type = ORIGIN_LOCAL".
+    amlp::Value result = harness.vm.callFunction(ob, "outer", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "local");
+
+    std::cout << "testOriginReturnsLocalForABareSameObjectCall OK\n";
+}
+
+static void testOriginReturnsCallOtherForACallOtherDispatch() {
+    ObjectVarHarness harness;
+    harness.writeFile("/origin_co_target.c", "string probe() { return origin(); }\n");
+    harness.writeFile("/origin_co_caller.c",
+        "string call_it(object b) { return b->probe(); }\n");
+    auto target = harness.objects.cloneObject("/origin_co_target");
+    auto caller = harness.objects.cloneObject("/origin_co_caller");
+    assert(target != nullptr && caller != nullptr);
+
+    // Real f__call_other()'s own "call_origin = ORIGIN_CALL_OTHER;"
+    // (efuns_main.c) -- target's probe() must see "call_other", not
+    // "local" (it is not target's own bare call) or "efun".
+    amlp::Value result = harness.vm.callFunction(caller, "call_it", {amlp::Value(target)});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "call_other");
+
+    std::cout << "testOriginReturnsCallOtherForACallOtherDispatch OK\n";
+}
+
+static void testOriginReturnsSimulForABareCallResolvingToSimulEfun() {
+    ObjectVarHarness harness;
+    harness.writeFile("/simul_efun.c", "string se_probe() { return origin(); }\n");
+    assert(harness.objects.loadSimulEfunObject());
+    harness.writeFile("/origin_simul_caller.c",
+        // se_probe is defined only on the simul_efun object, never
+        // locally or via inherit -- this bare call must fall through
+        // all the way to tier 3.
+        "string call_it() { return se_probe(); }\n");
+    auto caller = harness.objects.cloneObject("/origin_simul_caller");
+    assert(caller != nullptr);
+
+    // Real call_simul_efun()'s own "call_direct(simul_efun_ob, ...,
+    // ORIGIN_SIMUL_EFUN, ...)" (eoperators.c).
+    amlp::Value result = harness.vm.callFunction(caller, "call_it", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "simul");
+
+    std::cout << "testOriginReturnsSimulForABareCallResolvingToSimulEfun OK\n";
+}
+
+static void testOriginReturnsInternalForCallOutStringFormFiring() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/origin_internal.c",
+        "string result;\n"
+        "void go() { call_out(\"fire\", 0); }\n"
+        "void fire() { result = origin(); }\n"
+        "string query_result() { return result; }\n");
+    auto ob = harness.objects.cloneObject("/origin_internal");
+    assert(ob != nullptr);
+
+    harness.vm.callFunction(ob, "go", {});
+    scheduler.tickCallOuts();
+
+    // Real call_out.c's own firing loop: "apply(cop->function.s, cop->ob,
+    // extra, ORIGIN_INTERNAL)" -- not "driver" despite being a
+    // Scheduler/driver-triggered fire (see Scheduler.cpp's own citation
+    // for why heart_beat firing, by contrast, really is "driver").
+    amlp::Value result = harness.vm.callFunction(ob, "query_result", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "internal");
+
+    std::cout << "testOriginReturnsInternalForCallOutStringFormFiring OK\n";
+}
+
+static void testOriginReturnsEfunForAMapArrayCallback() {
+    ObjectVarHarness harness;
+    harness.writeFile("/origin_efun.c",
+        "string tag(mixed x) { return origin(); }\n"
+        "mixed *probe(mixed *arr) { return map_array(arr, \"tag\", this_object()); }\n");
+    auto ob = harness.objects.cloneObject("/origin_efun");
+    assert(ob != nullptr);
+
+    auto arg = std::make_shared<amlp::Array>();
+    arg->items.emplace_back(int64_t{1});
+    arg->items.emplace_back(int64_t{2});
+
+    // Real array.c's own map_array()/f_map(): "apply(func, ob,
+    // 1+numex, ORIGIN_EFUN)" for its own string-target-object callback
+    // shape -- a mudlib-supplied callback argument invoked from inside
+    // an efun's own C body, the real, narrow meaning of ORIGIN_EFUN.
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {amlp::Value(arg)});
+    auto* resultArr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(resultArr != nullptr && (*resultArr)->items.size() == 2);
+    for (auto& item : (*resultArr)->items) {
+        assert(std::holds_alternative<std::string>(item.data));
+        assert(std::get<std::string>(item.data) == "efun");
+    }
+
+    std::cout << "testOriginReturnsEfunForAMapArrayCallback OK\n";
+}
+
+static void testOriginReturnsFunctionalForAnInlineLambdaBody() {
+    ObjectVarHarness harness;
+    harness.writeFile("/origin_functional.c",
+        "string probe() {\n"
+        "    mixed f = (: origin() :);\n"
+        "    return evaluate(f);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/origin_functional");
+    assert(ob != nullptr);
+
+    // Real call_function_pointer()'s own "case FP_FUNCTIONAL: ...
+    // caller_type = ORIGIN_FUNCTIONAL;" (function.c) -- an anonymous
+    // "(: ... :)" body, not the "local" a named function pointer's own
+    // target would see (see testOriginReturnsLocalForABareSameObjectCall's
+    // own sibling coverage of that distinction via
+    // isSynthesizedLambdaName()).
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    assert(std::get<std::string>(result.data) == "functional");
+
+    std::cout << "testOriginReturnsFunctionalForAnInlineLambdaBody OK\n";
+}
+
+static void testOriginReturnsDriverForTopLevelDispatchHeartBeatAndCommandDispatch() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/origin_driver.c",
+        "string hb_result;\n"
+        "string cmd_result;\n"
+        "void setup() { enable_commands(); add_action(\"cmd_go\", \"go\"); }\n"
+        "void enable_hb() { set_heart_beat(1); }\n"
+        "string probe() { return origin(); }\n"
+        "void heart_beat() { hb_result = origin(); }\n"
+        "string query_hb() { return hb_result; }\n"
+        "int cmd_go(string arg) { cmd_result = origin(); return 1; }\n"
+        "string query_cmd() { return cmd_result; }\n");
+    auto ob = harness.objects.cloneObject("/origin_driver");
+    assert(ob != nullptr);
+
+    // add_action() only registers correctly from inside a command-giver-
+    // resolvable context -- resolveCommandGiver() (EfunTable.cpp) falls
+    // back to OutputContext::current()'s own bound object when
+    // VM::commandGiver()'s explicit stack is empty, so a bare setup()
+    // call with no active Connection/OutputContext silently registers
+    // nothing (real add_action()'s own documented no-op-outside-context
+    // behavior). Matches the exact working pattern the
+    // query_notify_fail test suite already establishes: a real
+    // Connection, OutputContext::set() around setup(), and dispatch
+    // through Server::dispatchLine() rather than VM::dispatchCommand()
+    // directly.
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(ob);
+    amlp::OutputContext::set(&conn);
+    harness.vm.callFunction(ob, "setup", {});
+
+    // (a) VM::callFunction()'s own default -- real logon()/create()/
+    // process_input()/net_dead()/window_size()/every master apply all
+    // confirmed real ORIGIN_DRIVER, this is the shared entry point all
+    // of them go through.
+    amlp::Value direct = harness.vm.callFunction(ob, "probe", {});
+    assert(std::holds_alternative<std::string>(direct.data));
+    assert(std::get<std::string>(direct.data) == "driver");
+
+    // (b) heart_beat firing -- real backend.c's own "call_direct(ob,
+    // ..., ORIGIN_DRIVER, 0)". set_heart_beat() is a core efun, called
+    // from within LPC (enable_hb()), the same "bare call from the
+    // object's own code" shape the existing set_heart_beat test suite
+    // already establishes -- not something to invoke directly through
+    // VM::callFunction() by name, which would just silently no-op
+    // against a nonexistent "set_heart_beat" *local* function.
+    harness.vm.callFunction(ob, "enable_hb", {});
+    scheduler.tickHeartbeats();
+    amlp::Value hb = harness.vm.callFunction(ob, "query_hb", {});
+    assert(std::holds_alternative<std::string>(hb.data));
+    assert(std::get<std::string>(hb.data) == "driver");
+
+    // (c) top-level command dispatch, the real entry point (real
+    // process_input()/parse_command() from a freshly typed line, this
+    // driver's own Server::dispatchLine() -> VM::dispatchCommand(),
+    // reached with no LPC frame already active, current_object null) --
+    // real add_action.c's own "where = (current_object ? ORIGIN_EFUN :
+    // ORIGIN_DRIVER);" resolves to the driver half here.
+    amlp::Server::dispatchLine(harness.vm, conn, "go");
+    amlp::OutputContext::set(nullptr);
+    amlp::Value cmd = harness.vm.callFunction(ob, "query_cmd", {});
+    assert(std::holds_alternative<std::string>(cmd.data));
+    assert(std::get<std::string>(cmd.data) == "driver");
+    ::close(fds[1]);
+
+    std::cout << "testOriginReturnsDriverForTopLevelDispatchHeartBeatAndCommandDispatch OK\n";
+}
+
+static void testOriginNameCoversAllEightRealValuesIncludingTheUnreachableFunctionPointer() {
+    // Direct C++-level check of the string table itself (real
+    // origin_name()'s own "driver"/"local"/"call_other"/"simul"/
+    // "internal"/"efun"/"function pointer"/"functional"), including
+    // Origin::FunctionPointer -- verified unreachable from any genuine
+    // LPC call path in this driver (see Origin's own VM.hpp comment for
+    // the full real-semantics citation for why), so this is the only
+    // way to confirm origin_name() would still report it correctly if
+    // something unexpected ever did reach it.
+    assert(std::string(amlp::originName(amlp::Origin::Driver)) == "driver");
+    assert(std::string(amlp::originName(amlp::Origin::Local)) == "local");
+    assert(std::string(amlp::originName(amlp::Origin::CallOther)) == "call_other");
+    assert(std::string(amlp::originName(amlp::Origin::SimulEfun)) == "simul");
+    assert(std::string(amlp::originName(amlp::Origin::Internal)) == "internal");
+    assert(std::string(amlp::originName(amlp::Origin::Efun)) == "efun");
+    assert(std::string(amlp::originName(amlp::Origin::FunctionPointer)) == "function pointer");
+    assert(std::string(amlp::originName(amlp::Origin::Functional)) == "functional");
+
+    std::cout << "testOriginNameCoversAllEightRealValuesIncludingTheUnreachableFunctionPointer OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -16313,6 +16552,14 @@ int main() {
     testSetAuthorAcceptsStringReturnsVoidAndThrowsOnWrongType();
     testReplaceableTrueOnlyWhenEveryLocalFunctionIsIgnorable();
     testQueryNumMatchesRealAssemblyOrderAcrossRepresentativeInputsAndLimits();
+    testOriginReturnsLocalForABareSameObjectCall();
+    testOriginReturnsCallOtherForACallOtherDispatch();
+    testOriginReturnsSimulForABareCallResolvingToSimulEfun();
+    testOriginReturnsInternalForCallOutStringFormFiring();
+    testOriginReturnsEfunForAMapArrayCallback();
+    testOriginReturnsFunctionalForAnInlineLambdaBody();
+    testOriginReturnsDriverForTopLevelDispatchHeartBeatAndCommandDispatch();
+    testOriginNameCoversAllEightRealValuesIncludingTheUnreachableFunctionPointer();
     std::cout << "all tests passed\n";
     return 0;
 }

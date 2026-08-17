@@ -137,6 +137,47 @@ below) against the current `EfunTable.cpp` registration list, then rank the
 remaining gap by real call-site frequency across `mudlib/`, excluding
 `/doc/` (grep hits there are documentation, not code). Tier the work.
 
+**Registered-count accounting note (2026-08-23), important for anyone
+computing "how many of the 270 are done" from `EfunTable.cpp`'s own
+registered-name count alone:** `grep -c registerEfun` overcounts against
+the real 270-name `efun_defs.c` target by 18, not because of a bug, but
+because 18 registered names are not literal `efun_defs.c` entries for
+one of three legitimate reasons, and none of the 18 should be counted
+toward the 270 tally even though they are real, working registrations.
+(1) Six are real FluffOS names per `func_spec.c` that this exact
+vendored build's own `efun_defs.c` omits because their activating
+`#ifdef` is off in this build (confirmed individually, not assumed):
+`funcall`/`m_delete`/`query_once_interactive`/`strstr` (all real
+`COMPAT_32` aliases, that option inactive here), `set_light` (real,
+`#ifndef NO_LIGHT` -- `NO_LIGHT` is defined in this build), and
+`set_debug_level` (real, `#ifdef DEBUG_MACRO` -- inactive here). All
+six were kept anyway because this driver's own bundled Lil test mudlib
+genuinely calls them. (2) Two are driver additions this row's own
+instruct.md/prompt.md task spec explicitly asked for under those exact
+names despite a full grep of the vendored source confirming neither is
+real (`regexplode`, `regexp_assoc` -- see their own registration
+comments in `EfunTable.cpp`, already self-documented at the time each
+was added). (3) Ten are unrelated to row 0.13 entirely: `new` (real
+FluffOS treats this as a dedicated lexer keyword, `L_NEW` in `lex.c`,
+never an `efun_defs.c`-dispatched table entry at all -- this driver
+implements the same observable clone operation as a plain efun alias
+for simplicity, which is why `EfunTable.cpp`'s own comment loosely
+called it "the real alias `new`," imprecise phrasing worth fixing next
+time that comment is touched, though the behavior itself is correct),
+`query_screen_width`/`query_screen_height` (real, driver-added
+convenience efuns, already self-documented as non-real at their own
+registration site), and the seven Rifts combat-math functions
+(`pp_combat_bonus`, `ps_damage_bonus`, `occ_base_apm`,
+`roll_weapon_damage_dice`, `query_strike_bonus`, `query_parry_bonus`,
+`query_dodge_bonus`) -- pure math extracted from this mudlib's own LPC
+`daemon/rifts_combat.c` into native C++ for an entirely separate,
+earlier "game-logic-mechanics move" initiative, registered through the
+efun table purely as an implementation mechanism, never real FluffOS
+names and never part of this row's own tracking. The real, authoritative
+count is always `comm -23` between a fresh `efun_defs.c` name list and
+a fresh `registerEfun` name list (every session's own gap.txt already
+computes it this way) -- never the raw registered-name count by itself.
+
 **Note on the previous version of this list:** it named 17 efuns that turned
 out not to be real names in this reference build at all (`string_to_array`,
 `trim`, `pad`, `count`, `slice_array`, `flatten_array`, `m_add`, `mappingp`,
@@ -226,7 +267,19 @@ four at once. `author_stats`, `domain_stats`, `dump_file_descriptors`,
 site in `mudlib/nightmare3_fluffos_v2/lib/`) but sit in the identical
 architecture-mismatch category as `mud_status`/`cache_stats` above --
 driver-internal C-struct dumps this driver's model has nothing
-corresponding to. `children` looked real in the first raw grep pass (2
+corresponding to. Three more real names round out this same family,
+each individually confirmed (2026-08-23 accounting pass) rather than
+just assumed to fit by resemblance: `network_stats` (real,
+`packages/contrib.c` -- global inbound/outbound packet and byte
+counters, `inet_in_packets` etc, this driver's `Server`/`Connection`
+classes track no equivalent counters at all), `dump_prog` (real,
+`disassembler.c` -- a disassembled dump of a real FluffOS `program_t`'s
+own internal bytecode/function-table/string-pool structures in that
+driver's own specific binary layout, meaningless against this driver's
+entirely different `CompiledProgram` representation), and `memory_info`
+(real, `efuns_main.c` -- real driver-internal memory-block accounting,
+`total_prog_block_size`/reserved-area sizes, this driver's shared_ptr-
+managed C++ objects have no equivalent manual accounting to report). `children` looked real in the first raw grep pass (2
 hits) but both turned out to be descriptive comments explaining the
 efun's own behavior (`secure/SimulEfun/get_object.c`,
 `secure/cmds/creator/_eval.c`), not real calls -- zero actual call sites,
@@ -521,6 +574,33 @@ passes: the VRML-pose family, `zonetime`/`is_daylight_savings_time`,
 `request_term_type`/`act_mxp`/`has_mxp`, `program_info`/
 `memory_summary`/`store_class_member`) only for anything a fresh read
 might have missed, not expect new real demand to appear there.
+
+**Correction, 2026-08-23: `origin` is no longer one of the three
+dedicated-session items above -- it was taken on and implemented in
+full that session.** See STATUS.md's own 2026-08-23 entry for the
+complete derivation (every real `ORIGIN_*` set site individually
+re-verified, not carried forward from the architecture notes two
+sessions before it) and the corrected finding that resolved the
+previously-flagged blocker: real efuns never get their own control-
+stack frame at all, so the feared `OpCode::CallEfun`
+`call_other`-vs-ordinary-efun-name conflation never actually needed a
+name-based special case at the opcode level -- both real exceptions
+(`call_other` and `evaluate`/`funcall`/`"(*fp)(...)"`) do their own
+origin tagging entirely inside their own `EfunTable.cpp` registrations
+instead. Two dedicated-session candidates remain: the real `parse_*`
+package (`packages/parser.c`, 3419 lines) and `reload_object`.
+
+**Accounting note, 2026-08-23:** with `origin` done, the real gap
+against `efun_defs.c`'s own 270 names is 55, not the raw
+`registerEfun`-count difference -- see STATUS.md's own 2026-08-23 entry
+for the full reconciliation (18 registered names are not literal
+`efun_defs.c` entries, for reasons that were never previously written
+down in one place) and the complete three-category accounting of all 55
+remaining real gap names (34 documented exclusions, 12 already-surveyed
+zero-call-site names, 2 dedicated-session candidates). Also newly
+individually cited there, not just assumed to fit the driver-internal-
+dump family by resemblance: `network_stats` (`packages/contrib.c`),
+`dump_prog` (`disassembler.c`), `memory_info` (`efuns_main.c`).
 
 **Tier 2 (medium effort), corrected:** `query_actions` removed (not a
 real efun name, see `commands`'s own row above). Everything else in the

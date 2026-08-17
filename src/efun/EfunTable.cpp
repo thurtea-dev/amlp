@@ -1181,7 +1181,20 @@ void registerCoreEfuns() {
             callArgs.reserve(1 + extra.size());
             callArgs.push_back(item);
             callArgs.insert(callArgs.end(), extra.begin(), extra.end());
-            result->items.push_back(vm.callFunction(target, funcName, std::move(callArgs)));
+            // Real array.c's own map_array()/f_map() calls this exact
+            // string-target-object shape via "apply(func, ob, 1+numex,
+            // ORIGIN_EFUN)" (confirmed directly) -- a mudlib-supplied
+            // callback argument invoked from inside an efun's own C
+            // body, the real, narrow category ORIGIN_EFUN actually
+            // covers (not "any efun calling into LPC for any reason at
+            // all" -- present()'s own id() check and every master apply
+            // below use ORIGIN_DRIVER instead, confirmed separately,
+            // each at its own call site). Every other map_array/
+            // filter_array/sort_array/unique_array/unique_mapping/
+            // map_mapping/filter_mapping string-form callback below
+            // shares this same real citation, not repeated at each one.
+            result->items.push_back(
+                vm.callFunction(target, funcName, std::move(callArgs), Origin::Efun));
         }
         return Value(result);
     };
@@ -1235,7 +1248,8 @@ void registerCoreEfuns() {
             callArgs.reserve(1 + extra.size());
             callArgs.push_back(item);
             callArgs.insert(callArgs.end(), extra.begin(), extra.end());
-            if (isTruthy(vm.callFunction(target, funcName, std::move(callArgs)))) {
+            // Origin::Efun -- see map_array's own comment above.
+            if (isTruthy(vm.callFunction(target, funcName, std::move(callArgs), Origin::Efun))) {
                 result->items.push_back(item);
             }
         }
@@ -1280,7 +1294,12 @@ void registerCoreEfuns() {
                 }
                 const std::string& funcName = std::get<std::string>(args[1].data);
                 auto target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
-                cmp = vm.callFunction(target, funcName, {a, b});
+                // Origin::Efun -- real f_sort_array() (array.c) also
+                // dispatches its comparator via the same generic
+                // process_efun_callback()/call_efun_callback()
+                // mechanism map_array's own comment above cites,
+                // confirmed directly (array.c's own f_sort_array()).
+                cmp = vm.callFunction(target, funcName, {a, b}, Origin::Efun);
             } else {
                 throw LpcRuntimeError("sort_array: expected a string or function second argument");
             }
@@ -1339,7 +1358,11 @@ void registerCoreEfuns() {
             } else {
                 auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&item.data);
                 if (!obPtr || !*obPtr) continue;
-                key = vm.callFunction(*obPtr, *funcName, {});
+                // Origin::Efun -- real f_unique_array() (array.c) calls
+                // this exact classifier-on-the-element-itself shape via
+                // "apply(func, v->item[i].u.ob, 0, ORIGIN_EFUN)",
+                // confirmed directly.
+                key = vm.callFunction(*obPtr, *funcName, {}, Origin::Efun);
             }
             if (valuesEqual(key, skip)) continue;
 
@@ -1410,8 +1433,12 @@ void registerCoreEfuns() {
             callArgs.reserve(1 + extra.size());
             callArgs.push_back(item);
             callArgs.insert(callArgs.end(), extra.begin(), extra.end());
+            // Origin::Efun -- real f_unique_mapping() (mapping.c) also
+            // dispatches via the same generic process_efun_callback()/
+            // call_efun_callback() mechanism map_array's own comment
+            // above cites.
             Value key = closurePtr ? vm.callClosure(*closurePtr, std::move(callArgs))
-                                    : vm.callFunction(target, *funcName, std::move(callArgs));
+                                    : vm.callFunction(target, *funcName, std::move(callArgs), Origin::Efun);
 
             size_t entryIdx = result->entries.size();
             for (size_t i = 0; i < result->entries.size(); ++i) {
@@ -1776,7 +1803,11 @@ void registerCoreEfuns() {
 
         const std::string& functionName = std::get<std::string>(args[1].data);
         std::vector<Value> forwardedArgs(args.begin() + 2, args.end());
-        return vm.callFunction(target, functionName, std::move(forwardedArgs));
+        // Real f__call_other()'s own "call_origin = ORIGIN_CALL_OTHER;"
+        // right before apply_low() (efuns_main.c), confirmed directly --
+        // this is the one real call site that actually sets
+        // ORIGIN_CALL_OTHER anywhere in the reference source.
+        return vm.callFunction(target, functionName, std::move(forwardedArgs), Origin::CallOther);
     });
 
     // object master() -- func_spec.c: "object master();". Just the
@@ -3052,12 +3083,20 @@ void registerCoreEfuns() {
     // mudlib has -- secure/SimulEfun/misc.c's own get_stack() -- only
     // ever indexes call_stack(0)/call_stack(2) results through
     // identify(), which does not care about that distinction for a
-    // plain object). Modes 2 and 3 have no backing data anywhere in
-    // this driver (no per-frame function-name or origin tracking
-    // exists) and throw a clear error naming the gap, rather than
-    // guessing -- get_stack()'s own real use is a wizard debug tool,
-    // not gameplay logic, so a hard failure there is an acceptable,
-    // honest outcome versus silently returning wrong data.
+    // plain object). Mode 2 has no backing data anywhere in this driver
+    // (no per-frame function-name tracking exists). Mode 3 is a
+    // separate story since origin() was implemented (VM::originStack_):
+    // per-frame origin data now exists, but not in a form mode 3 could
+    // safely zip against callStack_ index-for-index -- originStack_ is
+    // only ever pushed alongside a real run() call, while callStack_
+    // also gets a bookkeeping-only push with no run() at all for a
+    // closure that resolves to a core efun (see callClosure()'s own
+    // ObjectFrameGuard comment), so the two can differ in length right
+    // at that point and a naive same-index pairing would silently
+    // misalign. Both modes throw a clear error naming the gap rather
+    // than guessing -- get_stack()'s own real use is a wizard debug
+    // tool, not gameplay logic, so a hard failure there is an
+    // acceptable, honest outcome versus silently returning wrong data.
     t.registerEfun("call_stack", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
             throw LpcRuntimeError("call_stack: expected an int argument");
@@ -3087,6 +3126,24 @@ void registerCoreEfuns() {
             }
         }
         return Value(result);
+    });
+
+    // string origin() -- real efuns_main.c's own f_origin():
+    // "push_constant_string(origin_name(caller_type))". Reads
+    // VM::currentOrigin(), set by the same real per-call-path tagging
+    // VM.hpp's own Origin enum and VM.cpp's own OriginGuard document in
+    // full (OpCode::Call's local/simul_efun tiers, OpCode::CallParent,
+    // callClosure()'s own tiered resolution, and callFunction()'s own
+    // explicit origin parameter, threaded through every real caller of
+    // it -- see each one's own citation). The one real call site this
+    // row's own six-corpus ranking ever found (secure/daemon/chat.c's
+    // own "origin() != ORIGIN_LOCAL" security gate) is exactly what this
+    // implementation was verified against most carefully: OpCode::Call's
+    // own local-tier branch is the one path that must report "local"
+    // correctly and never anything else for an ordinary same-object bare
+    // call, confirmed directly against real F_CALL_FUNCTION_BY_ADDRESS.
+    t.registerEfun("origin", [](VM& vm, std::vector<Value>&) -> Value {
+        return Value(std::string(originName(vm.currentOrigin())));
     });
 
     // void error(string msg) -- raises a real runtime error carrying
@@ -7446,7 +7503,11 @@ void registerCoreEfuns() {
             callArgs.push_back(entry.first);
             callArgs.push_back(entry.second);
             callArgs.insert(callArgs.end(), extra.begin(), extra.end());
-            entry.second = vm.callFunction(target, funcName, std::move(callArgs));
+            // Origin::Efun -- real map_mapping() (mapping.c, F_MAP,
+            // the same core efun code map_array shares) also dispatches
+            // via process_efun_callback()/call_efun_callback(), see
+            // map_array's own comment above.
+            entry.second = vm.callFunction(target, funcName, std::move(callArgs), Origin::Efun);
         }
         return Value(result);
     });
@@ -7501,7 +7562,11 @@ void registerCoreEfuns() {
             callArgs.push_back(entry.first);
             callArgs.push_back(entry.second);
             callArgs.insert(callArgs.end(), extra.begin(), extra.end());
-            if (isTruthy(vm.callFunction(target, funcName, std::move(callArgs)))) {
+            // Origin::Efun -- real filter_mapping() (mapping.c, F_FILTER,
+            // shared with filter_array) also dispatches via
+            // process_efun_callback()/call_efun_callback(), see
+            // map_array's own comment above.
+            if (isTruthy(vm.callFunction(target, funcName, std::move(callArgs), Origin::Efun))) {
                 result->entries.push_back(entry);
             }
         }

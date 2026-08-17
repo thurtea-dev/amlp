@@ -50,7 +50,13 @@ void fireSocketCallback(VM& vm, const Value& callback, const std::weak_ptr<LpcOb
         auto ob = owner.lock();
         if (!ob) return;
         try {
-            vm.callFunction(ob, *name, std::move(args));
+            // Real socket_efuns.c's own read/close/write callback firing:
+            // "safe_apply(callback.s, lpc_socks[fd].owner_ob, num_arg,
+            // ORIGIN_INTERNAL)", confirmed directly (both real call sites,
+            // not just one) -- the same real origin call_out()'s own
+            // string-form firing uses (see Scheduler.cpp's own comment),
+            // not ORIGIN_DRIVER despite both being driver-triggered.
+            vm.callFunction(ob, *name, std::move(args), Origin::Internal);
         } catch (const std::exception& e) {
             std::cerr << "[net] socket callback " << *name << "() failed: " << e.what() << "\n";
         }
@@ -260,7 +266,15 @@ void Server::dispatchLine(VM& vm, Connection& conn, const std::string& line) {
             callArgs.reserve(1 + pending->extraArgs.size());
             callArgs.emplace_back(line);
             for (auto& extra : pending->extraArgs) callArgs.push_back(extra);
-            vm.callFunction(target, pending->function, std::move(callArgs));
+            // Real comm.c's own call_function_interactive(): "apply(function,
+            // ob, num_arg + 1, ORIGIN_INTERNAL)" for the string-name form,
+            // confirmed directly (the closure form there calls
+            // call_function_pointer() instead, exactly what
+            // VM::callClosure()'s own tiered resolution already handles for
+            // free, no explicit origin needed at this driver's own
+            // equivalent -- notify_no_command()'s function-form dispatch
+            // just below in this same file works the same way).
+            vm.callFunction(target, pending->function, std::move(callArgs), Origin::Internal);
         }
         return;
     }

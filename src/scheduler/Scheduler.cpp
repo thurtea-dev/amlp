@@ -214,6 +214,14 @@ void Scheduler::tickHeartbeats() {
     for (auto& obj : due) {
         try {
             vm_.resetEvalCost();
+            // Origin::Driver (this call's own default): real backend.c's
+            // own heart_beat firing is "call_direct(ob, ...,
+            // ORIGIN_DRIVER, 0)", confirmed directly -- unlike call_out's
+            // own string-form firing just below in tickCallOuts(), which
+            // is real ORIGIN_INTERNAL instead (see that call site's own
+            // citation); the two driver-fired timers are not the same
+            // origin, so this is left explicit-by-omission deliberately,
+            // not an oversight.
             vm_.callFunction(obj, "heart_beat", {});
         } catch (const std::exception& e) {
             std::cerr << "[heart_beat] " << obj->filename() << ": " << e.what() << "\n";
@@ -257,7 +265,16 @@ void Scheduler::tickCallOuts() {
         if (!obj) continue; // real: "if (!ob || (ob->flags & O_DESTRUCTED)) { free_call(cop); }" -- silently dropped, not an error.
         try {
             vm_.resetEvalCost();
-            vm_.callFunction(obj, entry.function, entry.args);
+            // Real call_out.c's own firing loop: "apply(cop->function.s,
+            // cop->ob, extra, ORIGIN_INTERNAL)" for the string-name form
+            // (confirmed directly) -- *not* ORIGIN_DRIVER despite being a
+            // driver-triggered timer fire, the same real distinction
+            // socket callbacks and input_to() dispatch also make (see
+            // Server.cpp's own two citations). heart_beat firing just
+            // above this, by contrast, really is ORIGIN_DRIVER (backend.c's
+            // own "call_direct(ob, ..., ORIGIN_DRIVER, 0)") -- the two
+            // are not interchangeable despite both being Scheduler-fired.
+            vm_.callFunction(obj, entry.function, entry.args, Origin::Internal);
         } catch (const std::exception& e) {
             std::cerr << "[call_out] " << obj->filename() << "::" << entry.function << "(): " << e.what() << "\n";
         }

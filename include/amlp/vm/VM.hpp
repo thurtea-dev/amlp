@@ -12,6 +12,40 @@ class LpcObject;
 class Config;
 class Scheduler;
 
+// Real origin.h's own enum, confirmed directly against efuns_main.c's
+// f_origin() (push_constant_string(origin_name(caller_type))) and every
+// real C caller_type/call_origin set site before writing any dispatch
+// logic (function.c, interpret.c, add_action.c, backend.c, master.c,
+// eoperators.c, comm.c, call_out.c, socket_efuns.c, object.c) -- see
+// VM.cpp's own OriginGuard and each call site's own comment for the
+// full per-value citation trail. Real caller_type is a single scalar
+// saved/restored across the control stack around every function call
+// (push_control_stack()/pop_control_stack()), the exact shape this
+// driver's own originStack_ mirrors -- not a per-efun classification of
+// any kind. FunctionPointer is kept for API completeness (origin_name()
+// must be able to name it) even though no call path in either the real
+// driver or this one appears to ever leave it as a *real* LPC function's
+// own observable origin: real call_function_pointer() only ever sets it
+// transiently for its own synthetic "fake frame" (setup_fake_frame()),
+// immediately overwritten by FP_LOCAL/FP_SIMUL/FP_FUNCTIONAL's own
+// explicit origin before any genuine LPC bytecode runs, and left
+// unchanged only for FP_EFUN, whose raw C efun body never calls
+// origin() on itself either.
+enum class Origin {
+    Driver,
+    Local,
+    CallOther,
+    SimulEfun,
+    Internal,
+    Efun,
+    FunctionPointer,
+    Functional,
+};
+
+// origin_name()'s own exact string table (efuns_main.c), same index
+// order as real origin.h's own bit-shift enum.
+const char* originName(Origin origin);
+
 class VM {
 public:
     VM(ObjectManager& objects, Config& config);
@@ -34,9 +68,21 @@ public:
     // Connection).
     Config& config() const { return config_; }
 
+    // origin defaults to Origin::Driver, correct for the majority of
+    // real call sites into this method (every "invoke a function on an
+    // object from outside the VM" caller confirmed real-ORIGIN_DRIVER:
+    // logon(), process_input(), net_dead(), window_size(), create(),
+    // every master apply, moveObject()'s own init() propagation) --
+    // callers whose real analog uses a different origin (call_other()
+    // itself: CallOther; a call_out()/socket callback firing:
+    // Internal; an efun's own C body invoking a mudlib-supplied
+    // callback argument, e.g. map_array()/sort_array()/
+    // unique_mapping(): Efun) pass it explicitly. See each call site's
+    // own comment for its citation.
     Value callFunction(const std::shared_ptr<LpcObject>& obj,
                         const std::string& functionName,
-                        std::vector<Value> args);
+                        std::vector<Value> args,
+                        Origin origin = Origin::Driver);
 
     Value applyMaster(const std::string& applyName, std::vector<Value> args);
 
@@ -136,10 +182,28 @@ public:
     // filenames) is derived from this same stack's own objects'
     // filenames, since this driver has no separate per-frame program
     // pointer distinct from "whichever object's function is running".
-    // Modes 2 (per-frame function name) and 3 (per-frame origin) have no
-    // backing data here at all -- see call_stack()'s own EfunTable.cpp
-    // registration comment for why those two are not implemented.
+    // Mode 2 (per-frame function name) still has no backing data here at
+    // all -- see call_stack()'s own EfunTable.cpp registration comment.
+    // Mode 3 (per-frame origin) is a different story as of the origin()
+    // implementation below: originStack_ now tracks exactly this, one
+    // entry per still-active run() call in the same parallel shape as
+    // callStack_ -- call_stack() mode 3 itself is still not wired up
+    // (out of scope for the row that added origin() -- see STATUS.md),
+    // but the data it would need now exists, a real, cheap follow-on
+    // for whoever picks that up next rather than a fresh implementation
+    // from scratch.
     const std::vector<std::shared_ptr<LpcObject>>& callFrames() const { return callStack_; }
+
+    // See originStack_'s own comment. currentOrigin() defaults to
+    // Origin::Driver when nothing has ever pushed (an origin() call
+    // reached with no active frame at all -- should not happen from
+    // genuine LPC code, but matches real backend.c's own "caller_type
+    // defaults to driver when unset" fallback rather than an arbitrary
+    // choice). pushOrigin()/popOrigin() are the RAII-guarded push/pop
+    // pair every real call path below uses (see OriginGuard, VM.cpp).
+    Origin currentOrigin() const { return originStack_.empty() ? Origin::Driver : originStack_.back(); }
+    void pushOrigin(Origin origin) { originStack_.push_back(origin); }
+    void popOrigin() { originStack_.pop_back(); }
 
     // real FluffOS's previous_object(int idx = 0) (efuns_main.c's
     // f_previous_object()): the object idx object-changing calls back
@@ -332,6 +396,22 @@ private:
     // same dispatchCommand() path) nests a new verb without necessarily
     // changing the command_giver.
     std::vector<std::string> verbStack_;
+
+    // See currentOrigin()/pushOrigin()/popOrigin() -- real caller_type
+    // (interpret.c), saved/restored across the control stack around
+    // every function call (push_control_stack()/pop_control_stack()).
+    // One entry per still-active run() call, the same parallel shape
+    // callStack_ already has, pushed/popped via the RAII OriginGuard
+    // (VM.cpp) at every real call path that pushes a genuine LPC frame
+    // -- OpCode::Call's local/simul_efun tiers, OpCode::CallParent,
+    // callClosure()'s own tiered resolution, and callFunction()'s own
+    // final dispatch. Deliberately *not* pushed for a bare call that
+    // resolves to the core efun table: real efuns never get their own
+    // control-stack frame at all (confirmed directly -- no
+    // push_control_stack() call anywhere in an ordinary efun
+    // dispatch), so the origin stays whatever the calling function's
+    // own frame already has, unchanged.
+    std::vector<Origin> originStack_;
 
     // See enqueueReplaceProgram()/processPendingReplacePrograms(). Real
     // obj_list_replace (replace_program.c), a plain linked list of
