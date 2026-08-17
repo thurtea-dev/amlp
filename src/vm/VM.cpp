@@ -709,12 +709,14 @@ std::shared_ptr<LpcObject> VM::cloneObject(const std::string& filename) {
     return objects_.cloneObject(filename);
 }
 
-void VM::destructObject(const std::shared_ptr<LpcObject>& obj) {
-    objects_.destructObject(obj);
+void VM::destructObject(const std::shared_ptr<LpcObject>& obj,
+                         const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed) {
+    objects_.destructObject(obj, onDestructed);
 }
 
-void VM::reloadObject(const std::shared_ptr<LpcObject>& obj) {
-    objects_.reloadObject(obj);
+void VM::reloadObject(const std::shared_ptr<LpcObject>& obj,
+                       const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed) {
+    objects_.reloadObject(obj, onDestructed);
 }
 
 std::shared_ptr<LpcObject> VM::masterObject() const {

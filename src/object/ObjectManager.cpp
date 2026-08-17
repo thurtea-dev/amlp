@@ -702,7 +702,8 @@ std::shared_ptr<LpcObject> ObjectManager::lookupLoadedObject(const std::string& 
     return it != loaded_.end() ? it->second : nullptr;
 }
 
-void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
+void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj,
+                                    const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed) {
     if (!obj || obj->isDestructed()) return;
 
     // Shadow chain cleanup (Phase 0.6), confirmed directly against real
@@ -729,7 +730,7 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
             top->setShadowing(std::weak_ptr<LpcObject>());
             auto current = top;
             top = below;
-            destructObject(current);
+            destructObject(current, onDestructed);
         }
         return;
     }
@@ -748,6 +749,19 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
     }
     obj->setShadowing(std::weak_ptr<LpcObject>());
     obj->setShadowedBy(std::weak_ptr<LpcObject>());
+
+    // Real destruct_object()'s own "if (ob->flags & O_EFUN_SOCKET)
+    // close_referencing_sockets(ob);" (simulate.c) -- confirmed sitting
+    // right near the top of the real function, before its own shadow/
+    // snoop/environment handling, closing every efun socket obj owns.
+    // See this method's own header comment for why this is a callback
+    // rather than a direct call: ObjectManager cannot depend on `net`
+    // (SocketRegistry's own module), which already depends on `object`.
+    // Fires exactly once per object this call actually destructs --
+    // reached here both for a direct call on obj and, via the
+    // recursively-forwarded onDestructed above, for every shadowing
+    // object the cascade branch destructs along with it.
+    if (onDestructed) onDestructed(obj);
 
     // Real destruct_object() (simulate.c): "if (ob->flags & O_SNOOP) {
     // for (i...) if (all_users[i] && all_users[i]->snooped_by == ob)
@@ -823,7 +837,8 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
     loaded_.erase(obj->filename());
 }
 
-void ObjectManager::reloadObject(const std::shared_ptr<LpcObject>& obj) {
+void ObjectManager::reloadObject(const std::shared_ptr<LpcObject>& obj,
+                                  const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed) {
     // Real "if (!obj->prog) return;" -- a swapped-out object with no
     // compiled program at all. This driver's LpcObject always has one
     // (no swap concept), so the only real equivalent guard is a plain
@@ -858,7 +873,7 @@ void ObjectManager::reloadObject(const std::shared_ptr<LpcObject>& obj) {
             auto next = cur->shadowedBy().lock();
             cur->setShadowing(std::weak_ptr<LpcObject>());
             cur->setShadowedBy(std::weak_ptr<LpcObject>());
-            destructObject(cur);
+            destructObject(cur, onDestructed);
             cur = next;
         }
     } else {

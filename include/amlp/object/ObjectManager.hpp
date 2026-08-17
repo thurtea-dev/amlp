@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -42,7 +43,23 @@ public:
     // for how both are exposed from this one lookup.
     std::shared_ptr<LpcObject> lookupLoadedObject(const std::string& filename) const;
 
-    void destructObject(const std::shared_ptr<LpcObject>& obj);
+    // onDestructed, if set, is called exactly once for every object this
+    // call *actually* destructs -- both obj itself and, for the real
+    // shadow-cascade case (see this method's own .cpp comment), every
+    // shadowing object destructed along with it, each at the moment its
+    // own real destruction steps run (matching real destruct_object()'s
+    // own recursive calls, each independently running its own full body
+    // for whichever object it was actually invoked on). Threaded through
+    // this way, rather than called directly here, so that
+    // ObjectManager itself never has to depend on `net` -- see
+    // EfunTable.cpp's own destruct() registration, the one real caller
+    // that needs this (closing every efun socket the destructed object
+    // owns, real destruct_object()'s own close_referencing_sockets(ob)
+    // call, simulate.c). Empty by default: every other caller of this
+    // method (the recursive cascade calls inside this same class) simply
+    // forwards whatever it was given, never invents its own.
+    void destructObject(const std::shared_ptr<LpcObject>& obj,
+                         const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed = {});
 
     // real object.c's own reload_object(obj): resets obj back to a
     // freshly-cloned-looking state in place (same identity, same
@@ -73,7 +90,18 @@ public:
     // EfunTable.cpp's own reload_object() registration for where those
     // two run instead, and why doing them before this call rather than
     // real code's own interleaved order has no observable effect.
-    void reloadObject(const std::shared_ptr<LpcObject>& obj);
+    //
+    // onDestructed: forwarded straight through to every internal
+    // destructObject() call this method's own shadow-chain cascade
+    // makes (see that method's own header comment for the full
+    // derivation) -- real destruct_object() itself unconditionally
+    // closes referencing sockets for *any* object it destructs, so an
+    // object cascade-destructed here (something that was shadowing obj,
+    // not obj itself) needs the identical treatment a bare destruct()
+    // call already gives it, not a narrower one just because the
+    // destruction happened to be triggered by a reload.
+    void reloadObject(const std::shared_ptr<LpcObject>& obj,
+                       const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed = {});
 
     // Strips one trailing ".c" if present, so "id_card" and "id_card.c"
     // resolve to the exact same cache entry and object identity. Real

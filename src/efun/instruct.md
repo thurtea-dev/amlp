@@ -619,6 +619,22 @@ destructObject()` does not port -- a destructed object's own efun
 sockets currently linger rather than force-closing. Cited with its
 exact real source location in `SocketRegistry.hpp`'s own comment.
 
+**Correction, 2026-08-24: the `destruct_object()` gap above is closed
+too.** `ObjectManager::destructObject()`/`reloadObject()` both now take
+an optional `onDestructed` callback (fired once per object either call
+actually destructs, including every link the real shadow-chain cascade
+destructs along with the one named explicitly) -- `object` still cannot
+depend on `net` directly, so `EfunTable.cpp`'s own `destruct`/
+`reload_object` registrations both wire this callback to
+`SocketRegistry::closeAllOwnedBy()`, the one layer with access to both.
+Two new regression tests confirm it: a direct case (destructing an
+object force-closes its own owned socket, no `close_callback` fires)
+and a cascade case (a socket owned by a shadow-chain-cascaded object,
+not the object `destruct()` was called on directly, also gets closed --
+proof the callback genuinely threads through the recursive cascade).
+No registered-efun-count change -- this is a real-fidelity fix to the
+existing `destruct` efun's own behavior, not a new registration.
+
 With this, **the real `parse_*` package (`packages/parser.c`, 3419
 lines) is the one remaining dedicated-session candidate** -- by far the
 largest single item this row has ever considered, comparable to or

@@ -27,23 +27,22 @@ class LpcObject;
 // reuse would only reintroduce a stale-handle class of bug real FluffOS
 // itself has to guard against with owner_ob/state checks on every call.
 //
-// closeAllOwnedBy() below is real close_referencing_sockets(ob) (added
-// for reload_object(), object.c's own real call site) -- found while
-// implementing that its real *other* call site is simulate.c's own
-// destruct_object() ("if (ob->flags & O_EFUN_SOCKET)
+// closeAllOwnedBy() below is real close_referencing_sockets(ob), with
+// two real call sites both ported: object.c's own reload_object() and
+// simulate.c's own destruct_object() ("if (ob->flags & O_EFUN_SOCKET)
 // close_referencing_sockets(ob);", right alongside real destruct's own
-// shadow/living-name handling this driver's own ObjectManager::
-// destructObject() already ports). Not wired into destructObject()
-// itself this session -- out of the specific scope that added this
-// method -- so the same gap this comment used to describe still applies
-// there specifically: a dangling LpcSocket whose owner has been
-// destructed (not reloaded) simply stops firing callbacks (its
-// weak_ptr<LpcObject> lock() fails, matching PendingInputTo's own
-// established handling) but is not itself removed from this registry or
-// closed -- it lingers, still holding its fd open, until something else
-// (a peer disconnect, an explicit socket_close() from elsewhere, driver
-// shutdown) removes it. A real, now precisely-located gap for a future
-// session, not a re-derivation from scratch.
+// shadow/living-name handling ObjectManager::destructObject() already
+// ports). The destruct_object() side was found while implementing the
+// reload_object() one and initially left as a documented gap for a
+// later session -- now closed: ObjectManager::destructObject()/
+// reloadObject() both take an optional onDestructed callback (their own
+// header comments), fired once per object either call actually
+// destructs (including every link the real shadow-chain cascade
+// destructs along with the one explicitly named), which EfunTable.cpp's
+// own destruct()/reload_object() registrations both wire to this exact
+// method -- `object` itself still cannot depend on `net`, so the actual
+// close always happens at that outer layer, never inside ObjectManager
+// directly.
 class SocketRegistry {
 public:
     // int socket_create(int mode, string|function read_callback,

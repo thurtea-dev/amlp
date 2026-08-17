@@ -3273,7 +3273,21 @@ void registerCoreEfuns() {
         auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
         if (!ob) return Value{};
 
-        vm.destructObject(ob);
+        // Real destruct_object()'s own "if (ob->flags & O_EFUN_SOCKET)
+        // close_referencing_sockets(ob);" (simulate.c) -- confirmed real,
+        // and confirmed the one piece this driver's own destructObject()
+        // was still missing when reload_object() added the exact same
+        // capability for its own real call site (SocketRegistry.hpp's
+        // own comment used to flag this specifically). Fires once for
+        // ob itself and, via ObjectManager::destructObject()'s own
+        // recursively-forwarded callback, once for every object the
+        // real shadow-chain cascade destructs along with it too -- see
+        // that method's own header comment for why this has to be a
+        // callback threaded down from here rather than a direct call
+        // inside ObjectManager itself.
+        vm.destructObject(ob, [](const std::shared_ptr<LpcObject>& destructed) {
+            SocketRegistry::closeAllOwnedBy(destructed);
+        });
 
         // Real destruct_object(): "if (ob->interactive)
         // remove_interactive(ob, 1);" -- always the destructed object's
@@ -3358,7 +3372,15 @@ void registerCoreEfuns() {
             ob->setHeartbeatInterval(0);
         }
 
-        vm.reloadObject(ob);
+        // Same close-referencing-sockets callback destruct() now passes
+        // (see its own registration comment) -- real reload_object()'s
+        // own shadow cascade destructs any object that was shadowing ob
+        // via the exact same real destruct_object(), which unconditionally
+        // closes referencing sockets for whatever it is actually
+        // destructing, not just for a bare destruct() call specifically.
+        vm.reloadObject(ob, [](const std::shared_ptr<LpcObject>& destructed) {
+            SocketRegistry::closeAllOwnedBy(destructed);
+        });
         return Value{};
     });
 

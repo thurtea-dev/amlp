@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -127,12 +128,19 @@ public:
     // distinction (see the destruct efun's own comment in EfunTable.cpp
     // for the interactive-connection-specific handling layered on top
     // of this).
-    void destructObject(const std::shared_ptr<LpcObject>& obj);
+    // onDestructed: see ObjectManager::destructObject()'s own header
+    // comment -- forwarded straight through, VM has no `net` dependency
+    // to close sockets with here either.
+    void destructObject(const std::shared_ptr<LpcObject>& obj,
+                         const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed = {});
 
     // Thin wrapper over ObjectManager::reloadObject(), matching
     // cloneObject()/destructObject()'s own established shape -- see its
     // own header comment for the full real reload_object() derivation.
-    void reloadObject(const std::shared_ptr<LpcObject>& obj);
+    // onDestructed forwarded straight through, same reasoning as
+    // destructObject()'s own copy just above.
+    void reloadObject(const std::shared_ptr<LpcObject>& obj,
+                       const std::function<void(const std::shared_ptr<LpcObject>&)>& onDestructed = {});
 
     // real FluffOS's master() efun (func_spec.c: "object master();") --
     // just the already-loaded master object, no different from what

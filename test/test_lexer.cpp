@@ -16207,6 +16207,103 @@ static void testReloadObjectLeavesAnActiveSnoopRelationshipUntouched() {
     std::cout << "testReloadObjectLeavesAnActiveSnoopRelationshipUntouched OK\n";
 }
 
+// destruct(): real destruct_object()'s own "if (ob->flags &
+// O_EFUN_SOCKET) close_referencing_sockets(ob);" (simulate.c), the real
+// gap found and precisely located while implementing reload_object()'s
+// own identical need last session, ported here. Both real semantics
+// checked: closing the destructed object's own socket directly, and
+// closing a *cascaded* shadow object's own socket too (real
+// destruct_object() unconditionally closes referencing sockets for
+// whatever it actually destructs, including every object the real
+// shadow-chain cascade destructs along with the one named explicitly).
+
+static void testDestructClosesOwnedSocketsWithNoCallbackFiring() {
+    ObjectVarHarness harness;
+    harness.writeFile("/destruct_socket.c",
+        "int close_fired;\n"
+        "int make() { return socket_create(2, \"on_read\", \"on_close\"); }\n"
+        "void on_read(int f, string m, string a) {}\n"
+        "void on_close(int f) { close_fired = 1; }\n"
+        "int get_close_fired() { return close_fired; }\n");
+    auto ob = harness.objects.cloneObject("/destruct_socket");
+    assert(ob != nullptr);
+
+    amlp::Value madeFd = harness.vm.callFunction(ob, "make", {});
+    assert(std::get<int64_t>(madeFd.data) >= 0);
+    // Captured before destruct(), the same reasoning
+    // testReloadObjectClosesOwnedSocketsWithNoCallbackFiring's own
+    // comment already establishes -- ob's own variables are not zeroed
+    // by destruct() the way reload_object() does, but ob is destructed,
+    // and this driver's own callFunction() silently no-ops against a
+    // destructed target either way, so reading the handle back through
+    // ob afterward would not work regardless.
+    int handle = static_cast<int>(std::get<int64_t>(madeFd.data));
+
+    std::vector<amlp::Value> statusArgsBefore{amlp::Value(int64_t{handle})};
+    amlp::Value before = amlp::EfunTable::instance().call("socket_status", harness.vm, statusArgsBefore);
+    auto* beforeArr = std::get_if<std::shared_ptr<amlp::Array>>(&before.data);
+    assert(beforeArr != nullptr && !(*beforeArr)->items.empty());
+
+    std::vector<amlp::Value> destructArgs{amlp::Value(ob)};
+    amlp::EfunTable::instance().call("destruct", harness.vm, destructArgs);
+
+    // Real "socket_close(i, SC_FORCE)" -- SC_FORCE alone, without
+    // SC_DO_CALLBACK, so the socket is gone but on_close() never runs.
+    // ob itself is destructed (not reloaded), so get_close_fired() is
+    // read through the still-live local shared_ptr, matching this
+    // driver's own established "destructed but still referenced" test
+    // pattern rather than through a fresh lookup.
+    std::vector<amlp::Value> statusArgsAfter{amlp::Value(int64_t{handle})};
+    amlp::Value after = amlp::EfunTable::instance().call("socket_status", harness.vm, statusArgsAfter);
+    auto* afterArr = std::get_if<std::shared_ptr<amlp::Array>>(&after.data);
+    assert(afterArr != nullptr && (*afterArr)->items.empty());
+    assert(ob->isDestructed());
+
+    std::cout << "testDestructClosesOwnedSocketsWithNoCallbackFiring OK\n";
+}
+
+static void testDestructShadowCascadeAlsoClosesTheCascadedObjectsOwnSockets() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_shadow(object ob) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/destruct_sh_victim.c", "void create() {}\n");
+    harness.writeFile("/destruct_sh_shadow.c",
+        "object attach(object victim) { return shadow(victim, 1); }\n"
+        "int make() { return socket_create(2, \"on_read\", 0); }\n"
+        "void on_read(int f, string m, string a) {}\n");
+    auto victim = harness.objects.cloneObject("/destruct_sh_victim");
+    auto shadowOb = harness.objects.cloneObject("/destruct_sh_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+
+    harness.vm.callFunction(shadowOb, "attach", {amlp::Value(victim)});
+    assert(victim->shadowedBy().lock() == shadowOb);
+
+    // shadowOb owns a socket of its own -- not victim, the object
+    // actually named in the destruct() call below.
+    amlp::Value madeFd = harness.vm.callFunction(shadowOb, "make", {});
+    assert(std::get<int64_t>(madeFd.data) >= 0);
+    int handle = static_cast<int>(std::get<int64_t>(madeFd.data));
+
+    // victim is the base of the chain -- destructing it cascades,
+    // destructing shadowOb along with it (the exact same real cascade
+    // reload_object()'s own equivalent test already exercises).
+    std::vector<amlp::Value> destructArgs{amlp::Value(victim)};
+    amlp::EfunTable::instance().call("destruct", harness.vm, destructArgs);
+    assert(shadowOb->isDestructed());
+
+    // shadowOb's own socket must be closed too -- proof the callback
+    // genuinely threads through the recursive cascade, not just the
+    // one object named directly in the destruct() call.
+    std::vector<amlp::Value> statusArgs{amlp::Value(int64_t{handle})};
+    amlp::Value status = amlp::EfunTable::instance().call("socket_status", harness.vm, statusArgs);
+    auto* statusArr = std::get_if<std::shared_ptr<amlp::Array>>(&status.data);
+    assert(statusArr != nullptr && (*statusArr)->items.empty());
+
+    std::cout << "testDestructShadowCascadeAlsoClosesTheCascadedObjectsOwnSockets OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -16797,6 +16894,8 @@ int main() {
     testReloadObjectCascadeDestructsObjectsThatWereShadowingIt();
     testReloadObjectSplicesOutWithoutDestructingAnythingWhenItIsItselfTheShadow();
     testReloadObjectLeavesAnActiveSnoopRelationshipUntouched();
+    testDestructClosesOwnedSocketsWithNoCallbackFiring();
+    testDestructShadowCascadeAlsoClosesTheCascadedObjectsOwnSockets();
     std::cout << "all tests passed\n";
     return 0;
 }

@@ -3,6 +3,60 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-24: `destruct_object()`'s own `close_referencing_sockets()`
+call site ported -- the precisely-located gap the previous session left
+documented (Phase 0 row 0.13: 234 registered, unchanged -- this is a
+real-fidelity fix to the existing `destruct` efun, not a new
+registration).**
+
+Confirmed against `simulate.c`: `destruct_object()` calls
+`close_referencing_sockets(ob)` guarded by `#if defined(PACKAGE_SOCKETS)
+|| defined(PACKAGE_EXTERNAL)` and `if (ob->flags & O_EFUN_SOCKET)`, near
+the top of the function, before shadow/snoop/environment handling --
+the same real mechanism `reload_object()` already needed, now confirmed
+to have this second real call site.
+
+`ObjectManager` cannot call `SocketRegistry` directly (`net` already
+depends on `object` in the CMake link graph; the reverse would be
+circular), so both `ObjectManager::destructObject()` and
+`ObjectManager::reloadObject()` now take an optional `onDestructed`
+callback, forwarded through `VM::destructObject()`/`VM::reloadObject()`,
+and wired to `SocketRegistry::closeAllOwnedBy()` from `EfunTable.cpp`'s
+own `destruct`/`reload_object` registrations -- the only layer with
+access to both `object` and `net`. The callback fires once per object
+either call actually destructs, including every object the real
+shadow-chain cascade destructs along with the one named explicitly
+(confirmed by tracing the cascade's own recursive `destructObject()`
+calls, which already recurse into the base object's own destruction,
+not just the shadowers).
+
+`reloadObject()`'s own internal shadow-cascade needed the same callback
+threading for the same reason: it calls `destructObject()` on cascaded
+shadowers, and real `destruct_object()` unconditionally closes sockets
+regardless of caller, so leaving this out would have made `destruct()`
+and `reload_object()`'s cascades diverge from each other despite
+sharing the same real underlying mechanism.
+
+Two new regression tests (585 total, up from 583, all passing across 3
+consecutive runs plus `ctest`): a direct case confirming a destructed
+object's own owned socket is force-closed with no `close_callback`
+firing (real `socket_close(i, SC_FORCE)` -- `SC_FORCE` alone, no
+`SC_DO_CALLBACK`), and a cascade case confirming a socket owned by a
+shadow-chain-cascaded object (not the object `destruct()` was called on
+directly) is also closed, proving the callback genuinely threads
+through the recursive cascade rather than only firing for the directly-
+named object.
+
+**Environment note, unrelated to the fix above:** the vendored
+`reference/fluffos-2.9-ds2.08` tree is missing from its tracked
+location on disk this session (`git status` shows all ~305 files under
+it as deleted), while byte-identical content is present, untracked,
+under the gitignored `temp/reference/fluffos-2.9-ds2.08/`. This was not
+this session's own doing -- confirmed via diff against `git show
+HEAD:...` before relying on the `temp/` copy for the `parse_*` scoping
+report below. Not staged, not otherwise touched; flagged to the user
+directly rather than silently worked around.
+
 **2026-08-23 (continued): `reload_object()` implemented in full, the
 smaller of the two remaining dedicated-session candidates, plus a real,
 precisely-located gap found in the process and left documented rather
