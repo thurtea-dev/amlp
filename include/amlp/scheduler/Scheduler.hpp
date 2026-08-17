@@ -118,6 +118,12 @@ public:
     // efun's own loop, not the scheduler's storage).
     const std::vector<CallOutEntry>& pendingCallOuts() const { return callOuts_; }
 
+    // Real get_heart_beats() (backend.c): read-only access to every
+    // object with set_heart_beat() currently enabled, for the
+    // heart_beats() efun. Same "plain accessor, filtering lives in the
+    // efun's own loop" reasoning as pendingCallOuts() just above.
+    const std::vector<HeartbeatEntry>& pendingHeartbeats() const { return heartbeats_; }
+
 private:
     int64_t newCallOutHandle();
 

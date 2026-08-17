@@ -3,6 +3,89 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): real bug found and fixed in already-shipped
+set_eval_limit()/reset_eval_cost(), then 6 more efuns implemented (Phase
+0 row 0.13: 219 registered, up from 211).** While verifying gap
+candidates against reference source (this row's own standing process),
+found that `set_eval_limit`/`reset_eval_cost`'s existing implementation
+(shipped two sessions ago) was wrong, not just incomplete: `efun_defs.c`
+shows `eval_cost` and `max_eval_cost` are two more real aliases of the
+exact same `F_SET_EVAL_LIMIT` code (func_spec.c's own default-argument-
+per-alias lines), and reading `efuns_main.c`'s own `f_set_eval_limit()`
+directly revealed a real 4-way switch on the *argument value itself* (0 /
+-1 / 1 / anything else), not the two-way "negative restores default,
+else sets directly" split the previous implementation assumed and never
+verified. Real `set_eval_limit(-1)` is **not** a "restore the default"
+sentinel at all -- it is a pure query of the remaining budget with no
+side effect on the ceiling; there is no built-in restore mechanism
+anywhere in real FluffOS's own C code. Real `reset_eval_cost()` (default
+argument 0) zeroes the *accumulated* cost back to zero while leaving the
+ceiling itself completely untouched, returning the unchanged ceiling --
+the previous implementation instead set the ceiling itself to 0, a
+crushingly restrictive value, the opposite of what "reset" actually
+means once the real switch is read directly.
+
+Fixed: `VM::setMaxEvalCost()` is now a plain, unconditional ceiling
+overwrite (the real "default: max_cost = sp->u.number;" branch only);
+the 0/-1/1 special-casing now lives entirely in a new shared
+`evalLimitDispatch` lambda in `EfunTable.cpp`, matching where that logic
+actually lives in real FluffOS too (inside `f_set_eval_limit()` itself).
+Added `VM::evalCost()`/`VM::maxEvalCost()` read-only accessors (needed by
+the corrected dispatch and by tests). Registered `eval_cost` and
+`max_eval_cost` as the two previously-missing real aliases. Both of the
+existing tests that exercised the old, wrong behavior
+(`testSetEvalLimitActuallyChangesTheEnforcedCeiling`, and last session's
+own `testResetEvalCostDefaultsToZeroLimitAndAcceptsExplicitArgument`)
+were rewritten to match the corrected, verified semantics -- the second
+one split into two tests (one for the real zero-cost-not-zero-ceiling
+reset, one for the new query/explicit-argument behavior shared across
+all four names), one self-calibrating against measured real cost per
+call rather than a guessed hardcoded ceiling (the first version of this
+fix's own test crashed the suite with an uncaught `EvalCostError` from
+a ceiling that was too low for even one call of its own probe function --
+caught by actually running the suite, not assumed correct from reading
+the code).
+
+Row 0.13 batch: `real_time` (real, `packages/contrib.c`, same body as
+the already-implemented `time()` under a separately-coded efun, not an
+alias pair), `remove_interactive` (real, disconnects an object's
+connection without destructing it, reusing `Connection::close()`),
+`file_length` (real, counts newline-terminated lines in a file, reusing
+`file_size()`'s own stat()/path-resolution pattern), `refs` (real,
+`packages/develop.c`, approximated via this driver's own
+`std::shared_ptr::use_count()` for every reference-counted Value kind;
+always 0 for strings, which this driver never interns or shares),
+`heart_beats` (real, every object with `set_heart_beat()` enabled --
+added `Scheduler::pendingHeartbeats()`, a new read-only accessor
+alongside the existing `pendingCallOuts()`), and `query_ip_port` (real,
+the single configured listening port for any currently-interactive
+object -- confirmed this driver has exactly one listening port, no
+multi-port `SocketRegistry`, so unlike `query_ip_number()`/
+`query_ip_name()`'s own "current connection only" scoping this one
+correctly supports the real explicit `ob` argument, since no per-
+connection network lookup is actually needed). Added `VM::config()`, a
+new read-only accessor needed for `query_ip_port()` to reach
+`Config::port()`.
+
+Not implemented, flagged rather than rushed: `named_livings` (real,
+needs a new enumeration capability on `LivingNameRegistry`, which
+currently only supports exact-name lookup, not "list every living
+name"), `query_num` (real, a large number-to-English-words algorithm of
+similar scope to the already-flagged `pluralize`), `zonetime`/
+`is_daylight_savings_time` (real, mutate the process-global `TZ`
+environment variable via `putenv()`/`tzset()` -- deferred pending a
+clearer read of whether that is safe against this driver's own
+single-threaded-but-async-facing event loop), and `get_garbage` (real,
+this driver has no garbage-collector concept of its own, `shared_ptr`
+reclaims immediately rather than deferring to a sweep phase, so there is
+nothing for it to report).
+
+8 new test functions (`test/test_lexer.cpp`: 2 replacing the one that
+tested the old, wrong eval-cost behavior, 6 for the new batch). Full
+suite: 555 tests passing, up from 548 before this session (549
+immediately after the eval-cost fix, +6 for the new batch), no
+regressions, stable across three consecutive runs.
+
 **2026-08-22 (continued): README.md rewritten, then 7 more efuns
 implemented (Phase 0 row 0.13: 211 registered, up from 204).**
 `README.md` replaced entirely with new, more accurate top-level content

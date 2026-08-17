@@ -26,6 +26,14 @@ public:
     void setScheduler(Scheduler* scheduler) { scheduler_ = scheduler; }
     Scheduler* scheduler() const { return scheduler_; }
 
+    // Read-only access to the driver's own configuration -- needed by
+    // efuns whose real answer is a single, driver-wide fact rather than
+    // per-connection state (e.g. query_ip_port(): this driver has exactly
+    // one listening port, Config::port(), so any currently-interactive
+    // object's real answer is that value, not something tracked per
+    // Connection).
+    Config& config() const { return config_; }
+
     Value callFunction(const std::shared_ptr<LpcObject>& obj,
                         const std::string& functionName,
                         std::vector<Value> args);
@@ -243,21 +251,38 @@ private:
     // by Scheduler::tickCallOuts()/tickHeartbeats() before each fired
     // callback, matching those exact real reset points.
     int64_t evalCost_ = 0;
-    // Per-dispatch ceiling set by set_eval_limit(x). Initialized to
-    // Config::maxEvalCost() at construction; set_eval_limit(-1) restores
-    // that default. Real FluffOS's set_eval_limit(x) raises or (with -1)
-    // resets the single global MAX_EVAL_COST, guarded by master-check in
-    // the simul_efun wrapper.
+    // Per-dispatch ceiling. Initialized to Config::maxEvalCost() at
+    // construction, changed only by the "default" branch of
+    // set_eval_limit()'s own real 4-way switch (EfunTable.cpp's own
+    // registration comment has the full citation) -- confirmed directly
+    // against efuns_main.c's own f_set_eval_limit() before writing this:
+    // real set_eval_limit(-1) is NOT a "restore the default" sentinel (an
+    // earlier version of this comment assumed that, unverified); it is a
+    // pure query of the *remaining* budget with no side effect on this
+    // ceiling at all. There is no built-in "restore to default" mechanism
+    // in real FluffOS's own C code -- a mudlib that wants that back
+    // simply calls set_eval_limit() again with whatever value it
+    // remembers.
     int64_t maxEvalCost_ = 1000000;
 
 public:
     // Reset the accumulated eval cost to zero. Called at the start of
-    // every top-level dispatch (player command, call_out, heartbeat).
+    // every top-level dispatch (player command, call_out, heartbeat), and
+    // by the real "x == 0" branch of set_eval_limit()'s own dispatch
+    // (reset_eval_cost()'s own real default argument).
     void resetEvalCost() { evalCost_ = 0; }
+    int64_t evalCost() const { return evalCost_; }
 
-    // Update the eval-cost ceiling for the remainder of the current
-    // dispatch. set_eval_limit(-1) passes -1 to restore the default.
+    // Directly overwrites the eval-cost ceiling -- the real "default:
+    // max_cost = sp->u.number;" branch of set_eval_limit()'s own switch,
+    // confirmed directly against efuns_main.c's own f_set_eval_limit().
+    // No special-casing of any particular argument value happens here;
+    // the 0/-1/1 real special cases are handled entirely in
+    // EfunTable.cpp's own shared dispatch lambda, matching where that
+    // logic actually lives in real FluffOS too (inside f_set_eval_limit()
+    // itself, not some lower interpret.c primitive).
     void setMaxEvalCost(int64_t limit);
+    int64_t maxEvalCost() const { return maxEvalCost_; }
 
 private:
     // One entry per still-active run() call, innermost last -- see

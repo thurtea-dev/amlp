@@ -6890,13 +6890,15 @@ static void testRmDeletesFileAndReturnsZeroForMissingPath() {
     std::cout << "testRmDeletesFileAndReturnsZeroForMissingPath OK\n";
 }
 
-// set_eval_limit(int): EfunTable.cpp's own comment says this driver
-// "applies the limit change immediately" (not a no-op the way an older
-// STATUS.md entry once described a different, earlier eval-cost model) --
-// verified here directly rather than trusted, by actually tripping a
-// very low limit against an infinite loop and confirming EvalCostError
-// fires, then confirming -1 restores the default (config's own ceiling,
-// high enough that the same kind of short loop completes normally).
+// VM::setMaxEvalCost(int): the raw ceiling-overwrite primitive (real
+// f_set_eval_limit()'s own "default: max_cost = sp->u.number;" switch
+// branch) -- verified here directly rather than trusted, by actually
+// tripping a very low limit against an infinite loop and confirming
+// EvalCostError fires, then raising the ceiling back to a generous
+// explicit value (there is no "-1 restores the default" sentinel in real
+// FluffOS at all, confirmed directly against efuns_main.c's own switch --
+// see VM.hpp's own corrected comment on maxEvalCost_) so the same kind of
+// short loop completes normally again.
 static void testSetEvalLimitActuallyChangesTheEnforcedCeiling() {
     ObjectVarHarness harness;
     harness.writeFile("/evallimit_probe.c",
@@ -6915,9 +6917,12 @@ static void testSetEvalLimitActuallyChangesTheEnforcedCeiling() {
     }
     assert(threw);
 
-    // -1 restores the configured default -- high enough that this short,
-    // genuinely-terminating loop runs to completion without tripping it.
-    harness.vm.setMaxEvalCost(-1);
+    // Raised back to a generous explicit ceiling -- high enough that this
+    // short, genuinely-terminating loop runs to completion without
+    // tripping it. A mudlib restoring an earlier ceiling has to remember
+    // and re-set the actual value the same way, real set_eval_limit() has
+    // no built-in "restore" of its own.
+    harness.vm.setMaxEvalCost(1000000);
     harness.vm.resetEvalCost();
     amlp::Value shortResult = harness.vm.callFunction(ob, "short_loop", {});
     assert(std::get<int64_t>(shortResult.data) == 5);
@@ -14648,36 +14653,105 @@ static void testStrwidthReturnsSameLengthAsSizeof() {
     std::cout << "testStrwidthReturnsSameLengthAsSizeof OK\n";
 }
 
-static void testResetEvalCostDefaultsToZeroLimitAndAcceptsExplicitArgument() {
+// set_eval_limit()/reset_eval_cost()/eval_cost()/max_eval_cost(): all
+// four real names share one dispatch keyed on the argument value itself
+// (efuns_main.c's own f_set_eval_limit(), confirmed directly before
+// writing any of this -- an earlier version of this test encoded a wrong,
+// unverified assumption that reset_eval_cost()'s own default meant
+// "lower the ceiling to zero", which real code does not do at all; see
+// EfunTable.cpp's own corrected registration comment for the full
+// citation). Called directly through EfunTable rather than an LPC
+// wrapper for the parts that probe eval-cost state around the calls: a
+// bytecode-executed wrapper function would consume its own ticks against
+// whatever ceiling is active, the same self-tripping concern already
+// documented for set_eval_limit above.
+
+static void testResetEvalCostZeroesUsedCostLeavingCeilingUnchanged() {
     ObjectVarHarness harness;
-    harness.writeFile("/rec_probe.c", "int go() { return 1; }\n");
+    harness.writeFile("/rec_probe.c",
+        "int burn() { int i; for (i = 0; i < 20; i++) {} return i; }\n");
     auto ob = harness.objects.cloneObject("/rec_probe");
     assert(ob != nullptr);
 
-    // Called directly through EfunTable, not an LPC wrapper: dispatching
-    // the efun itself through a bytecode-executed wrapper function would
-    // consume its own eval-cost ticks against the just-lowered ceiling
-    // before the wrapper even returns, the same self-tripping concern
-    // testSetEvalLimitActuallyChangesTheEnforcedCeiling's own comment
-    // already documents for set_eval_limit.
+    // Measures the real per-call instruction cost first rather than
+    // guessing a hardcoded ceiling low enough to trip on a second,
+    // un-reset call but not a first -- this driver's own exact
+    // instruction-cost accounting is an implementation detail this test
+    // should not need to hardcode a guess against.
+    harness.vm.setMaxEvalCost(1000000);
     harness.vm.resetEvalCost();
-    std::vector<amlp::Value> noArgs;
-    amlp::EfunTable::instance().call("reset_eval_cost", harness.vm, noArgs);
+    harness.vm.callFunction(ob, "burn", {});
+    int64_t costPerCall = harness.vm.evalCost();
+    assert(costPerCall > 0);
+
+    int64_t ceiling = costPerCall + costPerCall / 2;
+    harness.vm.setMaxEvalCost(ceiling);
+    harness.vm.resetEvalCost();
+    amlp::Value first = harness.vm.callFunction(ob, "burn", {});
+    assert(std::get<int64_t>(first.data) == 20);
+
+    // No reset in between: cost accumulates across calls (real cross-
+    // dispatch accumulation, matching VM.hpp's own documented reset
+    // points), so repeating the same burn on top of what is already used
+    // trips the still-unchanged ceiling.
     bool threw = false;
     try {
-        harness.vm.callFunction(ob, "go", {});
+        harness.vm.callFunction(ob, "burn", {});
     } catch (const amlp::EvalCostError&) {
         threw = true;
     }
     assert(threw);
 
-    std::vector<amlp::Value> explicitArgs{amlp::Value(int64_t{1000000})};
-    amlp::EfunTable::instance().call("reset_eval_cost", harness.vm, explicitArgs);
-    harness.vm.resetEvalCost();
-    amlp::Value result = harness.vm.callFunction(ob, "go", {});
-    assert(std::get<int64_t>(result.data) == 1);
+    // reset_eval_cost() with no arguments (real default 0): zeroes the
+    // *used* cost back to zero while leaving the ceiling itself
+    // completely untouched, and returns that unchanged ceiling.
+    std::vector<amlp::Value> noArgs;
+    amlp::Value resetResult = amlp::EfunTable::instance().call("reset_eval_cost", harness.vm, noArgs);
+    assert(std::get<int64_t>(resetResult.data) == ceiling);
+    assert(harness.vm.evalCost() == 0);
+    assert(harness.vm.maxEvalCost() == ceiling);
 
-    std::cout << "testResetEvalCostDefaultsToZeroLimitAndAcceptsExplicitArgument OK\n";
+    amlp::Value second = harness.vm.callFunction(ob, "burn", {});
+    assert(std::get<int64_t>(second.data) == 20);
+
+    std::cout << "testResetEvalCostZeroesUsedCostLeavingCeilingUnchanged OK\n";
+}
+
+static void testEvalCostAndMaxEvalCostQueryWithoutMutatingStateThenExplicitArgumentSetsCeiling() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ec_probe.c",
+        "int burn() { int i; for (i = 0; i < 10; i++) {} return i; }\n");
+    auto ob = harness.objects.cloneObject("/ec_probe");
+    assert(ob != nullptr);
+
+    harness.vm.setMaxEvalCost(1000000);
+    harness.vm.resetEvalCost();
+    harness.vm.callFunction(ob, "burn", {});
+    int64_t usedAfterBurn = harness.vm.evalCost();
+    assert(usedAfterBurn > 0 && usedAfterBurn < 1000000);
+
+    std::vector<amlp::Value> noArgs;
+    // max_eval_cost(): pure query of the ceiling, no mutation.
+    amlp::Value ceiling = amlp::EfunTable::instance().call("max_eval_cost", harness.vm, noArgs);
+    assert(std::get<int64_t>(ceiling.data) == 1000000);
+    assert(harness.vm.maxEvalCost() == 1000000);
+    assert(harness.vm.evalCost() == usedAfterBurn);
+
+    // eval_cost(): pure query of the *remaining* budget, no mutation.
+    amlp::Value remaining = amlp::EfunTable::instance().call("eval_cost", harness.vm, noArgs);
+    assert(std::get<int64_t>(remaining.data) == 1000000 - usedAfterBurn);
+    assert(harness.vm.maxEvalCost() == 1000000);
+    assert(harness.vm.evalCost() == usedAfterBurn);
+
+    // An explicit argument to any of the four names sets the ceiling
+    // directly, same as set_eval_limit(x) -- all four share one real
+    // dispatch keyed on the argument value, not the name used to call it.
+    std::vector<amlp::Value> explicitArgs{amlp::Value(int64_t{500})};
+    amlp::Value setResult = amlp::EfunTable::instance().call("eval_cost", harness.vm, explicitArgs);
+    assert(std::get<int64_t>(setResult.data) == 500);
+    assert(harness.vm.maxEvalCost() == 500);
+
+    std::cout << "testEvalCostAndMaxEvalCostQueryWithoutMutatingStateThenExplicitArgumentSetsCeiling OK\n";
 }
 
 static void testRemoveShadowSplicesOutOfChainAndReturnsZeroWhenNotShadowing() {
@@ -14815,6 +14889,157 @@ static void testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity() {
     for (int64_t i = 0; i < 20; ++i) assert(seen[static_cast<size_t>(i)] == i);
 
     std::cout << "testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity OK\n";
+}
+
+// --- real_time / remove_interactive / file_length / refs / heart_beats /
+// query_ip_port (Phase 0.13, batch continued 2026-08-22) -- confirmed
+// directly against fluffos-2.9-ds2.08's own packages/contrib.c
+// (real_time, remove_interactive, file_length, query_ip_port) and
+// packages/develop.c (refs) before writing any of this -- see
+// EfunTable.cpp's own registrations for the full real-semantics writeup.
+
+static void testRealTimeReturnsCurrentUnixTime() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rt_probe.c", "int probe() { return real_time(); }\n");
+    auto ob = harness.objects.cloneObject("/rt_probe");
+    assert(ob != nullptr);
+
+    int64_t before = static_cast<int64_t>(std::time(nullptr));
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    int64_t after = static_cast<int64_t>(std::time(nullptr));
+    int64_t got = std::get<int64_t>(result.data);
+    assert(got >= before && got <= after);
+
+    std::cout << "testRealTimeReturnsCurrentUnixTime OK\n";
+}
+
+static void testRemoveInteractiveClosesConnectionWithoutDestructingAndReturnsZeroWhenNotInteractive() {
+    ObjectVarHarness harness;
+    harness.writeFile("/ri_probe.c", "void create() {}\n");
+    auto ob = harness.objects.cloneObject("/ri_probe");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(ob);
+
+    harness.writeFile("/ri_caller.c",
+        "int disconnect(object target) { return remove_interactive(target); }\n");
+    auto caller = harness.objects.cloneObject("/ri_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "disconnect", {amlp::Value(ob)});
+    assert(std::get<int64_t>(result.data) == 1);
+    assert(!conn.isOpen());
+    assert(!ob->isDestructed());
+    assert(amlp::InteractiveRegistry::find(ob) == nullptr);
+
+    // No longer interactive -- a second call is a no-op returning 0.
+    amlp::Value again = harness.vm.callFunction(caller, "disconnect", {amlp::Value(ob)});
+    assert(std::get<int64_t>(again.data) == 0);
+
+    ::close(fds[1]);
+    std::cout << "testRemoveInteractiveClosesConnectionWithoutDestructingAndReturnsZeroWhenNotInteractive OK\n";
+}
+
+static void testFileLengthCountsNewlinesAndReturnsNegativeForMissingOrDirectory() {
+    ObjectVarHarness harness;
+    harness.writeFile("/fl_three_lines.txt", "one\ntwo\nthree\n");
+    harness.writeFile("/fl_probe.c", "int probe(string path) { return file_length(path); }\n");
+    auto ob = harness.objects.cloneObject("/fl_probe");
+    assert(ob != nullptr);
+
+    amlp::Value three = harness.vm.callFunction(ob, "probe", {amlp::Value(std::string("/fl_three_lines.txt"))});
+    assert(std::get<int64_t>(three.data) == 3);
+
+    amlp::Value missing = harness.vm.callFunction(ob, "probe", {amlp::Value(std::string("/fl_does_not_exist.txt"))});
+    assert(std::get<int64_t>(missing.data) == -1);
+
+    amlp::Value dir = harness.vm.callFunction(ob, "probe", {amlp::Value(std::string("/"))});
+    assert(std::get<int64_t>(dir.data) == -2);
+
+    std::cout << "testFileLengthCountsNewlinesAndReturnsNegativeForMissingOrDirectory OK\n";
+}
+
+static void testRefsReflectsSharedReferenceCountMinusOne() {
+    ObjectVarHarness harness;
+    harness.writeFile("/refs_probe.c",
+        "mixed *shared;\n"
+        "void create() { shared = ({ 1, 2, 3 }); }\n"
+        "int probe_shared() { mixed *alias = shared; return refs(alias); }\n"
+        "int probe_fresh() { mixed *fresh = ({ 9 }); return refs(fresh); }\n"
+        "int probe_string() { string s = \"hi\"; return refs(s); }\n");
+    auto ob = harness.objects.cloneObject("/refs_probe");
+    assert(ob != nullptr);
+
+    // "alias" and the object's own "shared" variable both hold the same
+    // underlying array -- at least one extra real reference beyond the
+    // fresh local a truly-unshared array would have.
+    amlp::Value sharedResult = harness.vm.callFunction(ob, "probe_shared", {});
+    amlp::Value freshResult = harness.vm.callFunction(ob, "probe_fresh", {});
+    assert(std::get<int64_t>(sharedResult.data) > std::get<int64_t>(freshResult.data));
+
+    // This driver has no interned/shared string concept -- always 0.
+    amlp::Value stringResult = harness.vm.callFunction(ob, "probe_string", {});
+    assert(std::get<int64_t>(stringResult.data) == 0);
+
+    std::cout << "testRefsReflectsSharedReferenceCountMinusOne OK\n";
+}
+
+static void testHeartBeatsListsEveryObjectWithHeartbeatEnabledSkippingDestructed() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/hb_a.c", "void create() {} void heart_beat() {}\n");
+    harness.writeFile("/hb_b.c", "void create() {} void heart_beat() {}\n");
+    auto a = harness.objects.cloneObject("/hb_a");
+    auto b = harness.objects.cloneObject("/hb_b");
+    assert(a != nullptr && b != nullptr);
+
+    scheduler.setHeartbeatInterval(a, 1);
+    scheduler.setHeartbeatInterval(b, 1);
+
+    harness.writeFile("/hb_caller.c", "mixed *probe() { return heart_beats(); }\n");
+    auto caller = harness.objects.cloneObject("/hb_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 2);
+    bool sawA = false, sawB = false;
+    for (auto& item : (*arr)->items) {
+        auto ob = std::get<std::shared_ptr<amlp::LpcObject>>(item.data);
+        if (ob == a) sawA = true;
+        if (ob == b) sawB = true;
+    }
+    assert(sawA && sawB);
+
+    std::cout << "testHeartBeatsListsEveryObjectWithHeartbeatEnabledSkippingDestructed OK\n";
+}
+
+static void testQueryIpPortReturnsConfiguredPortForInteractiveElseZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qip_probe.c", "int probe(object ob) { return query_ip_port(ob); }\n");
+    harness.writeFile("/qip_plain.c", "void create() {}\n");
+    auto probe = harness.objects.cloneObject("/qip_probe");
+    auto interactive = harness.objects.cloneObject("/qip_plain");
+    auto plain = harness.objects.cloneObject("/qip_plain");
+    assert(probe != nullptr && interactive != nullptr && plain != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(interactive);
+
+    amlp::Value connected = harness.vm.callFunction(probe, "probe", {amlp::Value(interactive)});
+    assert(std::get<int64_t>(connected.data) == harness.config.port());
+
+    amlp::Value notConnected = harness.vm.callFunction(probe, "probe", {amlp::Value(plain)});
+    assert(std::get<int64_t>(notConnected.data) == 0);
+
+    ::close(fds[1]);
+    std::cout << "testQueryIpPortReturnsConfiguredPortForInteractiveElseZero OK\n";
 }
 
 int main() {
@@ -15366,12 +15591,19 @@ int main() {
     testMapMappingReplacesValuesKeepingKeysViaStringFunctionName();
     testFilterMappingKeepsOnlyEntriesWhereCallbackIsTruthy();
     testStrwidthReturnsSameLengthAsSizeof();
-    testResetEvalCostDefaultsToZeroLimitAndAcceptsExplicitArgument();
+    testResetEvalCostZeroesUsedCostLeavingCeilingUnchanged();
+    testEvalCostAndMaxEvalCostQueryWithoutMutatingStateThenExplicitArgumentSetsCeiling();
     testRemoveShadowSplicesOutOfChainAndReturnsZeroWhenNotShadowing();
     testOldcryptTruncatesSaltToFirstTwoCharactersUnlikeCrypt();
     testNextBitFindsFollowingSetBitWithRealBoundaryAsymmetry();
     testElementOfReturnsAMemberOfTheArrayAndThrowsWhenEmpty();
     testShuffleReordersInPlaceAndKeepsSameElementsAndIdentity();
+    testRealTimeReturnsCurrentUnixTime();
+    testRemoveInteractiveClosesConnectionWithoutDestructingAndReturnsZeroWhenNotInteractive();
+    testFileLengthCountsNewlinesAndReturnsNegativeForMissingOrDirectory();
+    testRefsReflectsSharedReferenceCountMinusOne();
+    testHeartBeatsListsEveryObjectWithHeartbeatEnabledSkippingDestructed();
+    testQueryIpPortReturnsConfiguredPortForInteractiveElseZero();
     std::cout << "all tests passed\n";
     return 0;
 }

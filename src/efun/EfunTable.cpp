@@ -1,6 +1,7 @@
 #include "amlp/efun/EfunTable.hpp"
 #include "amlp/core/Errors.hpp"
 #include "amlp/vm/VM.hpp"
+#include "amlp/config/Config.hpp"
 #include "amlp/object/LivingNameRegistry.hpp"
 #include "amlp/object/LiveObjectRegistry.hpp"
 #include "amlp/object/LpcObject.hpp"
@@ -2625,48 +2626,86 @@ void registerCoreEfuns() {
         throw LpcThrownValue(args[0]);
     });
 
-    // void set_eval_limit(int x) -- real FluffOS raises (or, with -1,
-    // restores) the per-call eval-cost ceiling, guarded so only master()
-    // can call it at all (secure/SimulEfun/SimulEfun.c's own wrapper:
-    // "if (previous_object() != master()) return;", forwarding to the
-    // real efun::set_eval_limit(x) only for master). Confirmed live:
-    // master.c's own player_object() brackets a load_object() with
-    // "set_eval_limit(1000000000); ... set_eval_limit(-1);" so a slow
-    // first compile of a new player file does not trip the ordinary
-    // eval-cost guard. This driver's own eval-cost ceiling
-    // (VM::run()'s hardcoded 1,000,000-instruction-per-call check) is
-    // already far above anything this driver's own test scripts hit,
-    // and evalCost_ resets to 0 at the start of every run() call rather
-    // than accumulating across nested calls, so there is no real
-    // "ceiling" state here to actually raise or lower yet -- this efun
-    // is accepted (so callers do not throw "undefined efun") and
-    // otherwise a no-op, not wired to change that ceiling.
-    t.registerEfun("set_eval_limit", [](VM& vm, std::vector<Value>& args) -> Value {
+    // int set_eval_limit(int x) / int reset_eval_cost(int default: 0) /
+    // int eval_cost(int default: -1) / int max_eval_cost(int default: 1)
+    // -- real efuns_main.c's own f_set_eval_limit(), confirmed directly
+    // before rewriting this (an earlier version of this registration got
+    // the semantics wrong, unverified against the real switch): all four
+    // names share one real 4-way dispatch on the argument value itself,
+    // not on which name was used to call it -- func_spec.c's own default-
+    // argument-per-alias lines (confirmed: "int reset_eval_cost
+    // set_eval_limit(int default: 0);", "int eval_cost set_eval_limit(int
+    // default: -1);", "int max_eval_cost set_eval_limit(int default:
+    // 1);") only decide what value is substituted when that particular
+    // name is called with zero arguments -- calling any of the four with
+    // an explicit argument behaves identically. The real switch itself
+    // (confirmed directly, not assumed from the names' own reputation):
+    //   x == 0:  reset the accumulated cost back to zero (a real full
+    //            reset, this is reset_eval_cost()'s own default meaning),
+    //            returning the *unchanged* ceiling, not the reset value.
+    //   x == -1: pure query of the *remaining* budget (ceiling minus
+    //            accumulated cost so far), no mutation at all -- despite
+    //            the plausible-sounding assumption an earlier version of
+    //            this comment made, real set_eval_limit(-1) does **not**
+    //            restore any kind of default ceiling; there is no such
+    //            mechanism anywhere in this real function. A mudlib that
+    //            wants the old ceiling back has to remember and re-set it
+    //            explicitly. (This means master.c's own real "set_eval_
+    //            limit(1000000000); ...; set_eval_limit(-1);" bracket,
+    //            still the one confirmed live call site for the base
+    //            name, genuinely leaves the ceiling permanently raised
+    //            after the first player-object compile -- a real quirk of
+    //            the reference driver, not a misreading here.)
+    //   x == 1:  pure query of the current ceiling itself, no mutation.
+    //   anything else: sets the ceiling to x directly, returning x.
+    // Guarded in real mudlibs so only master() can call set_eval_limit()
+    // at all (secure/SimulEfun/SimulEfun.c's own "if (previous_object()
+    // != master()) return;" wrapper) -- this driver applies the change
+    // immediately and trusts the mudlib's own guard, the same posture
+    // already established for every other master-gated efun with no
+    // driver-side permission check of its own.
+    auto evalLimitDispatch = [](VM& vm, int64_t x) -> Value {
+        switch (x) {
+            case 0: {
+                int64_t unchanged = vm.maxEvalCost();
+                vm.resetEvalCost();
+                return Value(unchanged);
+            }
+            case -1:
+                return Value(vm.maxEvalCost() - vm.evalCost());
+            case 1:
+                return Value(vm.maxEvalCost());
+            default:
+                vm.setMaxEvalCost(x);
+                return Value(x);
+        }
+    };
+    t.registerEfun("set_eval_limit", [evalLimitDispatch](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
             throw LpcRuntimeError("set_eval_limit: expected an int argument");
         }
-        // Real FluffOS's set_eval_limit(x): x > 0 raises the ceiling for
-        // the remainder of the current dispatch; x == -1 restores the
-        // default (Config::maxEvalCost()). Guarded by the simul_efun
-        // wrapper in real mudlibs so only master() can call it. This
-        // driver applies the limit change immediately and trusts the
-        // mudlib's own guard.
-        vm.setMaxEvalCost(std::get<int64_t>(args[0].data));
-        return Value{};
+        return evalLimitDispatch(vm, std::get<int64_t>(args[0].data));
     });
-    // int reset_eval_cost(void) -- real efun_defs.c: F_SET_EVAL_LIMIT |
-    // F_ALIAS_FLAG, the exact same code as set_eval_limit() above, with a
-    // real default argument of 0 (func_spec.c's own "int reset_eval_cost
-    // set_eval_limit(int default: 0);"), confirmed directly, not two
-    // separate implementations. Real, live call site:
-    // mudlib/command/speed.c's own "START" benchmarking macro
-    // ("reset_eval_cost(); set_eval_limit(0x7fffffff); ...").
-    t.registerEfun("reset_eval_cost", [](VM& vm, std::vector<Value>& args) -> Value {
-        int64_t limit = (!args.empty() && std::holds_alternative<int64_t>(args[0].data))
-                             ? std::get<int64_t>(args[0].data)
-                             : 0;
-        vm.setMaxEvalCost(limit);
-        return Value{};
+    // Real, live call site for reset_eval_cost(): mudlib/command/speed.c's
+    // own "START" benchmarking macro ("reset_eval_cost(); set_eval_limit(
+    // 0x7fffffff); ..."), which now correctly reads as "zero out whatever
+    // cost this dispatch has already accumulated, then separately raise
+    // the ceiling to effectively unlimited" -- two real, distinct steps,
+    // not one call implying the other.
+    t.registerEfun("reset_eval_cost", [evalLimitDispatch](VM& vm, std::vector<Value>& args) -> Value {
+        int64_t x = (!args.empty() && std::holds_alternative<int64_t>(args[0].data))
+                        ? std::get<int64_t>(args[0].data) : 0;
+        return evalLimitDispatch(vm, x);
+    });
+    t.registerEfun("eval_cost", [evalLimitDispatch](VM& vm, std::vector<Value>& args) -> Value {
+        int64_t x = (!args.empty() && std::holds_alternative<int64_t>(args[0].data))
+                        ? std::get<int64_t>(args[0].data) : -1;
+        return evalLimitDispatch(vm, x);
+    });
+    t.registerEfun("max_eval_cost", [evalLimitDispatch](VM& vm, std::vector<Value>& args) -> Value {
+        int64_t x = (!args.empty() && std::holds_alternative<int64_t>(args[0].data))
+                        ? std::get<int64_t>(args[0].data) : 1;
+        return evalLimitDispatch(vm, x);
     });
 
     // void destruct(object ob) -- removes ob from the object table
@@ -2720,6 +2759,27 @@ void registerCoreEfuns() {
             conn->close();
         }
         return Value{};
+    });
+
+    // int remove_interactive(object ob) -- real packages/contrib.c's own
+    // f_remove_interactive(): disconnects ob's connection without
+    // destructing ob itself -- confirmed directly, the real intended use
+    // is exec()ing a fresh connection onto an already-loaded, previously-
+    // interactive object for linkdead reconnection, where the object must
+    // survive. Returns 0 (a no-op) if ob is destructed or was never
+    // interactive; otherwise closes its connection (Connection::close(),
+    // the same real disconnect cleanup destruct()'s own connection-
+    // closing branch above already reuses) and returns 1.
+    t.registerEfun("remove_interactive", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            throw LpcRuntimeError("remove_interactive: expected an object argument");
+        }
+        auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        if (!ob || ob->isDestructed()) return Value(int64_t{0});
+        Connection* conn = InteractiveRegistry::find(ob);
+        if (!conn) return Value(int64_t{0});
+        conn->close();
+        return Value(int64_t{1});
     });
 
     // object find_object(string path, void|int compile) / object
@@ -3646,8 +3706,36 @@ void registerCoreEfuns() {
         return Value(static_cast<int64_t>(target ? target->heartbeatInterval() : 0));
     });
 
+    // object *heart_beats() -- real packages/contrib.c's own
+    // f_heart_beats(): "push_refed_array(get_heart_beats());", every
+    // object with set_heart_beat() currently enabled (backend.c's own
+    // heart_beats[] array). Backed by Scheduler::pendingHeartbeats(), a
+    // new read-only accessor added alongside pendingCallOuts() (same
+    // "plain accessor, filter lives in the efun's own loop" reasoning
+    // call_out_info()'s own registration above already established),
+    // skipping any entry whose owner has since been destructed.
+    t.registerEfun("heart_beats", [](VM& vm, std::vector<Value>&) -> Value {
+        auto result = std::make_shared<Array>();
+        if (!vm.scheduler()) return Value(result);
+        for (const auto& entry : vm.scheduler()->pendingHeartbeats()) {
+            auto ob = entry.target.lock();
+            if (!ob || ob->isDestructed()) continue;
+            result->items.emplace_back(ob);
+        }
+        return Value(result);
+    });
+
     // int time() -- seconds since the Unix epoch, same as the real efun.
     t.registerEfun("time", [](VM&, std::vector<Value>&) -> Value {
+        return Value(static_cast<int64_t>(std::time(nullptr)));
+    });
+
+    // int real_time() -- real packages/contrib.c's own f_real_time():
+    // "push_number(time(NULL))", the exact same body as time() just
+    // above under a separately-coded efun, not an F_ALIAS_FLAG pair --
+    // F_TIME and F_REAL_TIME are two distinct entries in efun_defs.c
+    // that just happen to do the same thing, confirmed directly.
+    t.registerEfun("real_time", [](VM&, std::vector<Value>&) -> Value {
         return Value(static_cast<int64_t>(std::time(nullptr)));
     });
 
@@ -3954,6 +4042,35 @@ void registerCoreEfuns() {
         return args[0];
     });
 
+    // int refs(mixed val) -- real packages/develop.c's own f_refs():
+    // returns the shared reference count of val, minus 1 to compensate
+    // for being passed as refs()'s own argument (confirmed directly:
+    // "put_number(r - 1);"). Approximated here via this driver's own
+    // std::shared_ptr::use_count() for every reference-counted Value kind
+    // (array, mapping, object, closure) -- real refs() also counts
+    // interned/shared strings (T_STRING with STRING_COUNTED), which this
+    // driver has no equivalent for (plain std::string, never interned or
+    // shared between variables), so a string argument always returns 0,
+    // matching real refs()'s own non-counted-string branch exactly.
+    // Ints/floats: 0, matching real refs()'s own default case for every
+    // value kind with no ref count at all.
+    t.registerEfun("refs", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty()) return Value(int64_t{0});
+        if (auto* arr = std::get_if<std::shared_ptr<Array>>(&args[0].data)) {
+            return Value(static_cast<int64_t>(*arr ? arr->use_count() - 1 : 0));
+        }
+        if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&args[0].data)) {
+            return Value(static_cast<int64_t>(*map ? map->use_count() - 1 : 0));
+        }
+        if (auto* ob = std::get_if<std::shared_ptr<LpcObject>>(&args[0].data)) {
+            return Value(static_cast<int64_t>(*ob ? ob->use_count() - 1 : 0));
+        }
+        if (auto* fn = std::get_if<std::shared_ptr<Closure>>(&args[0].data)) {
+            return Value(static_cast<int64_t>(*fn ? fn->use_count() - 1 : 0));
+        }
+        return Value(int64_t{0});
+    });
+
     // int member_array(mixed needle, string|mixed* haystack, void|int
     // start) -- efuns_main.c's f_member_array(): first matching index,
     // or -1. The optional 4th "search backwards" flag argument is not
@@ -4238,6 +4355,30 @@ void registerCoreEfuns() {
             return Value{};
         }
         return Value(std::string(buf));
+    });
+
+    // int query_ip_port(void|object ob default: command_giver) -- real
+    // packages/contrib.c's own query_ip_port(): the local port number
+    // ob's connection is using. This driver has exactly one listening
+    // port (Config::port(), Server::listen()'s own single accept loop --
+    // confirmed by grep, no multi-port SocketRegistry exists), so unlike
+    // query_ip_number()/query_ip_name() above (which fall back to "only
+    // the current connection" since a real per-connection lookup would
+    // need one), this one supports the real explicit ob argument
+    // properly: any currently-interactive object's real answer is always
+    // the single configured port, not something that needs tracking per
+    // Connection. Returns 0 if ob (or, with no argument, command_giver)
+    // is not currently interactive, matching real query_ip_port(0)'s own
+    // "!ob->interactive" branch.
+    t.registerEfun("query_ip_port", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            ob = resolveCommandGiver(vm);
+        }
+        if (!ob || !InteractiveRegistry::find(ob)) return Value(int64_t{0});
+        return Value(static_cast<int64_t>(vm.config().port()));
     });
 
     // socket_* efun family (ROADMAP row 0.10). Signatures, mode/state
@@ -4627,6 +4768,29 @@ void registerCoreEfuns() {
         if (::stat(path.c_str(), &st) != 0) return Value(int64_t{-1});
         if (S_ISDIR(st.st_mode)) return Value(int64_t{-2});
         return Value(static_cast<int64_t>(st.st_size));
+    });
+
+    // int file_length(string path) -- real packages/contrib.c's own
+    // file_length()/f_file_length(): the number of newline-terminated
+    // lines in path (a raw '\n' count, confirmed directly against its own
+    // "while ((newp = memchr(p + 1, '\n', num))) { ...; ret++; }" scan),
+    // not a line count in the "text editor" sense (a final line with no
+    // trailing newline is not counted). Same -1/-2 not-found/is-a-
+    // directory convention as file_size() above, reusing the identical
+    // stat() gate before opening the file.
+    t.registerEfun("file_length", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("file_length: expected a string path argument");
+        }
+        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        struct stat st;
+        if (::stat(path.c_str(), &st) != 0) return Value(int64_t{-1});
+        if (S_ISDIR(st.st_mode)) return Value(int64_t{-2});
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return Value(int64_t{-1});
+        int64_t lines = std::count(std::istreambuf_iterator<char>(f),
+                                    std::istreambuf_iterator<char>(), '\n');
+        return Value(lines);
     });
 
     // string *get_dir(string path, void|int flags) -- file.c's real

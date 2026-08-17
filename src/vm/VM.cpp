@@ -459,7 +459,7 @@ VM::VM(ObjectManager& objects, Config& config)
       maxEvalCost_(config.maxEvalCost()) {}
 
 void VM::setMaxEvalCost(int64_t limit) {
-    maxEvalCost_ = (limit < 0) ? config_.maxEvalCost() : limit;
+    maxEvalCost_ = limit;
 }
 
 Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
