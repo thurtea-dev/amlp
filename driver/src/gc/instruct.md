@@ -1,4 +1,4 @@
-# src/gc/ — Generational Garbage Collector (Phase 3)
+# src/gc/ - Generational Garbage Collector (Phase 3)
 
 ## Purpose
 
@@ -6,7 +6,7 @@ Replace the current `shared_ptr`-everywhere memory model with a generational
 garbage collector tuned for LPC's object graph: many small short-lived arrays,
 long-lived living objects, and occasional large mappings.
 
-This is a **Phase 3 directory** — the single most invasive change in the
+This is a **Phase 3 directory** - the single most invasive change in the
 roadmap. Plan this carefully. Do not start until all Phase 0, 1, and 2 work
 is complete and stable.
 
@@ -111,7 +111,7 @@ roadmap. Do it in layers:
 
 1. **Layer 1 (no-op GC):** Introduce `GcHeap` as a thin wrapper around
    `shared_ptr` allocations. `GcObject` wraps a `shared_ptr` control block.
-   No actual collection yet — just the API and test coverage.
+   No actual collection yet - just the API and test coverage.
 
 2. **Layer 2 (array GC):** Migrate `shared_ptr<Array>` to GC-managed arrays.
    Keep `shared_ptr<LpcObject>` unchanged. Validate that array tests pass.
@@ -121,7 +121,7 @@ roadmap. Do it in layers:
 
 4. **Layer 4 (object GC):** Migrate `shared_ptr<LpcObject>`. This is the
    hardest step because `LpcObject` is referenced by `ObjectManager`'s cache,
-   `InteractiveRegistry`, `LivingNameRegistry`, `Scheduler`, and `Server` —
+   `InteractiveRegistry`, `LivingNameRegistry`, `Scheduler`, and `Server` -
    all need to switch from `shared_ptr` to GC handles.
 
 5. **Layer 5 (generational):** Enable generation separation and write barriers.
@@ -138,8 +138,8 @@ roadmap. Do it in layers:
 ## Key invariants
 
 - **The GC must never collect a reachable object.** This is the invariant
-  from which there is no recovery — it causes silent data corruption.
+  from which there is no recovery - it causes silent data corruption.
 - Every layer of the migration must pass the full 374-test suite before
   the next layer begins.
 - `GcHeap::collect()` must be safe to call from the main thread during the
-  scheduler's idle period — never during active LPC code execution.
+  scheduler's idle period - never during active LPC code execution.

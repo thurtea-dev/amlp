@@ -1,4 +1,4 @@
-# src/jit/ — LLVM JIT Backend (Phase 2c)
+# src/jit/ - LLVM JIT Backend (Phase 2c)
 
 ## Purpose
 
@@ -13,7 +13,7 @@ and the interpreter passes all three dialect test suites.
 
 - LLVM 17+ development libraries (`apt install llvm-17-dev` or custom build)
 - `find_package(LLVM REQUIRED CONFIG)` in `driver/CMakeLists.txt`
-- The interpreter must be 100% correct before JIT work begins — the JIT must
+- The interpreter must be 100% correct before JIT work begins - the JIT must
   produce bit-identical output for every existing test case.
 
 ## Files to create
@@ -41,7 +41,7 @@ public:
 
 Translates a `FunctionEntry`'s bytecode to `llvm::Function`.
 
-**OpCode → LLVM IR mapping (first-pass targets — pure arithmetic functions):**
+**OpCode → LLVM IR mapping (first-pass targets - pure arithmetic functions):**
 
 | OpCode | IR approach |
 |--------|------------|

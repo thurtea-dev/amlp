@@ -1,4 +1,4 @@
-# src/scheduler/ — call_out, heart_beat, Async Task Scheduler
+# src/scheduler/ - call_out, heart_beat, Async Task Scheduler
 
 ## What lives here
 
@@ -11,14 +11,14 @@ and heart_beat as of 2026-08-07. All confirmed live.
 
 ## Files to read before touching this directory
 
-- `include/lpcdriver/scheduler/Scheduler.hpp` — full API
-- Reference: `fluffos-2.9-ds2.08/call_out.c` — real call_out implementation
-- Reference: `fluffos-2.9-ds2.08/backend.c` — `call_heart_beat()`, heartbeat
+- `include/lpcdriver/scheduler/Scheduler.hpp` - full API
+- Reference: `fluffos-2.9-ds2.08/call_out.c` - real call_out implementation
+- Reference: `fluffos-2.9-ds2.08/backend.c` - `call_heart_beat()`, heartbeat
   interval, `kHeartbeatCycle` constant
 
 ## Phase 0 tasks
 
-No scheduler stub gaps — `tickCallOuts()` and `tickHeartbeats()` are real and
+No scheduler stub gaps - `tickCallOuts()` and `tickHeartbeats()` are real and
 confirmed live (2026-08-07). The Phase 0 work here is purely test coverage:
 
 - `tests/test_scheduler.cpp` must exist and cover:
@@ -32,7 +32,7 @@ confirmed live (2026-08-07). The Phase 0 work here is purely test coverage:
 
 ## Phase 2 tasks
 
-### 2.5 — C++20 coroutine-based async task model
+### 2.5 - C++20 coroutine-based async task model
 
 **Goal:** replace the current 50 ms `poll`-then-sleep `run()` loop with a
 proper coroutine-driven event loop that allows LPC tasks to suspend without
@@ -40,7 +40,7 @@ blocking the whole server.
 
 **What to build:**
 
-1. **`Task` struct** — represents a suspended LPC execution:
+1. **`Task` struct** - represents a suspended LPC execution:
    ```cpp
    struct Task {
        std::coroutine_handle<> handle;
@@ -49,11 +49,11 @@ blocking the whole server.
    };
    ```
 
-2. **`Scheduler::suspend(Task& task, duration delay)`** — saves `task.handle`,
+2. **`Scheduler::suspend(Task& task, duration delay)`** - saves `task.handle`,
    sets `task.resumeAt = now + delay`, inserts into a priority queue sorted
    by `resumeAt`. Returns control to the event loop.
 
-3. **`Scheduler::run()`** — becomes:
+3. **`Scheduler::run()`** - becomes:
    ```
    while (!shutdownRequested) {
        now = steady_clock::now();
@@ -65,19 +65,19 @@ blocking the whole server.
    }
    ```
 
-4. **`call_out_future(delay)`** efun (Phase 2.7) — returns an awaitable that
+4. **`call_out_future(delay)`** efun (Phase 2.7) - returns an awaitable that
    suspends the calling LPC coroutine for `delay` seconds. Called with
    `await call_out_future(5.0)`.
 
-5. **Hydra parallel tasks (Phase 2.8)** — when two tasks' `owner` objects are
+5. **Hydra parallel tasks (Phase 2.8)** - when two tasks' `owner` objects are
    provably disjoint (no shared inventory, no shared array/mapping references),
    both can be resumed concurrently using `std::jthread` worker threads. Each
    thread holds a snapshot of its task's object graph; on completion the main
    thread merges results. If any conflict is detected, the speculative task
    is rolled back (see `src/vm/instruct.md` Phase 1.12 for the rollback
-   mechanism — same checkpoint logic applies here).
+   mechanism - same checkpoint logic applies here).
 
-### 2.6 — LPC `async`/`await` keyword pair
+### 2.6 - LPC `async`/`await` keyword pair
 
 When `VM::run()` hits the `Suspend` opcode (emitted for `await expr`):
 1. Serialize the current VM stack frame into a `TaskFrame`.
@@ -92,12 +92,12 @@ When `Scheduler::fireReadyTasks()` picks up the `Task`:
 ## Key invariants
 
 - `tickCallOuts()` and `tickHeartbeats()` must remain public and directly
-  callable without real-time gating — tests drive them deterministically.
+  callable without real-time gating - tests drive them deterministically.
 - A runtime error in one call_out/heartbeat must never prevent others from
   firing (the existing per-callback try/catch must be preserved in all
   refactoring).
 - The coroutine scheduler (Phase 2.5) must preserve this isolation guarantee:
   one crashed coroutine does not abort the loop.
-- `Scheduler::requestShutdown()` is a static signal — the run loop checks it
+- `Scheduler::requestShutdown()` is a static signal - the run loop checks it
   once per iteration; do not change this to a member call or instance-level
   flag without updating all callers.

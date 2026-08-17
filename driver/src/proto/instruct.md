@@ -1,10 +1,10 @@
-# src/proto/ — GMCP, MSDP, MSSP, MTTS, MXP Protocol Handlers (Phase 3)
+# src/proto/ - GMCP, MSDP, MSSP, MTTS, MXP Protocol Handlers (Phase 3)
 
 ## Purpose
 
 Out-of-band MUD protocols layered on top of telnet subnegotiation. These
 protocols let modern MUD clients (Mudlet, BlowTorch, MUSHclient) display
-rich UI — character sheets, maps, health bars, sound — without cluttering
+rich UI - character sheets, maps, health bars, sound - without cluttering
 the main text stream.
 
 This is a **Phase 3 directory**. It depends on the telnet IAC infrastructure
@@ -111,14 +111,14 @@ public:
 
 ## New efuns (register in `src/efun`)
 
-- `gmcp_send(object player, string package, mapping data)` — send GMCP
-- `msdp_send(object player, string var, mixed value)` — send MSDP
+- `gmcp_send(object player, string package, mapping data)` - send GMCP
+- `msdp_send(object player, string var, mixed value)` - send MSDP
 - `query_gmcp(object player)` → 1 if client supports GMCP
 - `query_msdp(object player)` → 1 if client supports MSDP
 - `query_client_flags(object player)` → int MTTS bitmask
 - `query_mxp(object player)` → 1 if MXP enabled
 - `mxp_tag(object player, string tag, string text)` → string (MXP-wrapped or plain)
-- `set_gmcp_callback(function fn)` — register mudlib handler for incoming GMCP
+- `set_gmcp_callback(function fn)` - register mudlib handler for incoming GMCP
 
 ## Integration in `src/net`
 

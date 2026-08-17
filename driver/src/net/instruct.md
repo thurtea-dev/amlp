@@ -1,4 +1,4 @@
-# src/net/ — TCP Server, Connection, Telnet, Sockets
+# src/net/ - TCP Server, Connection, Telnet, Sockets
 
 ## What lives here
 
@@ -13,12 +13,12 @@
 
 - `include/lpcdriver/net/Server.hpp`
 - `include/lpcdriver/net/Connection.hpp`
-- Reference: `fluffos-2.9-ds2.08/comm.c` — the reference networking layer
-- Reference: `fluffos-2.9-ds2.08/comm.h` — `interactive_t` struct fields
+- Reference: `fluffos-2.9-ds2.08/comm.c` - the reference networking layer
+- Reference: `fluffos-2.9-ds2.08/comm.h` - `interactive_t` struct fields
 
 ## Phase 0 tasks
 
-### 0.8 — Full telnet IAC negotiation + echo suppression + NAWS
+### 0.8 - Full telnet IAC negotiation + echo suppression + NAWS
 
 Currently the driver accepts plain TCP. Real MUD clients send telnet option
 negotiations that appear as garbage if not handled.
@@ -35,9 +35,9 @@ negotiations that appear as garbage if not handled.
    - When `input_to()` is called with the `I_NOECHO` flag (flag value 1),
      send `IAC WILL ECHO` to suppress client-side echo (for password input).
    - When the `input_to` completes, send `IAC WONT ECHO` to re-enable.
-   - `Connection` already has `echoSuppressed_` state — wire it up.
+   - `Connection` already has `echoSuppressed_` state - wire it up.
 
-3. **NAWS (Negotiate About Window Size — option 31):**
+3. **NAWS (Negotiate About Window Size - option 31):**
    - When client sends `IAC DO NAWS`, respond `IAC WILL NAWS`.
    - Parse the `IAC SB NAWS \<w1\>\<w2\>\<h1\>\<h2\> IAC SE` subnegotiation.
    - Store `terminalWidth_` and `terminalHeight_` on `Connection`.
@@ -50,7 +50,7 @@ negotiations that appear as garbage if not handled.
 **Reference:** RFC 854 (Telnet), RFC 857 (Echo option), RFC 1073 (NAWS).
 `fluffos-2.9-ds2.08/comm.c`'s `telnet_neg()` function.
 
-### 0.10 — `socket_*` efun family (basic)
+### 0.10 - `socket_*` efun family (basic)
 
 These live in `src/efun/EfunTable.cpp` but require new `Connection`-like
 infrastructure for non-player sockets.
@@ -76,7 +76,7 @@ Efuns to register (in `src/efun`):
 
 ## Phase 2 tasks
 
-### 2.13 — TLS support
+### 2.13 - TLS support
 
 Add OpenSSL-backed TLS wrapping over the existing plain TCP:
 
@@ -88,23 +88,23 @@ Add OpenSSL-backed TLS wrapping over the existing plain TCP:
    active; fall back to plain `read()`/`write()` otherwise.
 5. Expose `query_connection_tls(ob)` efun returning 1 if the connection is TLS.
 
-### 2.14 — WebSocket framing on top of TLS
+### 2.14 - WebSocket framing on top of TLS
 
 1. Add `bool useWebSocket_` to `Connection`.
 2. Detect the HTTP `GET ... Upgrade: websocket` handshake in the first bytes
    from a new connection; perform the SHA-1 / Base64 key exchange.
 3. After the handshake, all reads/writes go through WebSocket frame
    encode/decode (RFC 6455).
-4. The rest of the connection API is unchanged — line-based input/output works
+4. The rest of the connection API is unchanged - line-based input/output works
    the same way, just over WebSocket frames instead of raw TCP.
 
 ## Phase 3 tasks
 
-### 3.4 — GMCP, MSDP, MSSP, MTTS, MXP
+### 3.4 - GMCP, MSDP, MSSP, MTTS, MXP
 
 These are telnet subnegotiation-based out-of-band protocols. They share the
 IAC parser from Phase 0.8 but each has its own option codes and data format.
-See `src/proto/instruct.md` for the detailed implementation plan — the
+See `src/proto/instruct.md` for the detailed implementation plan - the
 `src/net` work is only the transport layer (IAC parser, subnegotiation buffer).
 `src/proto` owns the protocol-specific encode/decode and the efun interface.
 
@@ -113,7 +113,7 @@ See `src/proto/instruct.md` for the detailed implementation plan — the
 - Use `socketpair(AF_UNIX, SOCK_STREAM, 0)` in tests to create connected fd
   pairs without a real listening socket.
 - `Server::dispatchLine()` and `Server::fireNetDeadIfLinkDead()` are already
-  static and testable without a live socket — keep them that way.
+  static and testable without a live socket - keep them that way.
 - Add `tests/test_net.cpp` covering:
   - IAC sequence stripping
   - Echo suppression flag round-trip
@@ -123,10 +123,10 @@ See `src/proto/instruct.md` for the detailed implementation plan — the
 ## Key invariants
 
 - `Server::dispatchLine()` and `fireNetDeadIfLinkDead()` must remain static
-  and free of `Server` instance state — they are the main unit-test seam.
+  and free of `Server` instance state - they are the main unit-test seam.
 - IAC bytes must never appear in the string delivered to `dispatchLine()`.
 - `OutputContext::current()` must always be set before any efun that writes
-  output is called — it is the single source of truth for "which connection
+  output is called - it is the single source of truth for "which connection
   should receive write() output right now".
 - Socket handles returned by `socket_create` are globally unique integers
   (never reused within a session). Use a monotonic counter in `SocketRegistry`.

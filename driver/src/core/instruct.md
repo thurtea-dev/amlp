@@ -1,4 +1,4 @@
-# src/core/ — Errors and Core Types
+# src/core/ - Errors and Core Types
 
 ## What lives here
 
@@ -9,7 +9,7 @@
 ## Files to read before touching this directory
 
 - `include/lpcdriver/core/Errors.hpp`
-- `include/lpcdriver/vm/Value.hpp` — `LpcThrownValue` definition
+- `include/lpcdriver/vm/Value.hpp` - `LpcThrownValue` definition
 
 ## Current state
 
@@ -18,7 +18,7 @@
 - Used everywhere a LPC runtime error should abort the current eval
 
 `LpcThrownValue` (in `Value.hpp`) is a subclass of `LpcRuntimeError` that
-carries an arbitrary `Value` — the payload of `throw(value)` — so it can
+carries an arbitrary `Value` - the payload of `throw(value)` - so it can
 be caught by `catch()` and the value returned to LPC code.
 
 ## Phase 0 tasks
@@ -37,15 +37,15 @@ across the driver:
 
 ## Phase 2 tasks
 
-### 2.20 — Structured error objects: JSON-serializable diagnostics
+### 2.20 - Structured error objects: JSON-serializable diagnostics
 
 Instead of flat `what()` strings, build a `StructuredError` type that carries:
-- `string message` — the human-readable error text
-- `string objectPath` — the LPC file where the error originated
+- `string message` - the human-readable error text
+- `string objectPath` - the LPC file where the error originated
 - `string functionName`
 - `int line`, `int column`
-- `vector<StackFrame> callStack` — full LPC call stack at error time
-- `string dialectHint` — which dialect rule triggered this (if applicable)
+- `vector<StackFrame> callStack` - full LPC call stack at error time
+- `string dialectHint` - which dialect rule triggered this (if applicable)
 
 Serialization:
 ```cpp
@@ -62,10 +62,10 @@ compatibility. `StructuredError` is a new parallel path used by:
 
 ## Key invariants
 
-- `LpcRuntimeError` must remain the single base type for all LPC errors —
+- `LpcRuntimeError` must remain the single base type for all LPC errors -
   never use `std::exception` directly in LPC-layer catch sites.
 - `LpcThrownValue` must remain a subclass of `LpcRuntimeError`, not a sibling,
   so that generic `catch (LpcRuntimeError&)` sites can be upgraded to
   distinguish thrown values without breaking.
-- `StructuredError` (Phase 2.20) must not replace `LpcRuntimeError` — it is
+- `StructuredError` (Phase 2.20) must not replace `LpcRuntimeError` - it is
   additive. Existing error handling paths must continue to work unchanged.

@@ -1,8 +1,8 @@
-# src/persist/ — World Statedumps, Hotboot, Object Swapout (Phase 2a)
+# src/persist/ - World Statedumps, Hotboot, Object Swapout (Phase 2a)
 
 ## Purpose
 
-Persistent world state — AetherMUD exceeds DGD by supporting *both*
+Persistent world state - AetherMUD exceeds DGD by supporting *both*
 world-level snapshots and per-object `save_object()`/`restore_object()`
 simultaneously. DGD forces you to choose one; AetherMUD supports both.
 
@@ -83,10 +83,10 @@ fd numbers to the new binary.
 
 ## New efuns (register in `src/efun`)
 
-- `hotboot(string new_binary)` — triggers `HotbootManager::initiateHotboot()`
+- `hotboot(string new_binary)` - triggers `HotbootManager::initiateHotboot()`
   (master-only, security checked)
-- `dump_state()` — immediate statedump to `Config::statedumpFile()`
-- `restore_state(string path)` — load a statedump (master-only)
+- `dump_state()` - immediate statedump to `Config::statedumpFile()`
+- `restore_state(string path)` - load a statedump (master-only)
 
 ## Integration in `main.cpp`
 

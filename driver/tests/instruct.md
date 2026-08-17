@@ -1,4 +1,4 @@
-# tests/ — gtest Regression Suite
+# tests/ - gtest Regression Suite
 
 ## What lives here
 
@@ -27,7 +27,7 @@ ctest --test-dir driver/build -R "lexer" --output-on-failure
 The Phase 0 test-coverage audit:
 1. List every registered efun name from `EfunTable.cpp`.
 2. For each one, search `test_lexer.cpp` for a test that calls it via LPC code.
-3. Any efun with no test gets one added — minimum: happy path + one error case.
+3. Any efun with no test gets one added - minimum: happy path + one error case.
 
 New test files to create (one per subsystem):
 
@@ -120,7 +120,7 @@ the VM to ensure the correct parser/runtime path is active.
 
 ## Key invariants
 
-- Every test file must compile and pass in isolation — no test-order dependencies.
+- Every test file must compile and pass in isolation - no test-order dependencies.
 - Tests must not write to the real mudlib directory. Use `driver/config/test.cfg`
   pointing to `driver/mudlib_stub`.
 - Tests that create files (save_object, write_file) must clean up in `TearDown()`.

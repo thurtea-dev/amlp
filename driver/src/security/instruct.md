@@ -1,4 +1,4 @@
-# src/security/ — Security Model: privs_file, UID/GID Trust (Phase 3)
+# src/security/ - Security Model: privs_file, UID/GID Trust (Phase 3)
 
 ## Purpose
 
@@ -15,7 +15,7 @@ Real FluffOS has a `privs_file` apply on the master object: whenever an object
 tries to perform a privileged operation (read/write a file outside its own
 domain, call a protected function on another object, clone a protected
 blueprint), the master is asked whether to allow it. This driver currently
-does not enforce these checks — the master apply is wired in but not called
+does not enforce these checks - the master apply is wired in but not called
 at the right security decision points.
 
 LDMud has a more elaborate trust model with root/backbone UIDs and per-object
@@ -70,20 +70,20 @@ clone, destruct) but route through different boot-API apply names.
 
 After Phase 3, add security checks at:
 
-1. **`ObjectManager::compile()`** — `allowRead(caller, filename)`
-2. **`ObjectManager::cloneObject()`** — `allowClone(caller, blueprint)`
-3. **`ObjectManager::destructObject()`** — `allowDestruct(caller, target)`
-4. **`VM::callFunction()`** cross-object — `allowCallOther(caller, target, fn)`
+1. **`ObjectManager::compile()`** - `allowRead(caller, filename)`
+2. **`ObjectManager::cloneObject()`** - `allowClone(caller, blueprint)`
+3. **`ObjectManager::destructObject()`** - `allowDestruct(caller, target)`
+4. **`VM::callFunction()`** cross-object - `allowCallOther(caller, target, fn)`
 5. **File efuns** (`read_file`, `write_file`, `append_file`, `get_dir`,
    `read_bytes`, `write_bytes`, `rename`, `rm`, `mkdir`, `rmdir`)
-   — `allowRead` / `allowWrite` before every file syscall
+   - `allowRead` / `allowWrite` before every file syscall
 
 ## Filesystem jail
 
 Each object's domain is determined by its path prefix:
-- `/secure/` — admin domain (only master/simul_efun can call into these)
-- `/domains/PrisonIsland/` — PrisonIsland domain
-- `/std/` — standard library domain (readable by all, writable by nobody)
+- `/secure/` - admin domain (only master/simul_efun can call into these)
+- `/domains/PrisonIsland/` - PrisonIsland domain
+- `/std/` - standard library domain (readable by all, writable by nobody)
 
 The `SecurityManager` enforces that an object in domain A cannot read/write
 files in domain B without an explicit grant. Grants are declared in the
@@ -91,12 +91,12 @@ master object's `privs_file()` return value.
 
 ## New efuns (register in `src/efun`)
 
-- `query_privs(object ob)` — return the privilege string of `ob`
-- `set_privs(object ob, string privs)` — set privilege (master-only)
-- `getuid(object ob)` / `geteuid(object ob)` — LDMud-style UID queries
-- `seteuid(string uid)` — set effective UID of calling object
-- `export_uid(object ob)` — LDMud: transfer own euid to `ob`
-- `suid(object ob)` — LDMud: set-UID flag
+- `query_privs(object ob)` - return the privilege string of `ob`
+- `set_privs(object ob, string privs)` - set privilege (master-only)
+- `getuid(object ob)` / `geteuid(object ob)` - LDMud-style UID queries
+- `seteuid(string uid)` - set effective UID of calling object
+- `export_uid(object ob)` - LDMud: transfer own euid to `ob`
+- `suid(object ob)` - LDMud: set-UID flag
 
 ## CMakeLists.txt
 
@@ -118,7 +118,7 @@ target_link_libraries(lpcdriver PRIVATE security)
 ## Key invariants
 
 - Security checks happen BEFORE the operation, not after.
-- A failed security check throws `LpcRuntimeError("Access denied: ...")` —
+- A failed security check throws `LpcRuntimeError("Access denied: ...")` -
   never silently succeeds.
 - The master object itself is exempt from all security checks (it is the
   authority, not a subject of the authority system).

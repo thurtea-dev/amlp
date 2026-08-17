@@ -1,4 +1,4 @@
-# src/vm/ — VM Interpreter, Value Type, Bytecode
+# src/vm/ - VM Interpreter, Value Type, Bytecode
 
 ## What lives here
 
@@ -10,16 +10,16 @@
 
 ## Files to read before touching this directory
 
-- `include/lpcdriver/vm/Value.hpp` — the full `ValueVariant` definition
-- `include/lpcdriver/vm/Bytecode.hpp` — every OpCode and CompiledProgram
-- `include/lpcdriver/vm/VM.hpp` — public VM API
+- `include/lpcdriver/vm/Value.hpp` - the full `ValueVariant` definition
+- `include/lpcdriver/vm/Bytecode.hpp` - every OpCode and CompiledProgram
+- `include/lpcdriver/vm/VM.hpp` - public VM API
 - `docs/ROADMAP.md` Phase 0 and Phase 1 rows
-- Reference: `fluffos-2.9-ds2.08/interpret.c` — the reference VM (the inline
+- Reference: `fluffos-2.9-ds2.08/interpret.c` - the reference VM (the inline
   comments throughout `VM.cpp` cite specific line/function names from it)
 
 ## Phase 0 tasks
 
-### 0.4 — Real `set_eval_limit` accumulated-cost model
+### 0.4 - Real `set_eval_limit` accumulated-cost model
 
 Currently `maxEvalCost_` is checked as a flat per-`run()` ceiling and
 `set_eval_limit` is a no-op.
@@ -35,22 +35,22 @@ Currently `maxEvalCost_` is checked as a flat per-`run()` ceiling and
 - Throw a descriptive `LpcRuntimeError` when the limit is hit, matching the
   real "Too long eval" error string.
 
-**Reference:** `fluffos-2.9-ds2.08/interpret.c` — `eval_cost` global and the
+**Reference:** `fluffos-2.9-ds2.08/interpret.c` - `eval_cost` global and the
 `MAX_COST` check in `eval_instruction()`.
 
 ## Phase 1 tasks
 
-### 1.7 — LDMud `lambda()` / `unbound_lambda()` / `bind()` closure kinds
+### 1.7 - LDMud `lambda()` / `unbound_lambda()` / `bind()` closure kinds
 
 **New `Closure::Kind` enum values** (add to `Value.hpp`):
-- `Kind::MudosStyle` — current `(: :)` closures (rename from the implicit
+- `Kind::MudosStyle` - current `(: :)` closures (rename from the implicit
   default)
-- `Kind::LambdaArray` — LDMud `lambda()`: body is a `std::shared_ptr<Array>`
+- `Kind::LambdaArray` - LDMud `lambda()`: body is a `std::shared_ptr<Array>`
   that the VM executes as LPC bytecode (see below)
-- `Kind::UnboundLambda` — like `LambdaArray` but has no bound `owner`; must be
+- `Kind::UnboundLambda` - like `LambdaArray` but has no bound `owner`; must be
   `bind()`-ed before calling
-- `Kind::LdmudSymbol` — `#'name` reference: name is baked at construction; kind
-  is one of `FP_EFUN`, `FP_LOCAL`, `FP_SIMUL` — resolve and cache on first call
+- `Kind::LdmudSymbol` - `#'name` reference: name is baked at construction; kind
+  is one of `FP_EFUN`, `FP_LOCAL`, `FP_SIMUL` - resolve and cache on first call
 
 **`VM::callClosure()` extensions:**
 - `LambdaArray`: extract the `Array` body, interpret each element as either a
@@ -62,13 +62,13 @@ Currently `maxEvalCost_` is checked as a flat per-`run()` ceiling and
   opcode), cache the resolved `FP_*` kind + index in the `Closure` struct to
   avoid re-resolving on subsequent calls.
 
-### 1.10 — DGD `nil` as a distinct type
+### 1.10 - DGD `nil` as a distinct type
 
 Add `struct Nil {}` to the `ValueVariant` in `Value.hpp`:
 ```cpp
 using ValueVariant = std::variant<
     std::monostate,   // void (uninitialized)
-    Nil,              // DGD nil — absence of value, distinct from 0
+    Nil,              // DGD nil - absence of value, distinct from 0
     int64_t,
     double,
     std::string,
@@ -84,11 +84,11 @@ using ValueVariant = std::variant<
 - Only active when `LpcDialect::DGD` is set; in FluffOS/LDMud modes `nil`
   does not exist and the `Nil` variant is never constructed.
 
-### 1.11 — DGD `rlimits` statement
+### 1.11 - DGD `rlimits` statement
 
 New opcodes in `Bytecode.hpp`:
-- `PushRlimits` — operands: ticks (int32), stack_depth (int32)
-- `PopRlimits` — restore the previous limits
+- `PushRlimits` - operands: ticks (int32), stack_depth (int32)
+- `PopRlimits` - restore the previous limits
 
 In `VM::run()`:
 - `PushRlimits`: push the current `(evalCost_, maxStackDepth_)` pair onto a
@@ -96,7 +96,7 @@ In `VM::run()`:
 - `PopRlimits`: pop the saved pair and restore.
 - Throw "eval cost limit exceeded" / "stack too deep" when either limit is hit.
 
-### 1.12 — DGD `atomic` function modifier: checkpoint/rollback
+### 1.12 - DGD `atomic` function modifier: checkpoint/rollback
 
 **What to build:**
 1. Add `bool isAtomic` flag to `FunctionEntry` in `Bytecode.hpp`.
@@ -115,9 +115,9 @@ chattheatre.github.io/lpc-doc/dgd/unusual.html.
 
 ## Phase 2 tasks
 
-### 2.5 + 2.6 — C++20 coroutine scheduler + LPC `async`/`await`
+### 2.5 + 2.6 - C++20 coroutine scheduler + LPC `async`/`await`
 
-New `OpCode::Suspend` — when the VM hits this opcode it:
+New `OpCode::Suspend` - when the VM hits this opcode it:
 1. Saves the full stack frame (locals, program counter, call-stack) into a
    heap-allocated `TaskFrame`.
 2. Returns a sentinel `Value::Suspended` to the caller.
@@ -128,14 +128,14 @@ New `OpCode::Suspend` — when the VM hits this opcode it:
 Use C++20 stackless coroutines (`co_await`) inside the C++ scheduler to model
 the suspend/resume cleanly without OS threads.
 
-### 2.10 — Closure bake-at-construction
+### 2.10 - Closure bake-at-construction
 
 Instead of storing just `functionName` (a string to re-resolve at every call),
 resolve to a `FP_*` kind + index at `MakeClosure` opcode time:
-- `FP_LOCAL` — function found in the current object's own program
-- `FP_INHERITED` — found in an inherited program (store program index)
-- `FP_SIMUL` — found in the simul_efun object
-- `FP_EFUN` — found in the efun table (store efun table index)
+- `FP_LOCAL` - function found in the current object's own program
+- `FP_INHERITED` - found in an inherited program (store program index)
+- `FP_SIMUL` - found in the simul_efun object
+- `FP_EFUN` - found in the efun table (store efun table index)
 
 Cache result in `Closure::resolvedKind` + `Closure::resolvedIndex` (add these
 fields). `callClosure()` fast-paths on a non-zero `resolvedKind` rather than
@@ -162,6 +162,6 @@ ctest --test-dir driver/build -R "vm" --output-on-failure
 - `Nil` variant is only constructed when `LpcDialect::DGD` is active.
 - The four-tier call resolution in `findFunctionInChain()` must not be bypassed
   by any new opcode without a documented reason.
-- `LpcThrownValue` is a subclass of `LpcRuntimeError` — every catch site that
+- `LpcThrownValue` is a subclass of `LpcRuntimeError` - every catch site that
   handles `LpcRuntimeError` must decide whether to re-throw or consume a
   `LpcThrownValue`. See the comment in `Value.hpp`.

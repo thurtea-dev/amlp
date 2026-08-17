@@ -1,4 +1,4 @@
-# src/apply/ — ApplyTable: Master/SimulEfun Apply Dispatch
+# src/apply/ - ApplyTable: Master/SimulEfun Apply Dispatch
 
 ## What lives here
 
@@ -13,7 +13,7 @@ on a specific object by name. Examples: `connect()`, `logon()`,
 ## Files to read before touching this directory
 
 - `include/lpcdriver/apply/ApplyTable.hpp`
-- Reference: `fluffos-2.9-ds2.08/applies.h` — the real apply name constants
+- Reference: `fluffos-2.9-ds2.08/applies.h` - the real apply name constants
 - Reference: `fluffos-2.9-ds2.08/simulate.c` `safe_apply()` and `apply()`
 
 ## Phase 0 tasks
@@ -25,7 +25,7 @@ No urgent stub gaps here. Verify coverage:
 
 ## Phase 1 tasks
 
-### 1.4 — Pluggable boot API
+### 1.4 - Pluggable boot API
 
 Currently the apply system is hard-wired to the FluffOS master/simul_efun
 model. Phase 1 requires that the same machinery support three different apply
@@ -69,38 +69,38 @@ name sets.
    `autoObjectFile()` → `/kernel/auto` (configurable).
 
 5. **`ApplyTable`** takes a `const BootApi&` and routes all applies through
-   it. `VM::applyMaster()` is unchanged — it just calls `ApplyTable`.
+   it. `VM::applyMaster()` is unchanged - it just calls `ApplyTable`.
 
 6. **`src/dialect/instruct.md`** owns the code that constructs the right
    `BootApi` subclass based on the configured `LpcDialect`.
 
-### 1.15 — DGD driver+auto object boot path
+### 1.15 - DGD driver+auto object boot path
 
 When `DgdBootApi` is active:
 - On boot, load the driver object (`/kernel/driver` or `Config::masterFile()`).
 - Call `driver_object->initialize()`.
 - For every subsequently loaded object, **inject an `inherit "/kernel/auto";`**
-  at the top of its compiled program — this is the DGD auto-inherit mechanism.
+  at the top of its compiled program - this is the DGD auto-inherit mechanism.
   Implement this as an `ObjectManager::compile()` preprocessing step that
   prepends the inherit declaration when `DgdBootApi::hasAutoObject()` is true
   and the file is not the auto object itself.
 
-### 1.16 — LDMud master apply name table
+### 1.16 - LDMud master apply name table
 
 LDMud's master has a richer apply surface than FluffOS. The key additional
 applies beyond the FluffOS set:
-- `"get_root_uid"` — returns the root UID string
-- `"get_bb_uid"` — returns the backbone (fallback) UID
-- `"valid_read"` / `"valid_write"` — path-level filesystem permission checks
-- `"make_path_absolute"` — resolve a relative path
-- `"query_allow_shadow"` — shadow permission check (see `src/object`)
+- `"get_root_uid"` - returns the root UID string
+- `"get_bb_uid"` - returns the backbone (fallback) UID
+- `"valid_read"` / `"valid_write"` - path-level filesystem permission checks
+- `"make_path_absolute"` - resolve a relative path
+- `"query_allow_shadow"` - shadow permission check (see `src/object`)
 
 Add these to `LdmudBootApi` and wire them into `ApplyTable`'s apply-dispatch
 methods.
 
 ## Phase 2 tasks
 
-### 2.9 — Apply cache
+### 2.9 - Apply cache
 
 The apply cache sits logically in `src/apply` because it caches the result of
 "what function does this object have for this apply name?".
@@ -113,7 +113,7 @@ The apply cache sits logically in `src/apply` because it caches the result of
 4. Invalidation: when `ObjectManager::loadObject()` recompiles an object,
    erase all cache entries where the first element matches the recompiled
    object OR any object that inherits from it (the inheritance chain must be
-   invalidated too — track the reverse inherit map).
+   invalidated too - track the reverse inherit map).
 5. On `destructObject()`: erase all entries for the destroyed object.
 
 **Expected impact:** eliminates the dominant hot path in combat/heartbeat storms
@@ -123,7 +123,7 @@ object every 2 seconds.
 ## Key invariants
 
 - All apply dispatch (master, simul_efun, per-object) must check
-  `obj->isDestructed()` before calling — see `src/object/instruct.md` Phase 0.5.
+  `obj->isDestructed()` before calling - see `src/object/instruct.md` Phase 0.5.
 - Applies that return `void` in the spec should silently swallow the result
   rather than throwing on a non-void return.
 - The `BootApi` abstraction must not be bypassed: never hardcode `"connect"` or

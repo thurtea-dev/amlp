@@ -1,4 +1,4 @@
-# src/config/ — Driver Configuration
+# src/config/ - Driver Configuration
 
 ## What lives here
 
@@ -8,8 +8,8 @@
 
 ## Files to read before touching this directory
 
-- `include/lpcdriver/config/Config.hpp` — current key set
-- `etc/driver.cfg` — the live config file
+- `include/lpcdriver/config/Config.hpp` - current key set
+- `etc/driver.cfg` - the live config file
 
 ## Current config keys
 
@@ -31,14 +31,14 @@ parse them in `Config.cpp`):
 
 | Key | Type | Default | Purpose |
 |-----|------|---------|---------|
-| `save_format` | string | `"custom"` | `"custom"` or `"fluffos"` — controls `save_object` serializer |
+| `save_format` | string | `"custom"` | `"custom"` or `"fluffos"` - controls `save_object` serializer |
 | `tls_cert` | string | *(empty)* | Path to TLS certificate PEM |
 | `tls_key` | string | *(empty)* | Path to TLS private key PEM |
 | `max_connections` | int | `256` | Maximum simultaneous player connections |
 
 ## Phase 1 tasks
 
-### 1.1 — `dialect` config key
+### 1.1 - `dialect` config key
 
 The single most important new key for Phase 1:
 
@@ -70,10 +70,10 @@ Add:
 
 ## Key invariants
 
-- `Config::loadFromFile()` must not throw on unknown keys — log a warning and
+- `Config::loadFromFile()` must not throw on unknown keys - log a warning and
   continue. This allows new keys to be added to the binary before updating
   `driver.cfg` files everywhere.
-- All accessors must return const references or scalar values — never expose
+- All accessors must return const references or scalar values - never expose
   the internal `raw_` map.
-- Config is read-only after boot — no setter methods. All mutable runtime
+- Config is read-only after boot - no setter methods. All mutable runtime
   state lives in the appropriate subsystem (VM, Scheduler, etc.).

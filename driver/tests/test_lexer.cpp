@@ -12812,6 +12812,131 @@ static void testSprintfPercentOEmitsOctal() {
     std::cout << "testSprintfPercentOEmitsOctal OK\n";
 }
 
+// sprintf()/printf()'s "%O" specifier -- LPC's generic value-dump format.
+// Every case here is checked against real fluffos-2.9-ds2.08/sprintf.c's
+// own svalue_to_string() directly (see EfunTable.cpp's own
+// valueToDebugString() comment for the full citation trail), not
+// guessed from the specifier's general reputation. Found live blocking
+// Lil's own "eval" command (driver/lil/command/eval.c's own "printf(
+// \"Result = %O\n\", ...)"), the last real gap from that session's own
+// end-to-end login work.
+
+static void testSprintfPercentODumpsIntFloatAndString() {
+    lpcdriver::Value intResult = runProbe("return sprintf(\"%O\", 42);\n");
+    assert(std::get<std::string>(intResult.data) == "42");
+
+    lpcdriver::Value negResult = runProbe("return sprintf(\"%O\", -7);\n");
+    assert(std::get<std::string>(negResult.data) == "-7");
+
+    // Real T_REAL: plain C "%f", six decimal places.
+    lpcdriver::Value floatResult = runProbe("return sprintf(\"%O\", 3.5);\n");
+    assert(std::get<std::string>(floatResult.data) == "3.500000");
+
+    // Real T_STRING: wrapped in literal double quotes, no escaping.
+    lpcdriver::Value strResult = runProbe("return sprintf(\"%O\", \"hi\");\n");
+    assert(std::get<std::string>(strResult.data) == "\"hi\"");
+
+    std::cout << "testSprintfPercentODumpsIntFloatAndString OK\n";
+}
+
+static void testSprintfPercentODumpsEmptyAndNonEmptyArrayWithNesting() {
+    lpcdriver::Value emptyResult = runProbe("return sprintf(\"%O\", ({}));\n");
+    assert(std::get<std::string>(emptyResult.data) == "({ })");
+
+    lpcdriver::Value flatResult = runProbe("return sprintf(\"%O\", ({1, 2, 3}));\n");
+    assert(std::get<std::string>(flatResult.data) ==
+           "({ /* sizeof() == 3 */\n  1,\n  2,\n  3\n})");
+
+    // Nested array: inner elements indent two spaces deeper than their
+    // own containing array, real svalue_to_string()'s own recursive
+    // "indent + 2" -- confirmed here, not just at the top level.
+    lpcdriver::Value nestedResult = runProbe("return sprintf(\"%O\", ({1, ({2, 3})}));\n");
+    assert(std::get<std::string>(nestedResult.data) ==
+           "({ /* sizeof() == 2 */\n"
+           "  1,\n"
+           "  ({ /* sizeof() == 2 */\n"
+           "    2,\n"
+           "    3\n"
+           "  })\n"
+           "})");
+
+    std::cout << "testSprintfPercentODumpsEmptyAndNonEmptyArrayWithNesting OK\n";
+}
+
+static void testSprintfPercentODumpsEmptyAndNonEmptyMapping() {
+    lpcdriver::Value emptyResult = runProbe("return sprintf(\"%O\", ([]));\n");
+    assert(std::get<std::string>(emptyResult.data) == "([ ])");
+
+    // Real T_MAPPING: every entry (not just non-last ones) gets its own
+    // trailing ",\n" -- confirmed directly, a real asymmetry versus
+    // T_ARRAY's own "last element has no trailing comma" rule.
+    lpcdriver::Value oneResult = runProbe("return sprintf(\"%O\", ([\"a\": 1]));\n");
+    assert(std::get<std::string>(oneResult.data) ==
+           "([ /* sizeof() == 1 */\n  \"a\" : 1,\n])");
+
+    std::cout << "testSprintfPercentODumpsEmptyAndNonEmptyMapping OK\n";
+}
+
+static void testSprintfPercentODumpsObjectAndDestructedObjectAsZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pctO_target.c", "void create() {}\n");
+    harness.writeFile("/pctO_probe.c",
+        "string probe(object ob) { return sprintf(\"%O\", ob); }\n");
+    auto target = harness.objects.cloneObject("/pctO_target");
+    auto probe = harness.objects.cloneObject("/pctO_probe");
+    assert(target != nullptr && probe != nullptr);
+
+    lpcdriver::Value liveResult = harness.vm.callFunction(probe, "probe", {lpcdriver::Value(target)});
+    assert(std::get<std::string>(liveResult.data) == "/" + target->filename());
+
+    harness.objects.destructObject(target);
+    lpcdriver::Value destructedResult = harness.vm.callFunction(probe, "probe", {lpcdriver::Value(target)});
+    assert(std::get<std::string>(destructedResult.data) == "0");
+
+    std::cout << "testSprintfPercentODumpsObjectAndDestructedObjectAsZero OK\n";
+}
+
+static void testSprintfPercentODumpsClosureWithBoundArgs() {
+    lpcdriver::Value noArgsResult = runProbe("return sprintf(\"%O\", (: lower_case :));\n");
+    assert(std::get<std::string>(noArgsResult.data) == "(: lower_case :)");
+
+    lpcdriver::Value boundResult = runProbe("return sprintf(\"%O\", (: lower_case, \"HI\" :));\n");
+    assert(std::get<std::string>(boundResult.data) == "(: lower_case, \"HI\" :)");
+
+    std::cout << "testSprintfPercentODumpsClosureWithBoundArgs OK\n";
+}
+
+static void testSprintfPercentOFieldWidthAndPrecisionApplyLikePercentS() {
+    // Real sprintf.c converts %O's own dump into an ordinary %s-typed
+    // string immediately after building it -- field width/left-justify/
+    // precision-truncation all apply exactly like %s, confirmed here.
+    lpcdriver::Value widthResult = runProbe("return sprintf(\"[%-6O]\", 42);\n");
+    assert(std::get<std::string>(widthResult.data) == "[42    ]");
+
+    lpcdriver::Value precisionResult = runProbe("return sprintf(\"%.3O\", \"hello\");\n");
+    // The dumped form of "hello" is the 7-character string "\"hello\"";
+    // ".3" truncates that dumped form itself to its first 3 characters.
+    assert(std::get<std::string>(precisionResult.data) == "\"he");
+
+    std::cout << "testSprintfPercentOFieldWidthAndPrecisionApplyLikePercentS OK\n";
+}
+
+static void testPrintfLilEvalShapeMatchesRealResultPrefix() {
+    // The exact real call shape from driver/lil/command/eval.c:
+    // "printf(\"Result = %O\n\", ...)" -- the specific gap this row
+    // closes, not just the general specifier.
+    ObjectVarHarness harness;
+    harness.writeFile("/pctO_eval_probe.c",
+        "string probe() { return sprintf(\"Result = %O\\n\", 5 + 5); }\n");
+    auto ob = harness.objects.cloneObject("/pctO_eval_probe");
+    assert(ob != nullptr);
+
+    lpcdriver::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<std::string>(result.data) == "Result = 10\n");
+
+    std::cout << "testPrintfLilEvalShapeMatchesRealResultPrefix OK\n";
+}
+
 static void testSprintfDotPrecisionTruncatesLongerString() {
     lpcdriver::Value result = runProbe("return sprintf(\"[%.3s]\", \"hello\");\n");
     assert(std::holds_alternative<std::string>(result.data));
@@ -13974,6 +14099,13 @@ int main() {
     testSprintfPercentXEmitsLowercaseHex();
     testSprintfPercentXThrowsOnNonIntArgument();
     testSprintfPercentOEmitsOctal();
+    testSprintfPercentODumpsIntFloatAndString();
+    testSprintfPercentODumpsEmptyAndNonEmptyArrayWithNesting();
+    testSprintfPercentODumpsEmptyAndNonEmptyMapping();
+    testSprintfPercentODumpsObjectAndDestructedObjectAsZero();
+    testSprintfPercentODumpsClosureWithBoundArgs();
+    testSprintfPercentOFieldWidthAndPrecisionApplyLikePercentS();
+    testPrintfLilEvalShapeMatchesRealResultPrefix();
     testSprintfDotPrecisionTruncatesLongerString();
     testSprintfDotPrecisionWidensFieldWhenGreaterThanExplicitWidth();
     testSprintfStarFieldWidthPullsWidthFromLeadingArgument();

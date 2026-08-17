@@ -80,6 +80,129 @@ std::shared_ptr<LpcObject> resolveCommandGiver(VM& vm) {
     return nullptr;
 }
 
+// sprintf()/printf()'s "%O" specifier -- LPC's generic value-dump format,
+// used for debugging arbitrary values. Confirmed directly against
+// fluffos-2.9-ds2.08/sprintf.c's own svalue_to_string() before writing
+// anything (not guessed from the specifier's general reputation): %O
+// itself just builds this string then hands it to the exact same field-
+// width/precision/justification code %s already uses (real sprintf.c's
+// own "svalue_to_string(carg, &outbuf, 0, 0, 0); ... finfo |=
+// INFO_T_STRING;" -- INFO_T_LPC is converted into INFO_T_STRING right
+// after building the string, not a separate formatting path), which is
+// why this driver's own %O handling in sprintfImpl below only needs to
+// produce the piece string here and can otherwise fall straight into
+// the %s field-width logic already there.
+//
+// Per-kind formats, each confirmed against the real switch:
+// - int: plain decimal (real T_NUMBER via numadd()).
+// - float: C's own "%f" (six decimal places, real T_REAL: "outbuf_addv
+//   (outbuf, \"%f\", obj->u.real)").
+// - string: wrapped in literal double quotes, no escaping of embedded
+//   quotes/backslashes/newlines (real T_STRING: "\"" + string + "\"",
+//   confirmed -- there really is no escaping step in the real function).
+// - object: destructed -> "0" (real T_OBJECT's own "if (obj->u.ob->flags
+//   & O_DESTRUCTED) { numadd(outbuf, 0); break; }"); otherwise "/" +
+//   filename. Real code also appends a master()->object_name() apply
+//   result in parens when that apply is defined and returns a string
+//   ("obj->u.ob->obname" plus an optional " (\"...\")" suffix) -- not
+//   implemented here (this is a pure string-formatting helper with no
+//   VM access to fire an apply through, and no real call site in this
+//   mudlib defines object_name at all, confirmed by grep), so this
+//   driver's own %O on an object is always just "/" + filename with no
+//   parenthetical suffix, a known, narrow, documented gap versus real
+//   FluffOS's own optional decoration.
+// - array: "({ })" empty; otherwise "({ /* sizeof() == N */\n" then
+//   each element indented two spaces deeper than its own array/mapping,
+//   comma-and-newline-terminated except the last (real T_ARRAY's own
+//   "trailing" flag: every element but the last is drawn with
+//   trailing=1, the last with trailing=0, then one more bare "\n" is
+//   added after the loop regardless), closing "})" back at the array's
+//   own indent level.
+// - mapping: "([ ])" empty; otherwise "([ /* sizeof() == N */\n" then
+//   each entry as "  key : value,\n" (key gets its own indent, the
+//   value is drawn inline right after " : " with indent2 set so it adds
+//   no leading spaces of its own, and *every* entry -- not just non-last
+//   ones -- gets a trailing ",\n", confirmed directly against real
+//   T_MAPPING's own unconditional trailing=1 on the value draw), closing
+//   "])" back at the mapping's own indent level. This driver's own
+//   Mapping is an insertion-ordered vector, not a hash table, so %O's
+//   own entry order here is insertion order -- a real, deliberate
+//   divergence from real FluffOS's own hash-bucket iteration order
+//   (which no real mudlib code could depend on being any particular
+//   order anyway), not an attempt to replicate real hash placement.
+// - closure: "(: " + bare function name + ", " + each bound arg's own
+//   %O rendering + " :)" (real T_FUNCTION's own FP_LOCAL/FP_SIMUL/
+//   FP_EFUN cases all reduce to "print the function's own name" the
+//   same way this driver's own simplified, always-bare-name Closure
+//   model already does -- see Value.hpp's own Closure comment for why
+//   this driver has no separate FP_FUNCTIONAL "compiled code with
+//   numbered $1/$2 placeholders" closure kind to also handle here).
+// - monostate (this driver's own void/undefined marker): rendered as
+//   "0", matching this driver's own pre-existing, established
+//   convention elsewhere (e.g. a destructed object read out of a
+//   variable self-healing to a real int 0) rather than inventing a new
+//   representation specific to this one efun.
+//
+// Real recursion/depth guard, replicated exactly: "if (indent > 20) {
+// outbuf_add(outbuf, \"...\"); return; }" -- a genuine, deliberate
+// truncation quirk (guards a self-referential or extremely deep
+// structure), not an oversight; indent grows by 2 per array/mapping
+// nesting level (4 for a mapping's own value column), so this caps out
+// around 10 levels of plain array nesting.
+std::string valueToDebugString(const Value& v, int indent) {
+    if (indent > 20) return "...";
+    std::string pad(static_cast<size_t>(indent), ' ');
+
+    if (std::holds_alternative<std::monostate>(v.data)) {
+        return "0";
+    }
+    if (auto* iv = std::get_if<int64_t>(&v.data)) {
+        return std::to_string(*iv);
+    }
+    if (auto* dv = std::get_if<double>(&v.data)) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%f", *dv);
+        return buf;
+    }
+    if (auto* sv = std::get_if<std::string>(&v.data)) {
+        return "\"" + *sv + "\"";
+    }
+    if (auto* ov = std::get_if<std::shared_ptr<LpcObject>>(&v.data)) {
+        if (!*ov || (*ov)->isDestructed()) return "0";
+        return "/" + (*ov)->filename();
+    }
+    if (auto* av = std::get_if<std::shared_ptr<Array>>(&v.data)) {
+        if (!*av || (*av)->items.empty()) return "({ })";
+        std::string out = "({ /* sizeof() == " + std::to_string((*av)->items.size()) + " */\n";
+        for (size_t i = 0; i < (*av)->items.size(); ++i) {
+            out += pad + "  " + valueToDebugString((*av)->items[i], indent + 2);
+            out += (i + 1 < (*av)->items.size()) ? ",\n" : "\n";
+        }
+        out += pad + "})";
+        return out;
+    }
+    if (auto* mv = std::get_if<std::shared_ptr<Mapping>>(&v.data)) {
+        if (!*mv || (*mv)->entries.empty()) return "([ ])";
+        std::string out = "([ /* sizeof() == " + std::to_string((*mv)->entries.size()) + " */\n";
+        for (const auto& entry : (*mv)->entries) {
+            out += pad + "  " + valueToDebugString(entry.first, indent + 2) + " : " +
+                   valueToDebugString(entry.second, indent + 4) + ",\n";
+        }
+        out += pad + "])";
+        return out;
+    }
+    if (auto* cv = std::get_if<std::shared_ptr<Closure>>(&v.data)) {
+        if (!*cv) return "(: :)";
+        std::string out = "(: " + (*cv)->functionName;
+        for (const auto& bound : (*cv)->boundArgs) {
+            out += ", " + valueToDebugString(bound, indent);
+        }
+        out += " :)";
+        return out;
+    }
+    return "!ERROR: GARBAGE SVALUE!";
+}
+
 // Recursive, self-delimiting save format used by the save_object()/
 // restore_object() efuns below -- see their own comment for why this
 // driver does not attempt to match real FluffOS's own on-disk save
@@ -1510,15 +1633,25 @@ void registerCoreEfuns() {
                 }
                 piece = std::string(1, static_cast<char>(std::get<int64_t>(argVal.data)));
                 haveWidth = false; // real sprintf.c: field width is not meaningful for %c
+            } else if (spec == 'O') {
+                // Real sprintf.c: accepts any value kind (no type check
+                // the way %s/%d/%c/%o/%x each require one) -- svalue_to_
+                // string() itself has a case for every real svalue type.
+                piece = valueToDebugString(argVal, 0);
             } else {
                 throw LpcRuntimeError(
                     std::string("sprintf: unsupported format specifier '%") + spec +
-                    "' (only %s, %d, %c, %o, and %x are implemented)");
+                    "' (only %s, %d, %c, %o, %x, and %O are implemented)");
             }
             // ":" sets precision == field size, truncating a %s
             // argument longer than the field ("all other types ignore
             // this" -- real sprintf.c; %d/%c are never truncated here).
-            if (colonMode && spec == 's' && haveWidth &&
+            // %O is included here too: real sprintf.c converts INFO_T_LPC
+            // into INFO_T_STRING immediately after building the dump
+            // string (see valueToDebugString()'s own top comment), so
+            // from this point on %O is genuinely indistinguishable from
+            // %s to the field-width/precision/justify code below.
+            if (colonMode && (spec == 's' || spec == 'O') && haveWidth &&
                 static_cast<int>(piece.size()) > fieldWidth) {
                 piece = piece.substr(0, static_cast<size_t>(fieldWidth));
             }
@@ -1527,7 +1660,7 @@ void registerCoreEfuns() {
             // field size, then field size = precision") widens an
             // already-explicit field width to match, but does not
             // conjure a field width out of nothing when none was given.
-            if (havePrecision && spec == 's') {
+            if (havePrecision && (spec == 's' || spec == 'O')) {
                 if (static_cast<int>(piece.size()) > precision) {
                     piece = piece.substr(0, static_cast<size_t>(precision));
                 }
@@ -4562,7 +4695,7 @@ void registerCoreEfuns() {
     });
 
     // -------------------------------------------------------------------------
-    // Phase 0.13 efun growth batch — to_float, typeof, rename, rmdir, math
+    // Phase 0.13 efun growth batch - to_float, typeof, rename, rmdir, math
     // -------------------------------------------------------------------------
 
     // float to_float(string | float | int) -- real efuns_main.c's own
@@ -4776,7 +4909,7 @@ void registerCoreEfuns() {
     });
 
     // -------------------------------------------------------------------------
-    // Math package (packages/math_spec.c / packages/math.c) — all confirmed
+    // Math package (packages/math_spec.c / packages/math.c) - all confirmed
     // against the FluffOS reference source directly. Each takes a float;
     // the real implementations operate on sp->u.real in-place and do not
     // do any int-promotion. This driver promotes an int arg to float at the

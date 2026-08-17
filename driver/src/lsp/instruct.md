@@ -1,4 +1,4 @@
-# src/lsp/ — Language Server Protocol Server (Phase 2e)
+# src/lsp/ - Language Server Protocol Server (Phase 2e)
 
 ## Purpose
 
@@ -86,23 +86,23 @@ shared between the LSP server and the game server (if running concurrently).
 
 ## LSP capabilities to implement (in priority order)
 
-1. **`textDocument/publishDiagnostics`** — compile the file in memory, catch
+1. **`textDocument/publishDiagnostics`** - compile the file in memory, catch
    all `LpcRuntimeError` / `StructuredError` (Phase 2.20) exceptions, and
    send them as diagnostics. This is the single most valuable feature: instant
    red-squiggles for syntax and type errors.
 
-2. **`textDocument/completion`** — suggest function names, efun names, and
+2. **`textDocument/completion`** - suggest function names, efun names, and
    object paths at the cursor position. Use `SymbolIndex::completionsAt()` +
    `EfunTable::allNames()` (add this method to `EfunTable`).
 
-3. **`textDocument/hover`** — show the function signature and doc comment
+3. **`textDocument/hover`** - show the function signature and doc comment
    (from the next line after the function declaration) when hovering over a
    call site.
 
-4. **`textDocument/definition`** — jump to the definition of a function or
+4. **`textDocument/definition`** - jump to the definition of a function or
    variable. Uses `SymbolIndex::lookupDefinition()`.
 
-5. **`textDocument/references`** — find all call sites of a function (requires
+5. **`textDocument/references`** - find all call sites of a function (requires
    a reverse-reference index, Phase 2e extension work).
 
 ## JSON-RPC transport

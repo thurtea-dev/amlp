@@ -3,6 +3,70 @@
 Older session entries (everything before the 5 most recent) live in
 `docs/STATUS-ARCHIVE.md` (mirrored at `driver/STATUS-ARCHIVE.md`).
 
+**2026-08-21: `global include file` config support implemented (Phase 0
+row 0.14), and a real third-party mudlib (Lil) confirmed logging in
+end to end against this driver for the first time.** New `Config` key
+`global_include_file` (default empty/off), wired into
+`ObjectManager`'s own compile pipeline: when set, an `#include` line
+built from the configured value (used verbatim, delimiters included) is
+emitted ahead of every compiled object's own source, gated the same way
+real FluffOS gates it -- a true no-op for any mudlib that never sets it,
+this repo's own bundled Rifts mudlib and `mudlib_stub` included.
+
+Verified directly against `driver/reference/fluffos-2.9-ds2.08/lex.c`
+before writing anything, not assumed from the prior session's own
+narrower investigation: `start_new_file()`'s own "if
+(*GLOBAL_INCLUDE_FILE) { ...; handle_include(gifile, 1); } else
+refill_buffer();" runs before a single byte of the real object's own
+source is read, for every compile; `handle_include()`'s own "delim =
+*name++ == '\"' ? '\"' : '>';" confirms the configured value is used
+with its own delimiters intact (not a separate quote/angle flag), which
+is why this driver's own implementation also takes the raw config value
+verbatim rather than adding its own delimiters.
+
+Root-caused and fixed the specific bug blocking Lil's own login path
+(found the prior session, `inherit/base.c`'s own `staticv` macro used
+without including `globals.h`): confirmed via `lex.c`'s own
+`free_defines()` (called fresh at the top of `start_new_file()` for
+every single compile, inherited files included) that real FluffOS does
+*not* have persistent cross-file macro state either -- the prior
+session's own hypothesis for why Lil works unmodified under real
+FluffOS was wrong. The real explanation is narrower: Lil's own shipped
+`etc/config.test` already points "global include file" at `<config.h>`,
+and this driver simply had no support for that directive at all.
+`driver/lil/include/config.h` now `#include`s `globals.h` inside its own
+guard (matching that file's own header comment describing itself as
+exactly this customization point), leaving `config.test`'s own
+"global include file : <config.h>" setting untouched.
+
+End-to-end verified live over a real TCP connection, not just via a
+static compile check: booted `driver/lil` fresh, connected, logged in
+past the exact point that failed the prior session (`new("/clone/user")`
+now succeeds), confirmed the new player is genuinely registered (a real
+`who` command shows it correctly formatted), and confirmed its landing
+location programmatically (a direct API check, since Lil's own `eval`
+command turned out to be separately broken, see below) -- the player's
+own `environment()` is `/single/void`, exactly `login.c`'s own real,
+unconditional `user->move(VOID_OB)`, the sensible landing spot for a
+deliberately minimal bootstrap mudlib with no real world of its own.
+
+Two further gaps surfaced live during this same session's own socket
+testing (not from static reading), both flagged rather than fixed here:
+`say` (Lil's own `/command/say.c` calls the real `say()` efun directly;
+this driver does not register it, deliberately, since this repo's own
+bundled Rifts mudlib shadows it with a simul_efun -- a different
+context, already flagged in an earlier session's efun-gap-list) and
+`eval` (`/command/eval.c` always formats its result via `printf("Result
+= %O\n", ...)`, and this driver's `sprintf`/`printf` do not implement
+the `%O` format specifier at all -- a new, previously-undiscovered gap).
+
+3 new regression tests (macro resolves when `global_include_file` is
+configured; the identical fixture fails to compile when it is not,
+deliberately reproducing Lil's own real failure shape; a
+no-dependency object compiles identically either way). Full suite: 502
+tests passing, up from 499, no regressions, stable across three
+consecutive runs.
+
 **2026-08-20: Every registered efun now has at least one regression test
 (Phase 0 row 0.12), closed out via a real audit rather than a spot check.**
 Grepped every real `registerEfun("name", ...)` call in `EfunTable.cpp`
@@ -327,7 +391,7 @@ efun exposes captures), `reg_assoc()` matching its own real doc-comment
 example element for element, and `reg_assoc()` with zero patterns. Full
 suite: 421 tests passing, up from 413, no regressions.
 
-**2026-08-15: Phase 0.13 efun growth batch — 20 new core efuns implemented.**
+**2026-08-15: Phase 0.13 efun growth batch - 20 new core efuns implemented.**
 Grepped real call sites across `mudlib/nightmare3_fluffos_v2/lib/` to find
 the highest-usage missing efuns, then confirmed every spec against the
 FluffOS 2.9 reference source before implementing.
@@ -338,7 +402,7 @@ Full math package (`cos`/`sin`/`tan`/`asin`/`acos`/`atan`/`sqrt`/`log`/
 `log10`/`pow`/`exp`/`floor`/`ceil`) from `packages/math_spec.c`/`math.c`.
 
 Notable spec details confirmed directly from source: `rename()` returns 0
-on success and 1 on failure — the inverse of most file efuns — matching
+on success and 1 on failure - the inverse of most file efuns - matching
 `do_rename()`'s own return convention confirmed in `efuns_main.c`. `typeof()`
 type-name strings lifted directly from `interpret.c`'s own `type_names[]`
 array (`"int"`, `"float"`, `"string"`, `"object"`, `"array"`, `"mapping"`,
