@@ -88,6 +88,13 @@ public:
     // applyMaster() already dispatches against.
     std::shared_ptr<LpcObject> masterObject() const;
 
+    // The configured simul_efun object (real simul_efun_ob), already
+    // reached internally on every bare-call tier-3 lookup (see the Call
+    // opcode's own VM.cpp comment) but not previously exposed to
+    // EfunTable.cpp -- needed by replace_program()'s own real
+    // "current_object == simul_efun_ob" guard (replace_program.c).
+    std::shared_ptr<LpcObject> simulEfunObject() const;
+
     // real FluffOS's find_object(): an already-loaded lookup that falls
     // back to *compiling and loading the file on a miss*
     // (simulate.c's find_object(): "if ((ob = lookup_object_hash(
@@ -232,6 +239,31 @@ public:
     // fall back to a "what?" style message.
     bool dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::string& line);
 
+    // Registers (or, matching real retrieve_replace_program_entry(),
+    // overwrites an already-pending one for the same object) a deferred
+    // replace_program() swap -- see replace_program() efun's own
+    // EfunTable.cpp registration comment for the full derivation. Never
+    // applied immediately: real replace_program.c's own comment explains
+    // why ("all kind of volatile data structures could result" if the
+    // swap happened mid-execution), matched here by only ever staging it
+    // for processPendingReplacePrograms() to apply later.
+    void enqueueReplaceProgram(std::shared_ptr<LpcObject> ob,
+                                std::shared_ptr<CompiledProgram> newProgram, int offset,
+                                std::string name);
+
+    // real remove_destructed_objects()'s own "if (obj_list_replace)
+    // replace_programs();" (backend.c) -- called once per outer driver
+    // tick (Scheduler::run()'s own for(;;) loop, the equivalent of real
+    // backend.c's own while(1) loop this exact call site lives in), not
+    // once per individual command/call_out/heartbeat dispatch the way
+    // eval-cost reset is. Also directly callable from tests that never
+    // run a full Scheduler::run() loop, the same "directly callable to
+    // simulate one tick" shape tickHeartbeats()/tickCallOuts() already
+    // establish. A no-op when nothing is pending (matching real code's
+    // own "if (obj_list_replace)" guard, not an unconditional per-tick
+    // walk).
+    void processPendingReplacePrograms();
+
 private:
     Value run(const CompiledProgram& program, const FunctionEntry& fn,
               std::vector<Value> args, const std::shared_ptr<LpcObject>& obj);
@@ -300,6 +332,20 @@ private:
     // same dispatchCommand() path) nests a new verb without necessarily
     // changing the command_giver.
     std::vector<std::string> verbStack_;
+
+    // See enqueueReplaceProgram()/processPendingReplacePrograms(). Real
+    // obj_list_replace (replace_program.c), a plain linked list of
+    // pending swaps; one entry per object with a swap staged, matching
+    // real retrieve_replace_program_entry()'s "find or create" reuse
+    // (a second replace_program() call before the next tick overwrites
+    // the first, rather than queuing both).
+    struct PendingReplaceProgram {
+        std::shared_ptr<LpcObject> ob;
+        std::shared_ptr<CompiledProgram> newProgram;
+        int offset = 0;
+        std::string name;
+    };
+    std::vector<PendingReplaceProgram> pendingReplacePrograms_;
 };
 
 } // namespace amlp

@@ -771,6 +771,11 @@ void ObjectManager::destructObject(const std::shared_ptr<LpcObject>& obj) {
 
     obj->setDestructed(true);
 
+    // real destruct_object() -> destruct2()'s own "if (ob->replaced_program)
+    // { FREE_MSTR(ob->replaced_program); ob->replaced_program = 0; }"
+    // (object.c) -- backs query_replaced_program() (EfunTable.cpp).
+    obj->setReplacedProgramName(std::nullopt);
+
     // real destruct_object() (simulate.c): "remove_living_name(ob);",
     // right alongside its own environment-unlink step just below --
     // without this, a destructed object with a still-live shared_ptr

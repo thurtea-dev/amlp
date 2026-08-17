@@ -3,6 +3,144 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-22 (continued): `replace_program()` taken on as the flagship
+item from last session's own architecture notes, `query_replaced_program`
+added alongside it as a natural follow-on, `origin()` investigated
+further and re-deferred with a much more concrete reason, a whole
+unverifiable reflection-efun family and a real 3419-line parser
+subsystem both discovered and flagged (Phase 0 row 0.13: 227 registered,
+up from 225).** Re-ran the six-corpus ranking from the previous entry's
+own methodology (no re-clone needed -- all six were still present);
+gap unchanged in shape from last time (`translate` stays the top
+correctly-excluded shadowed simul_efun; `replace_program` and `origin`
+still the two next-ranked real items).
+
+`replace_program` (33 combined, es2 31) taken on this session, per last
+entry's own concretely-scoped notes. Read the real ~200-line
+`replace_program.c` in full before writing anything. Confirmed this
+driver's `CompiledProgram::inheritedPrograms`/`ancestorBaseOffsets`
+(`Bytecode.hpp`) genuinely was the right architectural fit last
+session's notes expected: `inherits[i]`/`inheritedPrograms[i]` are
+parallel, same-order vectors (confirmed directly in
+`ObjectManager::compile()`), so a name-matched depth-first walk of that
+pair alone (new `searchInheritedProgram()`, `EfunTable.cpp`) finds the
+target ancestor's own `CompiledProgram` without needing a new filename
+field on it at all -- and `ancestorBaseOffsets` already has a direct
+entry for every transitive ancestor (`obj->program()->ancestorBaseOffsets.
+find(matchedProgram.get())`), so the real `var_offset` this efun needs
+is a single map lookup, not a hand-rolled offset accumulation. Deferred
+application matches real semantics exactly (real code's own comment:
+applying it mid-execution "could result" in volatile state) -- new
+`VM::enqueueReplaceProgram()`/`VM::processPendingReplacePrograms()`,
+wired into `Scheduler::run()`'s own `for(;;)` loop at the same relative
+position real `backend.c`'s own `while(1)` loop calls
+`remove_destructed_objects()` from, and independently callable from
+tests the same way `tickHeartbeats()`/`tickCallOuts()` already are, to
+simulate one driver tick passing without needing the full event loop
+running. The variable-array shuffle (`processPendingReplacePrograms()`)
+unifies real code's own two branches (`offset != 0` vs `offset == 0`)
+into one "keep the `[offset, offset+newCount)` slice" extraction, since
+an offset of 0 already produces the same result the second branch
+computes separately. Real guards ported: `current_object == simul_efun_ob`
+throws (new `VM::simulEfunObject()` accessor, mirroring the existing
+`masterObject()`); "program to replace with has to be inherited" throws
+when the search finds nothing. Real `prog->func_ref` guard (blocks the
+swap while a function pointer holds a *direct* reference into the
+current program's own function table) has no equivalent here and was
+not ported: this driver's `Closure` never holds a direct function-table
+reference, only a bare name re-resolved lazily against its owner object
+at call time (`Value.hpp`), so a closure that stops resolving after the
+swap simply throws "undefined function" at its own next call instead --
+matching real semantics' intent, just via a different mechanism, not a
+gap. Real "stop shadowing" side effect ported with its own specific
+asymmetry preserved exactly as read (only `ob->shadowing` is checked and
+spliced, never `ob->shadowed`, confirmed directly rather than
+generalized to an unconditional `remove_shadow()`-style splice).
+
+`query_replaced_program` (real, `packages/contrib.c`) implemented
+alongside it: new `LpcObject::replacedProgramName_` (set only once a
+staged swap actually applies, in `processPendingReplacePrograms()` right
+after `setProgram()`, correctly still unset while a swap is merely
+*pending* -- verified by its own dedicated test -- matching real
+semantics: `replaced_program` is written by `replace_programs()` itself,
+never by `f_replace_program()` staging the request), cleared on destruct
+(`ObjectManager::destructObject()`) matching real `object.c`'s own
+destructor. Real `add_slash()`'s leading-`/`-on-the-stored-name behavior
+matched explicitly rather than assumed present in whatever the mudlib
+argument happened to look like.
+
+`origin()` (27 combined) investigated further, not just re-flagged.
+Read `efuns_main.c`'s real `f_origin()`: far simpler than the previous
+entry's own notes suggested -- not a full per-frame-object metadata
+structure, just one scalar (`caller_type`), saved/restored across nested
+calls via the control stack exactly the way this driver's own
+`objectChangeStack_` already saves/restores object-crossing state, real
+architecture already a close match. Found and enumerated all 8 real
+`ORIGIN_*` values and every real C set site (`origin.h`, `function.c`,
+`interpret.c`). The blocker is narrower now, and specific: real
+`call_other()`/`->` does not compile to its own dedicated opcode in this
+driver at all -- it is compiler-forced through `OpCode::CallEfun`
+targeting the literal name `"call_other"` (`Bytecode.hpp`'s own comment
+on why `CallEfun` exists), the same opcode every *other*, genuine efun
+call also uses. Distinguishing real `ORIGIN_CALL_OTHER` from real
+`ORIGIN_EFUN` therefore needs a name-based special case at that one
+opcode, not just per-opcode tagging -- a real, easy-to-get-subtly-wrong
+seam that does not show up anywhere in a first-pass architecture read.
+One mitigating finding worth recording: the one real, verified call
+site (`secure/daemon/chat.c`'s own `origin() != ORIGIN_LOCAL` gate) only
+actually needs a binary LOCAL-vs-not distinction, not the full 8-value
+fidelity -- lowering the stakes of that one call site specifically, but
+not of `origin()` as a general-purpose efun other mudlib code could
+reasonably call expecting a fully correct answer. Given the number of
+distinct call paths still needing correct, individually-verified
+tagging (`Call`'s own tiered local/inherited/simul_efun/efun resolution,
+the `CallEfun`-vs-`call_other` special case above, `CallParent`,
+`callClosure()`, and every external `callFunction()` entry point from
+`Server`/`Scheduler`/`ObjectManager` for `ORIGIN_DRIVER`), still judged
+too large and too easy to get silently wrong in a batch shared with
+other work -- deferred again, with this session's much more concrete
+mechanism notes left for whoever takes it on next as its own fully-
+focused pass.
+
+Two more real gaps investigated and resolved into clearer categories
+rather than re-flagged unchanged. The reflection-efun family
+(`variables`, `functions`, `fetch_variable`, `store_variable`,
+`fetch_class_member`, `store_class_member`) -- previously filed as "a
+real API family of comparable scope to a fresh mini-subsystem" -- turns
+out to have **no implementation anywhere in this project's only
+reference source at all** for any of the six names (grepped every real
+`.c` file, including `packages/`, not just the top-level ones a
+previous pass's narrower grep covered): prototype-only in `efun_defs.c`,
+the same category `debug_info` was already correctly excluded under.
+Recategorized from "large effort" to "unverifiable," the stronger and
+more specific reason. The `parse_*` family (66 combined across 8 names)
+-- previously not investigated in any depth -- does have a real
+implementation after all, missed by an earlier pass's own top-level-only
+grep: `packages/parser.c`, a genuine 3419-line natural-language
+sentence/grammar-rule parser package (FluffOS's real "parser" package).
+Confirmed real and substantial, not unverifiable or architecture-
+mismatched -- but sized well beyond a batch item, closer to `snoop`'s or
+`replace_program`'s own "own dedicated session" category than anything
+folded in here. Flagged for a future pass with this citation so it is
+not rediscovered from scratch.
+
+3 new test functions (`test/test_lexer.cpp`): `replace_program`'s own
+test is the most involved of the three, deliberately checking (a) both
+the child's own function and the inherited one resolve normally before
+any call, (b) the swap is still fully inert immediately after
+`replace_program()` returns (proving the deferral, not just its
+eventual effect), and (c) after simulating one tick
+(`processPendingReplacePrograms()`), the child's own function is gone
+(checked via `VM::callFunction()`'s own documented silent-void-for-
+undefined-function convention, not a thrown exception -- that is
+`OpCode::Call`'s own behavior for a bare in-LPC call, a different entry
+point, an assumption this test's first draft got wrong and a real run
+caught immediately), the inherited one still resolves, the shared
+variable's own *value* survived the swap intact, and the object's own
+variable count shrank to the target ancestor's own count. Full suite:
+564 tests passing, up from 561 before this session, no regressions,
+stable across three consecutive runs plus a full `ctest` pass.
+
 **2026-08-22 (continued): call-site ranking widened to six real mudlib
 corpora, `pluralize`'s previous "permanently shadowed" verdict reversed
 after finding a real load-bearing `efun::pluralize()` delegation, 3 more

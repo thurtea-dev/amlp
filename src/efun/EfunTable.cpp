@@ -5,6 +5,7 @@
 #include "amlp/object/LivingNameRegistry.hpp"
 #include "amlp/object/LiveObjectRegistry.hpp"
 #include "amlp/object/LpcObject.hpp"
+#include "amlp/object/ObjectManager.hpp"
 #include "amlp/net/OutputContext.hpp"
 #include "amlp/net/Connection.hpp"
 #include "amlp/net/InteractiveRegistry.hpp"
@@ -938,6 +939,40 @@ int reclaimSweepValue(Value& v, int depth) {
         return cleaned;
     }
     return 0;
+}
+
+// Backs replace_program() below. Real search_inherited() (replace_program.c):
+// a depth-first walk of prog's own direct inherits, checking each one's
+// own name for a match *before* recursing into it (matching real code's
+// "if (match) return; else if (recurse into it succeeds) return;" order,
+// not a breadth-first or recurse-first search). Matched here against
+// each inherit's own raw, as-written path string
+// (CompiledProgram::inherits[i], parallel to inheritedPrograms[i], same
+// order -- confirmed directly in ObjectManager::compile()) rather than a
+// stored canonical filename the way real prog->filename works, since
+// this driver's CompiledProgram carries no filename field of its own;
+// both sides go through the exact same ObjectManager::normalizeFilename()
+// this driver already uses everywhere else for path identity, so a
+// caller writing "std/room" or "std/room.c" matches an ancestor's own
+// "inherit \"std/room\";" either way. Once a match is found, its real
+// "var_offset" is not accumulated by hand here -- CompiledProgram::
+// ancestorBaseOffsets on the *searching object's own top-level program*
+// already has a direct entry for every transitive ancestor (built once,
+// recursively, at compile time -- see its own Bytecode.hpp comment), so
+// the caller does a single map lookup instead.
+std::shared_ptr<CompiledProgram> searchInheritedProgram(const CompiledProgram& prog,
+                                                          const std::string& normalizedTarget) {
+    for (size_t i = 0; i < prog.inherits.size() && i < prog.inheritedPrograms.size(); ++i) {
+        const auto& child = prog.inheritedPrograms[i];
+        if (!child) continue;
+        if (ObjectManager::normalizeFilename(prog.inherits[i]) == normalizedTarget) {
+            return child;
+        }
+        if (auto found = searchInheritedProgram(*child, normalizedTarget)) {
+            return found;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -3623,6 +3658,94 @@ void registerCoreEfuns() {
         ob->setShadowing(std::weak_ptr<LpcObject>());
         ob->setShadowedBy(std::weak_ptr<LpcObject>());
         return Value(int64_t{1});
+    });
+
+    // void replace_program(string name) -- real replace_program.c's own
+    // f_replace_program(): swaps current_object's own program to one of
+    // its own inherited programs (a memory-saving optimization in real
+    // FluffOS -- many otherwise-identical objects sharing one compiled
+    // program instead of each keeping their full own copy; this driver's
+    // shared_ptr-managed CompiledProgram already shares structurally, so
+    // there is no memory motive here, implemented anyway for the real,
+    // observable effect on this object's own future function/variable
+    // resolution). Real call sites are genuine and concentrated:
+    // es2_mudlib/mudlib/d/*'s own "replace_program(ROOM)"/
+    // "replace_program(BANK)" idiom, lightweight domain-area objects
+    // that just want a shared base program's exact behavior.
+    //
+    // Deferred, never applied immediately -- matching real code's own
+    // reasoning exactly (replace_program.c's own comment: doing it
+    // mid-execution "could result" in volatile data structures were the
+    // master consulted for a shadow check right then). See
+    // VM::processPendingReplacePrograms() for where the actual swap
+    // happens (once per outer driver tick, Scheduler::run()'s own
+    // for(;;) loop, matching real remove_destructed_objects()'s own call
+    // site in backend.c's while(1) exactly) and searchInheritedProgram()
+    // above for how the target ancestor program is found (a name-matched
+    // depth-first walk of this object's own inherit tree, reusing
+    // CompiledProgram::ancestorBaseOffsets -- already computed once at
+    // compile time for a different reason, cross-inheritance object-
+    // variable resolution -- for the real var_offset this efun also
+    // needs, rather than re-deriving it by hand here).
+    //
+    // Real guards ported: "current_object == simul_efun_ob" throws
+    // (real "replace_program on simul_efun object"); "program to replace
+    // the current with has to be inherited" throws when the search finds
+    // no match. Real "prog->func_ref" guard (blocks replace_program
+    // while a function pointer holds a *direct* reference into
+    // current_object's own function table) has no equivalent here: this
+    // driver's Closure never holds a direct function-table reference at
+    // all, only a bare name re-resolved lazily against its owner object
+    // at call time (see Value.hpp's own Closure comment) -- a closure
+    // created before the swap that no longer resolves afterward simply
+    // throws "undefined function" at its own next call, matching real
+    // semantics' intent even though this driver has nothing analogous to
+    // guard against up front.
+    t.registerEfun("replace_program", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("replace_program: expected a string argument");
+        }
+        auto ob = vm.currentObject();
+        if (!ob) {
+            throw LpcRuntimeError("replace_program called with no current object");
+        }
+        if (ob == vm.simulEfunObject()) {
+            throw LpcRuntimeError("replace_program on simul_efun object");
+        }
+
+        std::string target = ObjectManager::normalizeFilename(std::get<std::string>(args[0].data));
+        auto newProgram = searchInheritedProgram(ob->program(), target);
+        if (!newProgram) {
+            throw LpcRuntimeError(
+                "replace_program: program to replace the current with has to be inherited");
+        }
+        auto currentProgram = ob->programPtr();
+        auto offsetIt = currentProgram->ancestorBaseOffsets.find(newProgram.get());
+        int offset = offsetIt != currentProgram->ancestorBaseOffsets.end() ? offsetIt->second : 0;
+
+        vm.enqueueReplaceProgram(ob, std::move(newProgram), offset, target);
+        return Value{};
+    });
+
+    // string query_replaced_program(void|object ob default: this_object())
+    // -- real packages/contrib.c's own f_query_replaced_program(): the
+    // name last passed to a successfully-applied replace_program() call
+    // on ob, or int 0 if it was never replaced. Reads
+    // LpcObject::replacedProgramName(), only ever set by
+    // VM::processPendingReplacePrograms() once a staged swap actually
+    // applies -- correctly still 0 for an object with a replace_program()
+    // call merely *pending* (not yet applied), matching real semantics:
+    // real replaced_program is only ever written by replace_programs()
+    // itself, never by f_replace_program() staging the request.
+    t.registerEfun("query_replaced_program", [](VM& vm, std::vector<Value>& args) -> Value {
+        std::shared_ptr<LpcObject> ob;
+        if (!args.empty() && std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
+            ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        } else {
+            ob = vm.currentObject();
+        }
+        if (!ob || !ob->replacedProgramName()) return Value(int64_t{0});
+        return Value(*ob->replacedProgramName());
     });
 
     // object snoop(object by, void|object victim) -- Phase 0.13 (snoop

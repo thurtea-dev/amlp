@@ -15387,6 +15387,134 @@ static void testReclaimObjectsCoercesStaleReferencesAndErasesDestructedMappingKe
     std::cout << "testReclaimObjectsCoercesStaleReferencesAndErasesDestructedMappingKeysReturningCount OK\n";
 }
 
+// replace_program(): swaps an object's own program to one of its
+// inherited ancestors' -- deferred until VM::processPendingReplacePrograms()
+// runs (matching real replace_programs()'s own once-per-driver-tick
+// timing, not applied inline), then drops the object's own
+// (non-ancestor) functions while keeping the ancestor's own variables'
+// *values* intact across the swap (the real var_offset shuffle).
+static void testReplaceProgramDeferredSwapPreservesInheritedVariablesAndDropsOwnFunctions() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rp_parent.c",
+        "int shared_var;\n"
+        "void create() {}\n"
+        "string desc() { return \"a room\"; }\n"
+        "int get_shared() { return shared_var; }\n");
+    harness.writeFile("/rp_child.c",
+        "inherit \"/rp_parent\";\n"
+        "int child_var;\n"
+        "void create() {}\n"
+        "string special() { return \"special\"; }\n"
+        "void set_vars(int s, int c) { shared_var = s; child_var = c; }\n"
+        "void do_replace() { replace_program(\"/rp_parent\"); }\n");
+
+    auto ob = harness.objects.cloneObject("/rp_child");
+    assert(ob != nullptr);
+
+    // Before any replace_program() call: everything resolves normally,
+    // both the child's own function and the inherited one.
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "desc", {}).data) == "a room");
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "special", {}).data) == "special");
+    harness.vm.callFunction(ob, "set_vars", {amlp::Value(int64_t{42}), amlp::Value(int64_t{99})});
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_shared", {}).data) == 42);
+    assert(ob->variables().size() == 2); // shared_var (inherited) + child_var (own)
+
+    // Stages the swap -- nothing about the object changes yet.
+    harness.vm.callFunction(ob, "do_replace", {});
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "special", {}).data) == "special");
+    assert(ob->variables().size() == 2);
+
+    // Simulates one driver tick passing.
+    harness.vm.processPendingReplacePrograms();
+
+    // Now applied: the child's own function is gone (the object's whole
+    // program is literally /rp_parent's now), the inherited one still
+    // resolves (it always was part of /rp_parent), shared_var's own
+    // *value* survived the swap (42, not reset or garbled), and the
+    // object's own variable count shrank to /rp_parent's own (1).
+    // VM::callFunction()'s own documented convention for an undefined
+    // function is a silent void return, not a throw (that is
+    // OpCode::Call's own behavior for a bare in-LPC call, a different
+    // entry point) -- checked accordingly, not against an exception.
+    amlp::Value afterSwap = harness.vm.callFunction(ob, "special", {});
+    assert(afterSwap.isVoid());
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "desc", {}).data) == "a room");
+    assert(std::get<int64_t>(harness.vm.callFunction(ob, "get_shared", {}).data) == 42);
+    assert(ob->variables().size() == 1);
+
+    std::cout << "testReplaceProgramDeferredSwapPreservesInheritedVariablesAndDropsOwnFunctions OK\n";
+}
+
+// query_replaced_program(): 0 (not an empty string) before any
+// replace_program() call, still 0 while a swap is only *staged* (real
+// replaced_program is written by replace_programs() itself, never by
+// f_replace_program() staging the request), and the real leading-slash-
+// prefixed name only once the deferred swap has actually applied.
+static void testQueryReplacedProgramReflectsOnlyAnActuallyAppliedSwap() {
+    ObjectVarHarness harness;
+    harness.writeFile("/qrp_parent.c", "void create() {}\n");
+    harness.writeFile("/qrp_child.c",
+        "inherit \"/qrp_parent\";\n"
+        "void create() {}\n"
+        "void do_replace() { replace_program(\"/qrp_parent\"); }\n");
+    harness.writeFile("/qrp_probe.c",
+        "mixed probe(object ob) { return query_replaced_program(ob); }\n");
+
+    auto ob = harness.objects.cloneObject("/qrp_child");
+    auto probe = harness.objects.cloneObject("/qrp_probe");
+    assert(ob != nullptr && probe != nullptr);
+
+    amlp::Value before = harness.vm.callFunction(probe, "probe", {amlp::Value(ob)});
+    assert(std::holds_alternative<int64_t>(before.data) && std::get<int64_t>(before.data) == 0);
+
+    harness.vm.callFunction(ob, "do_replace", {});
+    amlp::Value staged = harness.vm.callFunction(probe, "probe", {amlp::Value(ob)});
+    assert(std::holds_alternative<int64_t>(staged.data) && std::get<int64_t>(staged.data) == 0);
+
+    harness.vm.processPendingReplacePrograms();
+    amlp::Value applied = harness.vm.callFunction(probe, "probe", {amlp::Value(ob)});
+    assert(std::holds_alternative<std::string>(applied.data));
+    assert(std::get<std::string>(applied.data) == "/qrp_parent");
+
+    std::cout << "testQueryReplacedProgramReflectsOnlyAnActuallyAppliedSwap OK\n";
+}
+
+static void testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/rp2_unrelated.c", "void create() {}\n");
+    harness.writeFile("/rp2_child.c",
+        "void create() {}\n"
+        "void try_replace(string name) { replace_program(name); }\n");
+    auto ob = harness.objects.cloneObject("/rp2_child");
+    assert(ob != nullptr);
+
+    // Real "program to replace the current with has to be inherited" --
+    // /rp2_unrelated is a real, loadable file, just not in ob's own
+    // inherit chain.
+    bool threwNotInherited = false;
+    try {
+        harness.vm.callFunction(ob, "try_replace", {amlp::Value(std::string("/rp2_unrelated"))});
+    } catch (const amlp::LpcRuntimeError&) {
+        threwNotInherited = true;
+    }
+    assert(threwNotInherited);
+
+    // Real "replace_program on simul_efun object".
+    harness.writeFile("/simul_efun.c",
+        "void create() {}\n"
+        "void try_replace_self() { replace_program(\"/simul_efun\"); }\n");
+    assert(harness.objects.loadSimulEfunObject());
+    bool threwSimulEfun = false;
+    try {
+        harness.vm.callFunction(harness.objects.simulEfunObject(), "try_replace_self", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threwSimulEfun = true;
+    }
+    assert(threwSimulEfun);
+
+    std::cout << "testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObject OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -15955,6 +16083,9 @@ int main() {
     testPluralizeMatchesRealExceptionTableGeneralRulesAndOfClauseAcrossVariousInputs();
     testUniqueMappingGroupsByCallbackResultInFirstAppearanceOrderForClosureAndStringForms();
     testReclaimObjectsCoercesStaleReferencesAndErasesDestructedMappingKeysReturningCount();
+    testReplaceProgramDeferredSwapPreservesInheritedVariablesAndDropsOwnFunctions();
+    testQueryReplacedProgramReflectsOnlyAnActuallyAppliedSwap();
+    testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObject();
     std::cout << "all tests passed\n";
     return 0;
 }

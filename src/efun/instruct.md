@@ -371,6 +371,70 @@ closes). `get_char`/`ed`/`origin`/`resolve`/the driver-internal-dump
 family all re-verified excluded for their previously-documented reasons
 with the wider corpus behind them too.
 
+**Tier 1, fifth pass (2026-08-22):** `replace_program` (33, es2 31) and
+`origin` (27) -- the two items the fourth pass flagged as strong,
+architecturally-scoped-but-not-yet-implemented candidates -- were both
+investigated in real depth this pass. `replace_program` was ready and
+implemented: this driver's `CompiledProgram::inheritedPrograms`/
+`ancestorBaseOffsets` (`Bytecode.hpp`) turned out to need no new field
+at all, just a name-matched depth-first walk of the existing parallel
+`inherits[i]`/`inheritedPrograms[i]` vectors (new `searchInheritedProgram()`,
+`EfunTable.cpp`) plus one `ancestorBaseOffsets` lookup for the real
+`var_offset`. New `VM::enqueueReplaceProgram()`/
+`processPendingReplacePrograms()` (deferred application, wired into
+`Scheduler::run()`'s own loop at the same relative position real
+`backend.c`'s own `while(1)` loop calls `remove_destructed_objects()`
+from) and new `VM::simulEfunObject()`/`LpcObject::setProgram()`/
+`programPtr()` accessors. See STATUS.md's own dated entry for the full
+derivation, including the one real guard intentionally not ported (real
+`prog->func_ref`, which has no equivalent given this driver's lazy-
+resolved `Closure` model) and the one real asymmetry ported exactly as
+read (the shadow-splice-on-replace only checks `ob->shadowing`, never
+`ob->shadowed`). `query_replaced_program` (real, `packages/contrib.c`)
+implemented alongside it as a natural, small follow-on -- new
+`LpcObject::replacedProgramName_`, set only once a swap actually
+applies, cleared on destruct.
+
+`origin` was investigated just as deeply and still not implemented,
+now for a sharper, more specific reason than "needs per-call origin
+tagging" alone: real `f_origin()` (`efuns_main.c`) is genuinely simple,
+just one scalar (`caller_type`) saved/restored across nested calls the
+same way this driver's own `objectChangeStack_` already saves/restores
+object-crossing state -- but real `call_other()`/`->` does not compile
+to its own opcode in this driver at all, it is compiler-forced through
+`OpCode::CallEfun` targeting the literal name `"call_other"`
+(`Bytecode.hpp`'s own comment), the exact same opcode every genuine efun
+call also uses. Distinguishing real `ORIGIN_CALL_OTHER` from real
+`ORIGIN_EFUN` therefore needs a name-based special case at that one
+opcode on top of otherwise-straightforward per-opcode tagging elsewhere
+(`Call`'s own tiered resolution, `CallParent`, `callClosure()`, and
+every external `callFunction()` entry point for `ORIGIN_DRIVER`) -- a
+real, easy-to-get-subtly-wrong seam invisible from a first architecture
+read, all 8 real `ORIGIN_*` values and their real C set sites now
+enumerated (see STATUS.md) for whoever takes this on next as its own
+fully-focused pass, not shared with other batch work.
+
+Two more items resolved into sharper categories while investigating the
+above. The reflection-efun family (`variables`, `functions`,
+`fetch_variable`, `store_variable`, `fetch_class_member`,
+`store_class_member`) -- previously "a real API family of comparable
+scope to a fresh mini-subsystem" -- has **no implementation anywhere in
+this project's only reference source** for any of the six names
+(confirmed by grepping every real `.c` file, `packages/` included, not
+just the top-level ones an earlier pass's narrower grep covered):
+prototype-only, the same `debug_info` category. Recategorized from
+"large effort" to "unverifiable, nothing to check a port against." The
+`parse_*` family (66 combined across `parse_refresh`/`parse_init`/
+`parse_sentence`/`parse_add_rule`/`parse_add_synonym`/`parse_my_rules`/
+`parse_dump`/`parse_remove`) does have a real implementation after all,
+missed the same way by an earlier top-level-only grep:
+`packages/parser.c`, a genuine 3419-line natural-language sentence/
+grammar-rule parser package. Real and substantial, not unverifiable or
+architecture-mismatched -- but sized closer to `replace_program`'s own
+"own dedicated session" category (likely larger) than anything to fold
+into a batch. Flagged with this citation so it is not rediscovered from
+scratch next time.
+
 **Tier 2 (medium effort), corrected:** `query_actions` removed (not a
 real efun name, see `commands`'s own row above). Everything else in the
 first pass's Tier 2 list is now done: `add_action`, `remove_action`,

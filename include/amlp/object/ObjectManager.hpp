@@ -44,7 +44,6 @@ public:
 
     void destructObject(const std::shared_ptr<LpcObject>& obj);
 
-private:
     // Strips one trailing ".c" if present, so "id_card" and "id_card.c"
     // resolve to the exact same cache entry and object identity. Real
     // LPC object paths never carry the ".c" extension internally (this
@@ -55,7 +54,13 @@ private:
     // such a call resolved to a literal "id_card.c.c" file that never
     // exists. Same normalization shape as save_object()'s own path
     // handling (EfunTable.cpp), applied on the load/compile side instead.
+    // Public: replace_program() (EfunTable.cpp) reuses this exact
+    // canonicalization to match its own string argument against each
+    // inherited program's own raw inherit-path string, rather than
+    // inventing a second, potentially-diverging normalization rule.
     static std::string normalizeFilename(const std::string& filename);
+
+private:
 
     std::shared_ptr<CompiledProgram> compile(const std::string& filename);
 

@@ -462,6 +462,85 @@ void VM::setMaxEvalCost(int64_t limit) {
     maxEvalCost_ = limit;
 }
 
+void VM::enqueueReplaceProgram(std::shared_ptr<LpcObject> ob,
+                                std::shared_ptr<CompiledProgram> newProgram, int offset,
+                                std::string name) {
+    for (auto& pending : pendingReplacePrograms_) {
+        if (pending.ob == ob) {
+            pending.newProgram = std::move(newProgram);
+            pending.offset = offset;
+            pending.name = std::move(name);
+            return;
+        }
+    }
+    pendingReplacePrograms_.push_back({std::move(ob), std::move(newProgram), offset, std::move(name)});
+}
+
+void VM::processPendingReplacePrograms() {
+    if (pendingReplacePrograms_.empty()) return;
+    std::vector<PendingReplaceProgram> pending = std::move(pendingReplacePrograms_);
+    pendingReplacePrograms_.clear();
+
+    for (auto& entry : pending) {
+        auto& ob = entry.ob;
+        if (!ob || ob->isDestructed() || !entry.newProgram) continue;
+
+        // real "num_fewer = ob->prog->num_variables_total -
+        // new_prog->num_variables_total" plus the offset-based
+        // variable-array shuffle (replace_program.c's own
+        // replace_programs()) -- both of its real branches (offset != 0
+        // vs offset == 0) reduce to the same "keep the [offset,
+        // offset+newCount) slice, drop the rest" operation once offset
+        // is allowed to be 0 (a no-op slice-from-the-front), so this is
+        // one unified extraction rather than two separate loops. Falls
+        // back to a plain truncation only if the offset is somehow out
+        // of range for the object's current variable count (defensive;
+        // a genuinely valid ancestor offset from
+        // CompiledProgram::ancestorBaseOffsets never hits this).
+        size_t newCount = entry.newProgram->objectVarNames.size();
+        auto& vars = ob->variables();
+        size_t off = entry.offset > 0 ? static_cast<size_t>(entry.offset) : 0;
+        if (off + newCount <= vars.size()) {
+            std::vector<Value> kept(vars.begin() + static_cast<long>(off),
+                                     vars.begin() + static_cast<long>(off + newCount));
+            vars = std::move(kept);
+        } else {
+            vars.resize(newCount);
+        }
+
+        // real "if (r_ob->ob->shadowing) { ... splice ob out of the
+        // shadow chain ... }" -- only ob's own *outgoing* shadow
+        // relationship is stopped, not any shadow relationship pointed
+        // *at* ob (real code checks only ob->shadowing, never
+        // ob->shadowed, on its own; see replace_program() efun's own
+        // registration comment for why that asymmetry is kept exactly
+        // as read rather than generalized to an unconditional
+        // remove_shadow()-style splice).
+        if (auto shadowingTarget = ob->shadowing().lock()) {
+            auto myShadower = ob->shadowedBy().lock();
+            shadowingTarget->setShadowedBy(myShadower);
+            if (myShadower) {
+                myShadower->setShadowing(shadowingTarget);
+                ob->setShadowedBy(std::weak_ptr<LpcObject>());
+            }
+            ob->setShadowing(std::weak_ptr<LpcObject>());
+        }
+
+        ob->setProgram(std::move(entry.newProgram));
+
+        // real "r_ob->ob->replaced_program = string_copy(r_ob->new_prog->
+        // filename, ...)", backing query_replaced_program() -- real
+        // add_slash() ensures a leading '/' on the stored name; matched
+        // here rather than assuming entry.name already has one, since
+        // the mudlib argument to replace_program() itself is not
+        // required to include it (this driver's own normalizeFilename()
+        // never adds one either).
+        std::string stored = entry.name;
+        if (stored.empty() || stored.front() != '/') stored.insert(stored.begin(), '/');
+        ob->setReplacedProgramName(std::move(stored));
+    }
+}
+
 Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
                         const std::string& functionName,
                         std::vector<Value> args) {
@@ -569,6 +648,10 @@ void VM::destructObject(const std::shared_ptr<LpcObject>& obj) {
 
 std::shared_ptr<LpcObject> VM::masterObject() const {
     return objects_.masterObject();
+}
+
+std::shared_ptr<LpcObject> VM::simulEfunObject() const {
+    return objects_.simulEfunObject();
 }
 
 std::shared_ptr<LpcObject> VM::findObject(const std::string& filename) const {

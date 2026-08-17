@@ -24,6 +24,33 @@ public:
     CompiledProgram& program() { return *program_; }
     const CompiledProgram& program() const { return *program_; }
 
+    // Reassigns which compiled program this object's own function/
+    // variable-slot resolution runs against -- real replace_program()'s
+    // own "r_ob->ob->prog = r_ob->new_prog;" (replace_program.c). Never
+    // called directly by the replace_program() efun itself (real
+    // replace_programs() defers this exact assignment to the next driver
+    // tick, see VM::processPendingReplacePrograms()); exposed here as a
+    // plain setter purely so that deferred-application code, which lives
+    // in VM rather than this class, has somewhere to reach the
+    // otherwise-read-only program_ pointer itself, not just what it
+    // currently points to.
+    void setProgram(std::shared_ptr<CompiledProgram> program) { program_ = std::move(program); }
+    std::shared_ptr<CompiledProgram> programPtr() const { return program_; }
+
+    // real object_t::replaced_program (object.h): the name last passed
+    // to a successfully-applied replace_program() call, or unset if this
+    // object was never replaced -- backs query_replaced_program()
+    // (packages/contrib.c). Set only by VM::processPendingReplacePrograms(),
+    // the same place setProgram() above is actually called from; cleared
+    // on destruct alongside everything else object.c's own real
+    // destructor clears (see ObjectManager::destructObject()), matching
+    // real "if (ob->replaced_program) { FREE_MSTR(...); ob->replaced_program
+    // = 0; }" exactly.
+    const std::optional<std::string>& replacedProgramName() const { return replacedProgramName_; }
+    void setReplacedProgramName(std::optional<std::string> name) {
+        replacedProgramName_ = std::move(name);
+    }
+
     std::vector<Value>& variables() { return variables_; }
 
     // real object_t's O_HEART_BEAT flag plus its heart_beats[]-entry own
@@ -235,6 +262,7 @@ public:
 private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
+    std::optional<std::string> replacedProgramName_;
     std::vector<Value> variables_;
     int heartbeatInterval_ = 0;
     std::weak_ptr<LpcObject> environment_;

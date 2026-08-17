@@ -31,6 +31,16 @@ void Scheduler::run(Server& server, int maxIterations) {
     for (;;) {
         server.pollOnce();
 
+        // Real backend.c's own "if (obj_list_replace || obj_list_destruct)
+        // remove_destructed_objects();", right at the top of its own
+        // while(1) loop -- this driver has no deferred-destruct list to
+        // match (LpcObject is destructed immediately, see VM::
+        // destructObject()'s own comment), only the replace_program()
+        // half. A no-op call when nothing is pending (processPendingReplacePrograms()'s
+        // own early-out), so unlike tickHeartbeats() this needs no
+        // separate elapsed-time or "is anything pending" gate here.
+        vm_.processPendingReplacePrograms();
+
         // Real backend.c only calls call_heart_beat() once real elapsed
         // time crosses a HEARTBEAT_INTERVAL boundary ("if(!(current_time %
         // HEARTBEAT_INTERVAL)) call_heart_beat();" in call_out.c's own main
