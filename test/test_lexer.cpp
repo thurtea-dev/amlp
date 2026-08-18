@@ -19,6 +19,7 @@
 #include "amlp/dialect/LpcDialect.hpp"
 #include "amlp/dialect/FluffOsBootApi.hpp"
 #include "amlp/dialect/LdmudBootApi.hpp"
+#include "amlp/dialect/MasterUidBoot.hpp"
 #include <algorithm>
 #include <cassert>
 #include <iostream>
@@ -16624,6 +16625,61 @@ static void testBootApiMasterFileAndSimulEfunFileReadThroughConfig() {
     std::cout << "testBootApiMasterFileAndSimulEfunFileReadThroughConfig OK\n";
 }
 
+// queryMasterUid() is the first real runtime caller of
+// BootApi::masterUidApply() -- routed through the actual VM::applyMaster()
+// call path against a real compiled master object, not BootApi in
+// isolation the way the three tests above exercise it.
+
+static void testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime() {
+    // Same master object defines both real names; which one actually
+    // fires is determined entirely by the BootApi passed in, proving
+    // the dialect routing is real and not coincidental.
+    {
+        ObjectVarHarness harness;
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "string get_root_uid() { return \"ROOT-FLUFFOS\"; }\n"
+            "string get_master_uid() { return \"WRONG-NAME-FOR-FLUFFOS\"; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        amlp::FluffOsBootApi fluffApi(harness.config);
+        auto uid = amlp::queryMasterUid(harness.vm, fluffApi);
+        assert(uid.has_value());
+        assert(*uid == "ROOT-FLUFFOS");
+    }
+    {
+        ObjectVarHarness harness;
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "string get_root_uid() { return \"WRONG-NAME-FOR-LDMUD\"; }\n"
+            "string get_master_uid() { return \"ROOT-LDMUD\"; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        amlp::LdmudBootApi ldmudApi(harness.config);
+        auto uid = amlp::queryMasterUid(harness.vm, ldmudApi);
+        assert(uid.has_value());
+        assert(*uid == "ROOT-LDMUD");
+    }
+
+    std::cout << "testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime OK\n";
+}
+
+static void testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply() {
+    // Real apply_master_ob() semantics: an undefined apply on master is
+    // not a boot failure in either dialect, just "no uid".
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    amlp::FluffOsBootApi fluffApi(harness.config);
+    assert(!amlp::queryMasterUid(harness.vm, fluffApi).has_value());
+
+    amlp::LdmudBootApi ldmudApi(harness.config);
+    assert(!amlp::queryMasterUid(harness.vm, ldmudApi).has_value());
+
+    std::cout << "testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -17225,6 +17281,8 @@ int main() {
     testLpcDialectNameAndFromStringRoundTripAllThreeDialects();
     testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence();
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
+    testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime();
+    testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply();
     std::cout << "all tests passed\n";
     return 0;
 }

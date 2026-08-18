@@ -3,6 +3,69 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-24 (continued): `BootApi::masterUidApply()` wired into the real
+runtime for the first time -- `main.cpp` now genuinely calls
+`get_root_uid()` on the master object at boot, routed through
+`queryMasterUid()`/`VM::applyMaster()`, not just exercised in isolation
+by the prior session's own `BootApi` unit tests (596 tests, up from
+594).**
+
+Asked to route "the hardcoded master UID apply call site(s) in
+Server.cpp/ObjectManager.cpp" through `BootApi`. Checked first rather
+than assuming the premise: no such call site exists anywhere.
+`"get_root_uid"` appears in real (non-test, non-dialect) code exactly once,
+as a static string inside `ApplyTable::known()`'s whitelist
+(`src/apply/ApplyTable.cpp`) -- and `ApplyTable::isKnownApply()` itself
+has zero callers anywhere in `src/`, `include/`, or the test suite.
+`main.cpp`'s boot sequence loaded the master object but never applied
+any UID-related apply to it; there is also no uid/privs trust-hierarchy
+concept anywhere in this driver yet (ROADMAP Phase 3.1, still `[ ]`).
+Surfaced this instead of inventing scope silently; asked which of three
+options to take (add a genuine new boot-time call; stop here; or make
+the dead `ApplyTable` whitelist dialect-aware instead). Instructed to
+add the boot-time call, the recommended option.
+
+**What was built.** A new, minimal, reusable helper --
+`queryMasterUid(VM&, const BootApi&)`, `src/dialect/MasterUidBoot.hpp`/
+`.cpp` -- fires `bootApi.masterUidApply()` on the master object via the
+real `VM::applyMaster()`, mirroring the existing `try`/catch-and-extract-
+string shape `ObjectManager::initPrivsForObject()`'s own `"privs_file"`
+call site already uses (an exception from the apply's own LPC body is
+caught and treated as "no uid", not a boot failure; a plain undefined
+function already returns silently via `VM::callFunction()`'s own
+existing real-semantics handling, no extra handling needed for that
+case). `main.cpp` calls it once, right after `loadMasterObject()`
+succeeds, using a hardcoded `FluffOsBootApi` -- `Config::dialect()` (row
+1.1) still doesn't exist, so FluffOS is the only dialect this driver
+actually runs as today; noted in both a code comment and ROADMAP.md as
+the thing to swap once row 1.1 lands a real config-driven switch.
+`DialectFactory`/`DgdBootApi` were not needed to wire this single call
+site and were not built, per this session's own instruction.
+
+New `dialect` -> `vm` library dependency (`src/dialect/CMakeLists.txt`)
+-- no cycle, `vm` does not depend on `dialect`.
+
+Confirmed live, not just by the test suite: ran the real `amlp` binary
+against `etc/driver.cfg` (`AMLP_MAX_ITERATIONS=1`) and it now prints
+`master does not define get_root_uid()` on boot (`test/mudlib_stub/
+master.c` genuinely does not define it -- expected, not a regression).
+
+Two new regression tests (596 total, up from 594, all passing across
+three consecutive runs plus `ctest`), both against the real call path
+through a real compiled master object rather than `BootApi` in
+isolation: one master defining both `get_root_uid()` and
+`get_master_uid()` with different return strings, queried once via
+`FluffOsBootApi` and once via `LdmudBootApi`, each getting back only its
+own dialect's real string -- proof the routing is genuinely dialect-
+driven, not coincidental; and a master defining neither, confirming
+`queryMasterUid()` returns `std::nullopt` for both dialects rather than
+throwing, matching real `apply_master_ob()` semantics for an undefined
+apply.
+
+ROADMAP.md rows 1.4 and 1.16 updated with this session's progress
+(still `[ ]`, only this one call site is wired -- every other apply this
+row's own scope covers is still hardcoded or unimplemented).
+
 **2026-08-24 (continued): Phase 1 begins -- `LpcDialect` enum, a trimmed
 `BootApi` interface, and `FluffOsBootApi`/`LdmudBootApi` implemented,
 carrying forward the LDMud `get_master_uid` correction recorded in

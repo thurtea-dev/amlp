@@ -7,6 +7,8 @@
 #include "amlp/net/Server.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
 #include "amlp/efun/EfunTable.hpp"
+#include "amlp/dialect/FluffOsBootApi.hpp"
+#include "amlp/dialect/MasterUidBoot.hpp"
 
 namespace {
 void handleSignal(int) {
@@ -54,6 +56,19 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Driver booted. Master object loaded: " << config.masterFile() << "\n";
+
+    // Real per-dialect boot-time master UID query (see
+    // src/dialect/MasterUidBoot.hpp). Hardcoded to FluffOS here --
+    // Config::dialect() (ROADMAP row 1.1) is not wired up yet, so
+    // FluffOsBootApi is the only dialect this driver actually runs as
+    // today; swap this for a DialectFactory-selected BootApi once row
+    // 1.1 lands a real config-driven switch.
+    amlp::FluffOsBootApi bootApi(config);
+    if (auto uid = amlp::queryMasterUid(vm, bootApi)) {
+        std::cout << "  master " << bootApi.masterUidApply() << "() = \"" << *uid << "\"\n";
+    } else {
+        std::cout << "  master does not define " << bootApi.masterUidApply() << "()\n";
+    }
 
     // Non-fatal: an unconfigured or currently-uncompilable simul_efun
     // file should not block the rest of the driver from booting (see
