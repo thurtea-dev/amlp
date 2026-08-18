@@ -3,6 +3,7 @@ pkg_check_modules(PCRE2 REQUIRED libpcre2-8)
 
 add_library(efun
     EfunTable.cpp
+    ParserPackage.cpp
 )
 target_include_directories(efun PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(efun PRIVATE ${PCRE2_INCLUDE_DIRS})

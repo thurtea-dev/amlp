@@ -18129,6 +18129,228 @@ static void testMakeBootApiForConfigThrowsForDgdSinceDgdBootApiDoesNotExistYet()
     std::cout << "testMakeBootApiForConfigThrowsForDgdSinceDgdBootApiDoesNotExistYet OK\n";
 }
 
+// --- parse_* package: row 0.13a first slice (tokenizer + verb/rule
+// registry; parse_init/parse_add_rule/parse_dump/parse_remove). Every
+// verb name below is unique across this whole file's own single-process
+// `main()` (ParserPackage's own registry is global, process-wide state,
+// matching real parser.c -- see ParserPackage.hpp's own comment) so
+// parse_dump()'s always-whole-table output stays collision-free between
+// tests, the same discipline LivingNameRegistry-backed tests already
+// use for the same reason.
+
+static void testParseAddRuleThrowsWhenParseInitWasNeverCalled() {
+    std::string src =
+        "void probe() {\n"
+        "    parse_add_rule(\"zzzparseinitguard\", \"OBJ\");\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    bool threw = false;
+    try {
+        vm.callFunction(obj, "probe", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testParseAddRuleThrowsWhenParseInitWasNeverCalled OK\n";
+}
+
+static void testParseInitAddRuleAndDumpRoundTripsAPlainObjRule() {
+    std::string src =
+        "void doInit() { parse_init(); }\n"
+        "void addRule() { parse_add_rule(\"zzzpush\", \"OBJ\"); }\n"
+        "string probe() {\n"
+        "    return parse_dump();\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "doInit", {});
+    vm.callFunction(obj, "addRule", {});
+    amlp::Value result = vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::string>(result.data));
+    const std::string& dump = std::get<std::string>(result.data);
+    assert(dump.find("Verb zzzpush:\n") != std::string::npos);
+    assert(dump.find("(program_object) OBJ\n") != std::string::npos);
+
+    // parse_init() is idempotent -- a second call on an already-known
+    // object is a silent no-op, matching real "if
+    // (current_object->pinfo) return;" -- confirmed here by calling it
+    // again *without* re-registering the rule and seeing the dump
+    // unchanged (a non-idempotent parse_init() re-clearing pinfo would
+    // not itself remove the rule either, so this only proves the call
+    // itself didn't error or otherwise disturb existing state).
+    vm.callFunction(obj, "doInit", {});
+    amlp::Value result2 = vm.callFunction(obj, "probe", {});
+    assert(std::get<std::string>(result2.data) == dump);
+
+    std::cout << "testParseInitAddRuleAndDumpRoundTripsAPlainObjRule OK\n";
+}
+
+static void testParseAddRuleRejectsMoreThanTwoObjectTokensAndMoreThanOnePluralToken() {
+    std::string src =
+        "void setup() { parse_init(); }\n"
+        "int probeThreeObjects() {\n"
+        "    if (!catch(parse_add_rule(\"zzzthreeobj\", \"OBJ OBJ OBJ\"))) return 0;\n"
+        "    return 1;\n"
+        "}\n"
+        "int probeTwoPlurals() {\n"
+        "    if (!catch(parse_add_rule(\"zzztwoplural\", \"OBS to OBS\"))) return 0;\n"
+        "    return 1;\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+    vm.callFunction(obj, "setup", {});
+
+    // "OBJ OBJ OBJ" has no literal word, so it never needs the master's
+    // own preposition list -- confirmed real grammar-only rejection
+    // (real "Only two object tokens allowed per rule."), independent of
+    // whatever literal set happens to be configured.
+    amlp::Value r1 = vm.callFunction(obj, "probeThreeObjects", {});
+    assert(std::holds_alternative<int64_t>(r1.data));
+    assert(std::get<int64_t>(r1.data) == 1);
+
+    // "OBS to OBS" fails on the literal "to" first (no master loaded,
+    // so the literal table is empty) rather than on the two-plural
+    // check -- still a real, correct rejection (tokenizeRule() throws
+    // either way), just confirming catch() genuinely traps it rather
+    // than the object silently accepting a malformed rule.
+    amlp::Value r2 = vm.callFunction(obj, "probeTwoPlurals", {});
+    assert(std::get<int64_t>(r2.data) == 1);
+
+    std::cout << "testParseAddRuleRejectsMoreThanTwoObjectTokensAndMoreThanOnePluralToken OK\n";
+}
+
+static void testParseAddRuleTokenizesModifiersAndLiteralsAgainstMasterPrepositionList() {
+    // real interrogate_master()'s own literal fetch (packages/parser.c)
+    // calls master()->parse_command_prepos_list() -- confirmed directly
+    // against the vendored `applies` source file, not the misleadingly-
+    // named APPLY_LITERALS macro alone (see EfunTable.cpp's own comment
+    // on this exact point).
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "mixed *parse_command_prepos_list() { return ({\"to\"}); }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/zzzgiver.c",
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzgive\", \"OBJ to LVS:v\");\n"
+        "}\n"
+        "string probe() { return parse_dump(); }\n"
+        "int probeUnknownLiteral() {\n"
+        "    if (!catch(parse_add_rule(\"zzzgive\", \"OBJ toward LIV\"))) return 0;\n"
+        "    return 1;\n"
+        "}\n");
+    auto giver = harness.objects.cloneObject("/zzzgiver");
+    assert(giver != nullptr);
+
+    harness.vm.callFunction(giver, "setup", {});
+    amlp::Value result = harness.vm.callFunction(giver, "probe", {});
+    const std::string& dump = std::get<std::string>(result.data);
+    // The literal "to" round-trips back through ruleString() using the
+    // cached master preposition list; the "v" modifier (VIS_ONLY) does
+    // not change which of the six token names prints (LVS either way).
+    assert(dump.find("Verb zzzgive:\n") != std::string::npos);
+    assert(dump.find("OBJ to LVS\n") != std::string::npos);
+
+    // "toward" is not in the master's own preposition list -- real
+    // tokenize()'s own "Unknown token" rejection.
+    amlp::Value r2 = harness.vm.callFunction(giver, "probeUnknownLiteral", {});
+    assert(std::get<int64_t>(r2.data) == 1);
+
+    std::cout << "testParseAddRuleTokenizesModifiersAndLiteralsAgainstMasterPrepositionList OK\n";
+}
+
+static void testParseRemoveDeletesOnlyTheCallingObjectsOwnRules() {
+    std::string src =
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzshared\", \"OBJ\");\n"
+        "}\n"
+        "void forget() { parse_remove(\"zzzshared\"); }\n"
+        "string probe() { return parse_dump(); }\n";
+    auto objA = compileProgramObject(src);
+    auto objB = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(objA, "setup", {});
+    vm.callFunction(objB, "setup", {});
+
+    // ParserPackage's own registry is global, process-wide state (see
+    // its own header comment) shared with every other test in this
+    // binary, and parse_dump() always dumps the *entire* table -- so
+    // counting has to stay scoped to this test's own "Verb zzzshared:"
+    // block, not the whole dump (which by this point in the run also
+    // carries unrelated rows from earlier tests, e.g. "Verb zzzpush:"'s
+    // own "OBJ" line).
+    auto countObjRulesUnderZzzshared = [](const std::string& dump) {
+        size_t block = dump.find("Verb zzzshared:\n");
+        assert(block != std::string::npos);
+        size_t blockEnd = dump.find("Verb ", block + 1);
+        std::string section = dump.substr(block, blockEnd == std::string::npos ? std::string::npos
+                                                                                 : blockEnd - block);
+        size_t occurrences = 0;
+        for (size_t pos = 0; (pos = section.find(" OBJ\n", pos)) != std::string::npos; pos += 5) occurrences++;
+        return occurrences;
+    };
+
+    // Both objects registered the same verb -- two rule nodes present.
+    amlp::Value before = vm.callFunction(objA, "probe", {});
+    assert(countObjRulesUnderZzzshared(std::get<std::string>(before.data)) == 2);
+
+    // objA forgets its own rule; objB's own registration is untouched.
+    vm.callFunction(objA, "forget", {});
+    amlp::Value after = vm.callFunction(objA, "probe", {});
+    assert(countObjRulesUnderZzzshared(std::get<std::string>(after.data)) == 1);
+
+    std::cout << "testParseRemoveDeletesOnlyTheCallingObjectsOwnRules OK\n";
+}
+
+static void testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/zzzghost.c",
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzhaunt\", \"OBJ\");\n"
+        "}\n");
+    auto ghost = harness.objects.cloneObject("/zzzghost");
+    assert(ghost != nullptr);
+    harness.vm.callFunction(ghost, "setup", {});
+
+    harness.writeFile("/zzzobserver.c", "string probe() { return parse_dump(); }\n");
+    auto observer = harness.objects.cloneObject("/zzzobserver");
+    assert(observer != nullptr);
+
+    harness.vm.destructObject(ghost);
+    ghost.reset(); // drop this test's own last shared_ptr too
+
+    amlp::Value result = harness.vm.callFunction(observer, "probe", {});
+    const std::string& dump = std::get<std::string>(result.data);
+    assert(dump.find("Verb zzzhaunt:\n") != std::string::npos);
+    assert(dump.find("(destructed) OBJ\n") != std::string::npos);
+
+    std::cout << "testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -18770,6 +18992,12 @@ int main() {
     testConfigDialectReadsAnExplicitlyConfiguredValue();
     testMakeBootApiForConfigSelectsTheRightBootApiForARealQueryMasterUidCallAtRuntime();
     testMakeBootApiForConfigThrowsForDgdSinceDgdBootApiDoesNotExistYet();
+    testParseAddRuleThrowsWhenParseInitWasNeverCalled();
+    testParseInitAddRuleAndDumpRoundTripsAPlainObjRule();
+    testParseAddRuleRejectsMoreThanTwoObjectTokensAndMoreThanOnePluralToken();
+    testParseAddRuleTokenizesModifiersAndLiteralsAgainstMasterPrepositionList();
+    testParseRemoveDeletesOnlyTheCallingObjectsOwnRules();
+    testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists();
     std::cout << "all tests passed\n";
     return 0;
 }

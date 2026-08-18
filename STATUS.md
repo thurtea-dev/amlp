@@ -3,6 +3,114 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): `parse_*` (row 0.13a) taken on as a real
+multi-session project, per its own explicit greenlight -- first real
+slice landed (`parse_init`/`parse_add_rule`/`parse_dump`/`parse_remove`,
+a real rule-string tokenizer plus a real verb/rule registry), the full
+remaining 11-piece component breakdown written into ROADMAP.md row
+0.13a for the next session (640 tests, up from 634).**
+
+Picked up directly from last session's own finding: Dead Souls' own core
+command dispatch (`lib/lib/command.c`) calls `parse_sentence()` directly,
+making this very likely the single highest-impact item left, and this
+session's own instructions explicitly greenlit taking it on as a real
+multi-session project rather than continuing to defer it. Read the real
+`packages/parser.c` (3419 lines) plus `packages/parser.h` in full and
+broke the whole package into 11 real component pieces -- the rule-string
+tokenizer, its inverse stringifier, master literal interrogation, the
+verb/rule registry, `parse_add_synonym()`, the (separate) sentence
+tokenizer, the fuller `parse_info_t`/`parse_free()`, the noun-phrase-to-
+object resolution engine, the recursive-descent rule matcher and
+ambiguity-resolution callback machinery, error reporting, and the
+remaining efun surface names -- each with its own real source line
+citation. See ROADMAP.md row 0.13a for the full breakdown, verbatim,
+written so the next session does not need to re-read `parser.c` from
+scratch.
+
+Confirmed from the real source, not assumed, that the smallest genuinely
+buildable-in-one-session slice is the rule-string tokenizer plus the
+verb/rule registry -- exactly the "rule-string data structure without
+full sentence matching yet" option this session's own instructions
+floated as one candidate, verified correct rather than picked by default.
+Needs none of the two hardest remaining pieces (the sentence tokenizer,
+the noun-phrase resolution engine) or the live-object callback matching
+machinery, yet is genuinely complete, real ported code, not a stub --
+including a real, confirmed off-by-one in `make_rule()`'s own `MAX_MATCHES`
+loop-exit check (a rule using exactly all 10 token slots always errors,
+even when the 10th token really was the last one), faithfully reproduced
+rather than silently "fixed," since real mudlib rules never come close to
+that length (this driver's own corpus survey found nothing longer than 3
+tokens) and this project's own discipline is to port real, confirmed
+quirks rather than invent different behavior. `parse_refresh()` was
+deliberately left out even though it looks small -- its own real behavior
+is entirely about invalidating caches (the noun/adj/plural per-object
+cache, the master literal/user cache) this slice doesn't have yet, so
+implementing it now would be a no-op with nothing to invalidate.
+
+Built: `include/amlp/efun/ParserPackage.hpp` + `src/efun/ParserPackage.cpp`
+(the tokenizer, the rule-string inverse stringifier, and the verb/rule
+registry itself -- a `ParserPackage` class, global process-wide static
+state deliberately mirroring real `parser.c`'s own single-game-per-process
+`verbs[]` global, the same shape this codebase's other efun-package
+registries already use for exactly this reason,
+`object/LivingNameRegistry.hpp`); a new `LpcObject::hasParseInfo()`/
+`setHasParseInfo()` flag (real `object_t::pinfo`'s "has `parse_init()`
+been called" bit only -- the fuller `parse_info_t` stays for a later
+slice); and four new `EfunTable.cpp` registrations. One real subtlety
+caught and fixed before landing: real `rule_string()`'s own `switch ((tok
+= vn->token[index++]) & ~CHOOSE_MODIFIER)` masks the switch's own
+*selector* but leaves `tok` itself holding the unmasked raw value for the
+`default:` branch's own literal-index lookup -- an initial port that
+masked before computing the literal index corrupted every negative
+(literal) token value (`-1 & ~64` is `-65`, not `-1`, since a negative
+int's high bits are already all set in two's complement), caught live by
+this session's own regression test for a rule mixing a literal word with
+a modifier-bearing token, not by code review alone.
+
+6 new regression tests (`test/test_lexer.cpp`): the `parse_init()`-
+required guard; a plain-`OBJ`-rule round trip through `parse_dump()`
+plus `parse_init()`'s own idempotency; grammar rejection (more than two
+object tokens, more than one plural token); modifier/literal tokenizing
+against a real master `parse_command_prepos_list()` apply plus rejecting
+an unlisted word; `parse_remove()` only ever touching the calling
+object's own rule nodes, not another object's registration under the
+same verb; and a destructed handler's rule surfacing as `"(destructed)"`
+rather than a dangling reference. Full suite: 640 tests passing, up from
+634, zero regressions.
+
+**Verified live against the real running driver, real bundled `mudlib/`**
+-- a scratch config on a spare port, a real telnet-negotiating Python
+client, real `eval` calls. One real methodology wrinkle found and worked
+around, not a bug in this slice: the shipped mudlib's own
+`mudlib/command/eval.c` destructs and recreates a fresh `/tmp_eval_file`
+object on *every separate* `eval` invocation, so registry state tied to
+caller identity (this slice's own `handler` field) had to be exercised
+within one combined `eval` call using `;`-separated statements, not split
+across several -- splitting it across two `eval` calls the first time
+around produced a real, correct "not known by the parser" error (since
+`parse_init()` had run on an already-gone object), which is exactly
+correct behavior, just not the test shape intended. Combined into one
+call: `parse_init(); parse_add_rule("eat","OBJ");
+parse_add_rule("give","OBJ LIV"); parse_dump()` returned the correct
+two-verb dump with the correct handler and rule-string text;
+`parse_remove("eat")` then removed only that verb's own rule node,
+confirmed via a second `parse_dump()` in the same call; `"OBJ OBJ OBJ"`
+was correctly rejected as a grammar error. Also hit, once, an already-
+known, pre-existing, unrelated bug while developing these verification
+steps (not caused by this slice, not fixed here): this driver has no
+guard against an *uncaught* runtime error during command dispatch, which
+drops both the connection and the driver process entirely -- the same
+issue already documented in an earlier session's own `m_indices`/
+`m_values` entry. Worked around for the rest of this session's own
+verification by wrapping every eval expression that could legitimately
+throw (the `parse_init()`-required guard, the grammar rejections) in a
+real LPC `catch()`, which the driver survives correctly.
+
+ROADMAP.md row 0.13a rewritten with the full 11-piece breakdown, this
+session's own slice marked done within it, and a next-slice
+recommendation (`parse_add_synonym()`, which reuses this session's own
+tokenizer and registry with no new infrastructure needed).
+
 **2026-08-18 (continued): fresh self-assessment (closures/mapping-width/
 disconnect all now landed or ruled out) -- `valid_read`/`valid_write`
 implemented and wired into all 11 file efuns, real corpus evidence

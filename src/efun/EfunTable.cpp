@@ -12,6 +12,7 @@
 #include "amlp/net/SocketRegistry.hpp"
 #include "amlp/net/SnoopRelay.hpp"
 #include "amlp/scheduler/Scheduler.hpp"
+#include "amlp/efun/ParserPackage.hpp"
 #include <algorithm>
 #include <chrono>
 #include <arpa/inet.h>
@@ -4673,6 +4674,96 @@ void registerCoreEfuns() {
         }
         return Value(result);
     });
+
+    // void parse_init() -- real packages/parser.c's f_parse_init():
+    // allocates current_object's own pinfo (real "if
+    // (current_object->pinfo) return;" -- idempotent, a second call is
+    // a silent no-op) so parse_add_rule()/parse_sentence()/
+    // parse_my_rules() will accept it afterward. This slice only ports
+    // the "has parse_init() been called" bit (LpcObject::hasParseInfo(),
+    // see its own comment for what real parse_info_t's fuller shape is
+    // not yet ported) -- there is nothing else for this efun to do
+    // until the noun-phrase-resolution slice needs the rest of that
+    // struct.
+    t.registerEfun("parse_init", [](VM& vm, std::vector<Value>&) -> Value {
+        auto ob = vm.currentObject();
+        if (ob) ob->setHasParseInfo(true);
+        return Value{};
+    });
+
+    // void parse_add_rule(string verb, string rule) -- real
+    // packages/parser.c's f_parse_add_rule(). See ParserPackage.hpp for
+    // what is and is not ported from real interrogate_master()/
+    // make_rule() at this slice.
+    t.registerEfun("parse_add_rule", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("parse_add_rule: expected (string verb, string rule) arguments");
+        }
+        auto ob = vm.currentObject();
+        if (!ob || !ob->hasParseInfo()) {
+            throw LpcRuntimeError(
+                "parse_add_rule: object is not known by the parser (call parse_init() first)");
+        }
+
+        // real interrogate_master()'s own literal-fetching third
+        // (packages/parser.c): calls master()->parse_command_prepos_list(),
+        // which despite the real APPLY_LITERALS macro's own name is NOT
+        // "literals" in any generic sense -- confirmed directly against
+        // the real vendored `applies` source file (not assumed from the
+        // macro name, which would have been actively misleading here):
+        // "LITERALS:parse_command_prepos_list". It is specifically the
+        // mudlib's own list of legal *preposition* words usable as bare
+        // literals in a rule string (real usage: "give OBJ to LIV", OBJ
+        // then the bare literal "to"). Real interrogate_master() also
+        // caches this behind a master_state bit, invalidated only by
+        // parse_refresh() on the master object -- not ported yet
+        // (parse_refresh() itself is a later slice, ROADMAP.md row
+        // 0.13a), so this always re-applies; harmless for now, since
+        // nothing in this slice calls it more than once per
+        // parse_add_rule(), itself already a rare, setup-time-only
+        // call. Real interrogate_master() also fetches
+        // parse_command_users() and populates the special-word table
+        // (the/me/myself/all/of/ordinals) in the same pass -- neither is
+        // needed until the sentence-matching slice (both are purely
+        // about resolving player input against live objects, never
+        // touched by rule registration), so neither is called here.
+        std::vector<std::string> literals;
+        if (vm.masterObject()) {
+            Value litResult = vm.applyMaster("parse_command_prepos_list", {});
+            if (auto* arr = std::get_if<std::shared_ptr<Array>>(&litResult.data)) {
+                if (*arr) {
+                    for (const auto& v : (*arr)->items) {
+                        if (auto* s = std::get_if<std::string>(&v.data)) literals.push_back(*s);
+                    }
+                }
+            }
+        }
+
+        ParserPackage::addRule(std::get<std::string>(args[0].data), std::get<std::string>(args[1].data), ob,
+                                literals);
+        return Value{};
+    });
+
+    // void parse_remove(string verb) -- real packages/parser.c's
+    // f_parse_remove(). Silent no-op for an unknown verb or an object
+    // that never registered a rule under it, matching real code.
+    t.registerEfun("parse_remove", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("parse_remove: expected a string verb argument");
+        }
+        auto ob = vm.currentObject();
+        if (ob) ParserPackage::removeRules(std::get<std::string>(args[0].data), ob);
+        return Value{};
+    });
+
+    // string parse_dump() -- real packages/parser.c's f_parse_dump():
+    // the entire real/synonym verb table plus every rule string
+    // registered under it, one human-readable block of text. See
+    // ParserPackage::dump()'s own comment for the two deliberate,
+    // documented differences from real output (verb iteration order;
+    // a destructed handler's own text).
+    t.registerEfun("parse_dump", [](VM&, std::vector<Value>&) -> Value { return Value(ParserPackage::dump()); });
 
     // string query_verb() -- the full typed first word of the line
     // currently being dispatched (real semantics, even for a

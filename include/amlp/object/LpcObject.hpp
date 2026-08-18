@@ -259,6 +259,20 @@ public:
     std::weak_ptr<LpcObject> snooping() const { return snooping_; }
     void setSnooping(std::weak_ptr<LpcObject> ob) { snooping_ = std::move(ob); }
 
+    // real object_t::pinfo (packages/parser.h), reduced to the one bit
+    // this driver's own parse_* slice so far actually needs: whether
+    // parse_init() has ever been called on this object (real pinfo != 0)
+    // -- the gate parse_add_rule()/parse_sentence()/parse_my_rules() all
+    // check before doing anything else ("/%s is not known by the
+    // parser. Call parse_init() first."). Real parse_info_t is a much
+    // larger struct (PI_SETUP/PI_REFRESH/PI_VERB_HANDLER/PI_LIVING/etc
+    // flags plus cached noun/adj/plural id arrays, packages/parser.h) --
+    // not ported here, since nothing before the noun-phrase-resolution
+    // slice (ROADMAP.md row 0.13a) reads any of it. See
+    // ParserPackage.hpp for the verb/rule registry this flag gates.
+    bool hasParseInfo() const { return hasParseInfo_; }
+    void setHasParseInfo(bool v) { hasParseInfo_ = v; }
+
 private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
@@ -280,6 +294,7 @@ private:
     std::weak_ptr<LpcObject> snooping_;
     bool isVirtual_ = false;
     int totalLight_ = 0;
+    bool hasParseInfo_ = false;
 };
 
 } // namespace amlp
