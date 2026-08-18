@@ -421,8 +421,48 @@ std::string ObjectManager::normalizeFilename(const std::string& filename) {
 
 std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFilename) {
     std::string filename = normalizeFilename(rawFilename);
+    std::string path = config_.mudlibRoot() + filename + ".c";
+
+    // Row 0.15 fix: read the file's current raw content up front, before
+    // trusting any cache hit below -- this is what actually lets a
+    // same-path recompile be detected at all (see programCache_'s own
+    // comment). ROADMAP.md's 0.15 note confirmed the exact live failure:
+    // eval.c's own rm()+destruct()+write_file()+reload cycle (and
+    // wand_of_creation.c's cmd_create() doing the identical thing for a
+    // reused item name) both silently kept re-running the *first* call's
+    // bytecode, because the old code below returned a cache hit
+    // unconditionally with no check against the file at all.
+    std::ifstream f(path);
+    bool sourceExists = static_cast<bool>(f);
+    std::string currentSource;
+    if (sourceExists) {
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        currentSource = buf.str();
+    }
+    f.close();
+
     auto cached = programCache_.find(filename);
-    if (cached != programCache_.end()) return cached->second;
+    if (cached != programCache_.end()) {
+        auto sourceIt = programSource_.find(filename);
+        bool sourceUnchanged =
+            sourceExists && sourceIt != programSource_.end() && sourceIt->second == currentSource;
+        // Source vanished entirely since the cached compile (e.g. a
+        // subsequent purge/rm with nothing yet written back) -- keep
+        // serving the last good compiled program rather than failing a
+        // call that never asked to recompile, matching real semantics:
+        // an already-compiled program's bytecode does not stop working
+        // just because its own source file was later deleted.
+        if (sourceUnchanged || !sourceExists) return cached->second;
+        // Otherwise: same path, but the file's own bytes genuinely
+        // differ from what produced the cached entry -- fall through
+        // and recompile fresh below instead of returning the stale one.
+        // Objects that already hold the old CompiledProgram (via their
+        // own program_ shared_ptr, LpcObject.hpp) are unaffected: this
+        // only replaces this cache's own entry, never mutates the old
+        // CompiledProgram object itself, so they keep running the
+        // bytecode they were actually compiled and created against.
+    }
 
     if (compiling_.count(filename)) {
         std::cerr << "[object] inherit cycle detected involving " << filename << "\n";
@@ -435,13 +475,10 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
         ~InProgressGuard() { set.erase(filename); }
     } inProgressGuard{compiling_, filename};
 
-    std::string path = config_.mudlibRoot() + filename + ".c";
-    std::ifstream f(path);
-    if (!f) {
+    if (!sourceExists) {
         std::cerr << "[object] source file not found: " << path << "\n";
         return nullptr;
     }
-    f.close();
 
     std::vector<std::string> includeDirs = splitIncludeDirs(config_.includeDir(), config_.mudlibRoot());
 
@@ -525,6 +562,7 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
         program->ancestorBaseOffsets = std::move(ancestorBaseOffsets);
 
         programCache_[filename] = program;
+        programSource_[filename] = currentSource;
         return program;
     } catch (const LpcRuntimeError& e) {
         std::cerr << "[object] compile error in " << path << ": " << e.what() << "\n";

@@ -121,6 +121,14 @@ public:
 
 private:
 
+    // Row 0.15 fix: a cache hit here used to return unconditionally, with
+    // no path that ever noticed a same-path recompile (e.g. eval.c's own
+    // rm+destruct+write_file+reload cycle, or wand_of_creation.c's
+    // cmd_create() doing the identical thing for a reused item name) --
+    // see programCache_'s own comment below for how a hit is now
+    // validated against the file's current on-disk content before being
+    // trusted, and ObjectManager.cpp's own compile() comment for the full
+    // derivation.
     std::shared_ptr<CompiledProgram> compile(const std::string& filename);
 
     // Runs "$objvarinit" (see CodeGen::generate()'s own comment) on obj
@@ -174,6 +182,22 @@ private:
     std::shared_ptr<LpcObject> master_;
     std::shared_ptr<LpcObject> simulEfunObject_;
     std::unordered_map<std::string, std::shared_ptr<CompiledProgram>> programCache_;
+    // Row 0.15: the exact raw (pre-preprocessing) source text that
+    // produced each programCache_ entry, keyed by the same normalized
+    // filename. compile() re-reads the file on every call (cheap -- LPC
+    // source files are small, and this only runs at compile time, never
+    // per-tick) and compares it against this before trusting a cache hit;
+    // a mismatch means the same path was compiled before but its source
+    // has since changed underneath it (destructed and rewritten, e.g.),
+    // so the stale entry is replaced instead of silently reused. Byte
+    // comparison rather than an mtime check deliberately: two writes to
+    // the same path within one filesystem timestamp tick (routine in a
+    // test harness, and not implausible live) would otherwise look
+    // unchanged despite genuinely different content. Only covers the
+    // recompiled file's own text -- a header it #includes changing
+    // independently, with this file's own bytes untouched, is not
+    // detected (out of scope for this row: see ROADMAP.md's 0.15 note).
+    std::unordered_map<std::string, std::string> programSource_;
     std::unordered_map<std::string, std::shared_ptr<LpcObject>> loaded_;
     // Filenames currently mid-compile, so an inherit cycle (A inherits B
     // inherits A) is caught as a compile error instead of infinite

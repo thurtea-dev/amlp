@@ -3,6 +3,78 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18: ROADMAP row 0.15 fixed -- `ObjectManager::compile()`'s
+`programCache_` now invalidates a cache hit whose source has genuinely
+changed, instead of returning a same-filename compile unconditionally
+(623 tests, up from 619).**
+
+Two small live-test-artifact cleanups first: `mudlib/data/created/readme`
+and `rusty_gear.c`, both committed in `61b00ab`, were leftover scratch
+output from that commit's own live wand-of-creation verification (the
+readme's own text says so directly: "Auto-generated, safe to delete"),
+not designed fixtures -- removed.
+
+Main fix: `ObjectManager::compile()` used to check `programCache_` and
+return a hit for any previously-compiled filename unconditionally, with
+no path anywhere that noticed the file's own source had since changed
+underneath it (row 0.15's own prior scope note, found live 2026-08-21
+via `mudlib`'s `eval` command). Directly in the way again this session
+verifying `wand_of_creation.c`'s `cmd_create()`, which does the identical
+rm()+destruct()+write_file() cycle for a reused item name.
+
+Fixed by having `compile()` re-read the target file's raw source on every
+call and compare it against the exact text that produced the cached
+entry (new `programSource_` map, parallel to `programCache_`) before
+trusting a hit -- a byte comparison, not an mtime check, since two writes
+to the same path within one filesystem timestamp tick are routine (this
+row's own regression tests hit exactly that) and would look unchanged to
+`stat()` despite genuinely different content. Unchanged content still
+takes the fast path unmodified; changed content recompiles fresh and
+replaces both entries. A source file that has vanished entirely since the
+cached compile (a purge with nothing written back) still serves the last
+good program rather than erroring -- matches real semantics, where an
+already-compiled program does not stop working just because its own disk
+file was later deleted. Existing objects already holding the old
+`CompiledProgram` via their own `shared_ptr` are unaffected regardless:
+replacing `programCache_`'s own entry never mutates the old
+`CompiledProgram` object. Deliberately narrow, matching the row's own
+prior scoping: only the recompiled file's own bytes are checked (a
+changed `#include`d header with the including file's own text untouched
+is not detected -- not needed by either real repro) and an inheriting
+file already compiled against an old inherited version keeps that old
+version until it is itself recompiled (unchanged from how inherit
+resolution always worked, not a regression this fix introduces).
+
+4 new regression tests in `test/test_lexer.cpp`, driving
+`ObjectManager::loadObject()`/`cloneObject()` directly (`compile()`'s
+only two real callers) rather than through either mudlib file: same-path
+recompile via `loadObject()` after destruct+rewrite; the same via
+`cloneObject()` (which has no `sourceFileExists()` pre-gate the way
+`loadObject()` does, so it is the path that actually reaches this fix's
+own "source vanished" fallback branch); unchanged-source reuse
+(`programPtr()` identity, confirming the fast path still avoids wasteful
+recompiles); and the vanished-source fallback itself. Full suite: 623
+tests passing, up from 619, no regressions (confirmed via a direct run
+of the test binary from `build/`; `ctest` itself fails one pre-existing,
+unrelated test -- `testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld`
+reads a mudlib file via a path relative to CWD, and `ctest`'s own working
+directory for this binary is `build/test/`, not `build/`, where that
+relative path does not resolve; reproduced identically on the pre-fix
+`61b00ab` tree via `git stash`, so this is not a regression from this
+session and was left alone as out of scope).
+
+Verified live against the real running `amlp` binary
+(`etc/driver_lil.cfg`), the same way `61b00ab`'s own wand verification
+was done: three `eval` calls in one session, all against the same
+`/tmp_eval_file` path (`return 5+5`, `return 9999`, `return 5+5` again),
+each correctly returning its own fresh result (`10`, `9999`, `10`)
+instead of the first call's own stale bytecode -- the exact failure mode
+row 0.15's own scope note originally documented, now confirmed fixed
+against the real driver process, not just the test suite.
+
+ROADMAP.md row 0.15 flipped to `[x]`, its own scope note updated in place
+with the fix.
+
 **2026-08-24 (continued): `Config::dialect()` implemented and wired into
 `main.cpp`'s `masterUidApply()` call site -- the boot-time UID query is
 now genuinely config-driven (`"fluffos"`/`"ldmud"`, defaulting to

@@ -32,7 +32,7 @@ complete and the full test suite is passing with no regressions.**
 | 0.13 | Grow efun table to FluffOS parity (~300 efuns) | `src/efun` | [x] (non-`parse_*` scope closed 2026-08-24: 240 registered against this exact vendored reference build's own 270 real `efun_defs.c` names. Final accounting of the real gap (`comm -23` reconciliation, not the raw registered-count difference -- see STATUS.md's own reconciliation): 40 non-`parse_*` names, all confirmed genuine documented exclusions (architecture mismatch or zero-call-site deferral, individually re-verified 2026-08-24), with no further batch work remaining against that portion, plus the separately-tracked 8-name `parse_*` package. `origin()` and `reload_object()` both implemented 2026-08-23; `functions`/`variables`/`fetch_variable`/`store_variable` implemented 2026-08-24, correcting an earlier "no implementation exists" miscall for all four (real bodies in `packages/contrib.c`); `socket_release`/`socket_acquire` implemented 2026-08-24 (continued), correcting an earlier "Tier 3, out of basics scope" miscall. The `parse_*` package is carved out as its own row, 0.13a) |
 | 0.13a | `parse_*` natural-language sentence/grammar-rule parser package (`parse_init`, `parse_refresh`, `parse_sentence`, `parse_add_rule`, `parse_add_synonym`, `parse_my_rules`, `parse_dump`, `parse_remove`) | `src/efun` | [ ] (not started, deliberately deferred. Real implementation source: `packages/parser.c`, 3419 lines -- FluffOS's real "parser" package, confirmed substantial and genuinely implemented in the reference build, not unverifiable or architecture-mismatched. 66 combined call-site hits across the 8 names in the vendored mudlib corpora. Sized well beyond a normal batch item -- comparable to or larger than everything else row 0.13 has implemented combined -- so it warrants its own explicit go-ahead before being taken on, not an assumed default. See STATUS.md's 2026-08-23/2026-08-24 entries for the scoping history.) |
 | 0.14 | `global include file` config support (auto-`#include` prepended to every compiled object) | `src/config` + `src/object` | [x] |
-| 0.15 | `ObjectManager::compile()`'s `programCache_` has no invalidation path -- a recompiled file's own new source is silently ignored | `src/object` | [ ] |
+| 0.15 | `ObjectManager::compile()`'s `programCache_` has no invalidation path -- a recompiled file's own new source is silently ignored | `src/object` | [x] |
 
 **0.15 scope note:** found live (2026-08-21) while confirming `mudlib`'s
 own `eval` command works end to end. `ObjectManager::compile(filename)`
@@ -49,17 +49,52 @@ silently re-runs the first call's own stale bytecode against the new
 instance instead of the newly-written source. Confirmed live: three
 different real `eval` expressions in one session (`5+5`, an array
 literal, `this_player()`) all returned the first call's own cached result.
-Not fixed here, filed as its own row instead: a fix would likely mean a
-narrow, explicit cache-invalidation or force-recompile path (e.g. an
-`ObjectManager::recompile(filename)` that erases the matching
-`programCache_` entry before calling `compile()` again, triggered by
-`destruct()`-then-recompile on the same filename, or a dedicated
-`update_object()`-style efun/apply real FluffOS itself uses for this same
-purpose) -- scoped narrowly enough that the caching behavior every other
-compiled object correctly relies on (each file compiled once, reused by
-every later `inherit`/`clone_object()`/`call_other()` reaching that same
-filename) is not disturbed for the overwhelming majority of call sites
-that never rewrite their own source out from under a running driver.
+Same shape hit live again (2026-08-18) verifying `wand_of_creation.c`'s
+own `cmd_create()`, which does the identical rm()+destruct()+write_file()
+cycle for a reused item name.
+
+**Fixed 2026-08-18.** `ObjectManager::compile()` now re-reads the target
+file's raw (pre-preprocessing) source on every call, before trusting a
+`programCache_` hit: the file's current bytes are compared against the
+exact source text that produced the cached entry (`programSource_`, a new
+parallel map keyed the same way as `programCache_`). Identical content
+still takes the fast path (no wasted recompile); a genuine difference
+falls through and recompiles fresh, replacing both map entries. Deliberately
+a byte comparison, not an mtime check: two writes to the same path within
+one filesystem timestamp tick are routine (this row's own regression tests
+hit it), and would look unchanged to `stat()` despite genuinely different
+content. If the source file has vanished entirely since the cached compile
+(a purge with nothing written back), the last good compiled program is
+still served rather than treated as an error -- matches real semantics,
+where an already-compiled program does not stop working just because its
+own source file was later deleted. Existing objects already holding the
+old `CompiledProgram` (own `shared_ptr`, `LpcObject::program_`) are
+unaffected either way: replacing `programCache_`'s own entry never mutates
+the old `CompiledProgram` object itself. Scope held to exactly what was
+asked: only the recompiled file's own text is checked -- a `#include`d
+header changing independently, with the including file's own bytes
+untouched, is not detected (nothing currently needs it; the demonstrated
+failure mode is always the file itself being rewritten). An inheriting
+file already compiled against the old version of something it inherits
+also keeps that old version until it is itself recompiled (its own
+`inheritedPrograms` entry was resolved and copied at *its* own compile
+time, not re-resolved retroactively) -- unchanged from this row's own
+prior scoping note, and outside what either real repro (`eval.c`,
+`wand_of_creation.c`, both leaf files with no inherits) needed. 4 new
+regression tests in `test/test_lexer.cpp`, driving `ObjectManager::
+loadObject()`/`cloneObject()` directly (the two real callers of `compile()`)
+rather than through either mudlib file: same-path recompile after
+destruct+rewrite via `loadObject()`; the same via `cloneObject()` (which
+has no `sourceFileExists()` pre-gate, unlike `loadObject()`, so it is the
+one that actually reaches `compile()`'s own "source vanished" fallback);
+unchanged-source reuse (`programPtr()` identity, confirming the fast path
+still avoids wasteful recompiles); and the vanished-source fallback itself
+via `cloneObject()`. Verified live against the real running `amlp` binary
+(`etc/driver_lil.cfg`), the same way the wand's own live verification was
+done: three `eval` calls in one session, all against the same
+`/tmp_eval_file` path (`return 5+5`, `return 9999`, `return 5+5` again),
+each correctly returning its own fresh result (`10`, `9999`, `10`) instead
+of the first call's own stale bytecode.
 
 ---
 

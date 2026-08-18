@@ -17358,6 +17358,117 @@ static void testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject() {
     std::cout << "testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject OK\n";
 }
 
+// ROADMAP row 0.15: ObjectManager::compile()'s programCache_ used to
+// return a cache hit for any previously-compiled filename unconditionally,
+// with no path that ever noticed the file's own source had since changed
+// underneath it. Confirmed live during this row's own fix: mudlib's own
+// eval.c (rm()+destruct()+write_file()+reload) and wand_of_creation.c's
+// cmd_create() (the identical shape for a reused item name) both silently
+// kept re-running the first compile's bytecode. The four tests below drive
+// ObjectManager::compile() directly (via loadObject()/cloneObject(), its
+// only two real callers) rather than through either mudlib file, so the
+// fix itself is pinned independent of whichever mudlib command happens to
+// exercise it.
+
+static void testLoadObjectRecompilesWhenSourceIsDestructedAndRewrittenWithDifferentContent() {
+    ObjectVarHarness harness;
+    harness.writeFile("/reloadable.c",
+        "int marker() { return 1; }\n");
+
+    auto first = harness.objects.loadObject("/reloadable");
+    assert(first != nullptr);
+    assert(std::get<int64_t>(harness.vm.callFunction(first, "marker", {}).data) == 1);
+
+    // Exact shape of eval.c's own rm()+destruct()+write_file() cycle
+    // (mudlib/command/eval.c) and wand_of_creation.c's cmd_create(): the
+    // previous instance is destructed, then genuinely different source is
+    // written to the very same path.
+    harness.objects.destructObject(first);
+    harness.writeFile("/reloadable.c",
+        "int marker() { return 2; }\n");
+
+    auto second = harness.objects.loadObject("/reloadable");
+    assert(second != nullptr);
+    assert(second != first);
+    // The bug: this used to return 1, the first compile's own stale
+    // bytecode, because programCache_ was never invalidated.
+    assert(std::get<int64_t>(harness.vm.callFunction(second, "marker", {}).data) == 2);
+
+    std::cout << "testLoadObjectRecompilesWhenSourceIsDestructedAndRewrittenWithDifferentContent OK\n";
+}
+
+static void testCloneObjectRecompilesWhenSourceChangesEvenWithoutAnIntermediateLoadObjectCall() {
+    ObjectVarHarness harness;
+    harness.writeFile("/gizmo.c", "string label() { return \"first\"; }\n");
+
+    // cloneObject() calls compile() directly, independent of loadObject()'s
+    // own loaded_ bookkeeping (see ObjectManager.cpp's own comment on why)
+    // -- so this exercises the fix through the driver's *other* real
+    // caller, matching wand_of_creation.c's cmd_create() own
+    // load_object()-then-clone_object() pair on the exact same path.
+    auto clone1 = harness.objects.cloneObject("/gizmo");
+    assert(clone1 != nullptr);
+    assert(std::get<std::string>(harness.vm.callFunction(clone1, "label", {}).data) == "first");
+
+    harness.writeFile("/gizmo.c", "string label() { return \"second\"; }\n");
+    auto clone2 = harness.objects.cloneObject("/gizmo");
+    assert(clone2 != nullptr);
+    assert(std::get<std::string>(harness.vm.callFunction(clone2, "label", {}).data) == "second");
+
+    // The pre-fix clone, if it still exists, must keep running exactly the
+    // bytecode it was actually created against -- invalidating the cache
+    // entry must never reach back and mutate a CompiledProgram an existing
+    // object already holds its own shared_ptr to.
+    assert(std::get<std::string>(harness.vm.callFunction(clone1, "label", {}).data) == "first");
+
+    std::cout << "testCloneObjectRecompilesWhenSourceChangesEvenWithoutAnIntermediateLoadObjectCall OK\n";
+}
+
+static void testLoadObjectReusesCachedProgramWithoutRecompilingWhenSourceIsUnchanged() {
+    ObjectVarHarness harness;
+    harness.writeFile("/steady.c", "int marker() { return 7; }\n");
+
+    auto first = harness.objects.loadObject("/steady");
+    assert(first != nullptr);
+    harness.objects.destructObject(first);
+
+    // Source at the same path is untouched (no write_file() at all this
+    // time) -- the fast path must still apply: same CompiledProgram
+    // instance reused, not a wasteful recompile every single reload.
+    auto second = harness.objects.loadObject("/steady");
+    assert(second != nullptr);
+    assert(second->programPtr() == first->programPtr());
+    assert(std::get<int64_t>(harness.vm.callFunction(second, "marker", {}).data) == 7);
+
+    std::cout << "testLoadObjectReusesCachedProgramWithoutRecompilingWhenSourceIsUnchanged OK\n";
+}
+
+static void testCloneObjectKeepsServingLastCompiledProgramWhenSourceFileIsDeletedAfterwards() {
+    // Deliberately exercised through cloneObject(), not loadObject():
+    // loadObject() has its own separate sourceFileExists() gate *before*
+    // it ever calls compile() (falling into the virtual-object path
+    // instead once the file is gone), so a deleted source never actually
+    // reaches this fix's own fallback branch through that caller.
+    // cloneObject() has no such gate -- it calls compile() directly (see
+    // ObjectManager.cpp) -- so it is the real path that needs compile()'s
+    // own "source vanished, keep serving the last good program" branch to
+    // still behave exactly as it did before this row's fix.
+    ObjectVarHarness harness;
+    harness.writeFile("/ephemeral.c", "int marker() { return 3; }\n");
+
+    auto first = harness.objects.cloneObject("/ephemeral");
+    assert(first != nullptr);
+
+    assert(std::remove((harness.tempDir + "/ephemeral.c").c_str()) == 0);
+
+    auto second = harness.objects.cloneObject("/ephemeral");
+    assert(second != nullptr);
+    assert(second->programPtr() == first->programPtr());
+    assert(std::get<int64_t>(harness.vm.callFunction(second, "marker", {}).data) == 3);
+
+    std::cout << "testCloneObjectKeepsServingLastCompiledProgramWhenSourceFileIsDeletedAfterwards OK\n";
+}
+
 static void testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence() {
     amlp::Config config;
     amlp::FluffOsBootApi fluffApi(config);
@@ -18153,6 +18264,10 @@ int main() {
     testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld();
     testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld();
     testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject();
+    testLoadObjectRecompilesWhenSourceIsDestructedAndRewrittenWithDifferentContent();
+    testCloneObjectRecompilesWhenSourceChangesEvenWithoutAnIntermediateLoadObjectCall();
+    testLoadObjectReusesCachedProgramWithoutRecompilingWhenSourceIsUnchanged();
+    testCloneObjectKeepsServingLastCompiledProgramWhenSourceFileIsDeletedAfterwards();
     testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence();
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
     testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime();
