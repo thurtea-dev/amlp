@@ -67,7 +67,18 @@ from anything currently planned for closures.
 - `Kind::UnboundLambda` - like `LambdaArray` but has no bound `owner`; must be
   `bind_lambda()`-ed before calling
 - `Kind::LdmudSymbol` - `#'name` reference: name is baked at construction; kind
-  is one of `FP_EFUN`, `FP_LOCAL`, `FP_SIMUL` - resolve and cache on first call
+  is one of `FP_EFUN`, `FP_LOCAL`, `FP_SIMUL` - resolve and cache on first call.
+  **Naming note (2026-08-18, from the row 1.2/1.3 scoping pass, ROADMAP.md):**
+  despite the name, this `Closure::Kind` has nothing to do with real
+  LDMud's own `symbol` *value type* -- a genuinely separate, previously
+  undocumented construct confirmed this same pass: `'name` (a bare
+  leading quote, `L_SYMBOL` in `temp/ldmud/src/lex.c`) produces an LPC
+  `symbol` value, distinct from `#'name`'s `L_CLOSURE`, with real efuns
+  `symbol_function()`/`symbol_variable()`/`symbolp()` and no equivalent
+  anywhere in this driver's `Value` variant. Do not conflate the two when
+  this row is actually picked up -- `Kind::LdmudSymbol` here is about
+  `#'name` closures only; a real `symbol` value would need its own new
+  `ValueVariant` member entirely, not a `Closure::Kind`.
 
 **`VM::callClosure()` extensions:**
 - `LambdaArray`: extract the `Array` body, interpret each element as either a

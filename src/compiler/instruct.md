@@ -35,10 +35,22 @@ None directly in the compiler. The stub/gap work is in `src/efun` and
 **This is the biggest compiler change in the roadmap. Do not start until
 Phase 0 is complete and the test suite is green.**
 
+**Rescoped 2026-08-18 (scoping pass only, nothing implemented yet -- see
+ROADMAP.md rows 1.2/1.3 for the full citation trail this section
+summarizes):** the plan below had several load-bearing errors, corrected
+here by reading the real grammar/lexer sources directly
+(`temp/ldmud/src/prolang.y`, `temp/ldmud/src/lex.c`,
+`temp/ldmud/src/func_spec`, `temp/dgd/src/comp/parser.y`).
+
 ### 1. Make the Lexer dialect-aware
 
 The `Lexer` must accept a `LpcDialect` value (from `src/dialect/`) and
-change its tokenization rules accordingly.
+change its tokenization rules accordingly. **Neither `Lexer` nor `Parser`
+takes one today** -- confirmed via both constructors and their one real
+call site, `ObjectManager::compile()` -- this is the genuine prerequisite
+everything else here sits on top of, and the proposed first slice
+(ROADMAP.md row 1.2/1.3 scoping note) is exactly this plumbing, added
+with zero behavior change before any real new keyword lands.
 
 **FluffOS/MudOS (current default)**
 - `(: … :)` closure literals - already working
@@ -46,33 +58,90 @@ change its tokenization rules accordingly.
 - No changes needed for the default dialect
 
 **LDMud additions**
-- `#'name` - tokenize as a new `Token::LambdaRef` carrying the name after `#'`
-- `#'efun_name` - same, but for efun references
-- The `lambda` keyword (not a kKeyword today)
-- `unbound_lambda` keyword
-- `bind` keyword (not a statement; a function, but needs recognition)
+- `#'name` - real (`L_CLOSURE` in `temp/ldmud/src/lex.c`'s own
+  `closure()`), but far richer than "a name after `#'`": roughly 50
+  operator spellings, `#'[...]` index/range/map-index forms, `#'({`
+  aggregate, `efun::`/`sefun::`/`lfun::`/`var::` prefixes, and `::`
+  inherited-function references, all one token kind. **Blocked on a real
+  architecture problem specific to this driver, not just a lexer
+  addition:** `ObjectManager::compile()` shells out to the real system
+  `cpp -x c` before the Lexer ever runs, and standard GCC `cpp`
+  hard-errors on any line whose first non-whitespace character is `#`
+  and isn't a real directive -- a bare `#'this_player;` statement on its
+  own line would fail the whole file's preprocessing before this driver's
+  own tokenizer ever sees it. Needs a real decision (mask `#'`-shaped
+  lines before `cpp` sees them and restore after, or stop using real
+  `cpp` for LDMud-dialect files, or something else) before this can be
+  scheduled as ordinary lexer work.
+- `'name` (bare leading quote) - real and **previously undocumented
+  anywhere in this repo**: a distinct `L_SYMBOL` token producing an LPC
+  `symbol` value (used as `lambda()`'s own parameter-name convention,
+  `'x`, and by `symbol_function()`/`symbol_variable()`/`symbolp()`).
+  This driver's `Value` variant has no `symbol` member at all -- needs a
+  `src/vm` decision first (row 1.9's neighbor problem: a token with
+  nowhere real to go yet).
+- ~~The `lambda` keyword~~ / ~~`unbound_lambda` keyword~~ / ~~`bind`
+  keyword~~ - **wrong, removed entirely.** `temp/ldmud/src/func_spec`:
+  `closure lambda(null|mixed *, mixed);` / `closure unbound_lambda(...)`
+  are ordinary efuns (the same mechanism already confirmed for
+  `bind_lambda()` and `replace_program()`, rows 1.5-1.7) -- no keyword,
+  no special lexer handling, nothing for this row. `bind()` doesn't exist
+  as an LDMud name at all (row 1.7's own correction); the real name,
+  `bind_lambda()`, is likewise a plain efun call.
 
 **DGD additions**
-- `nil` keyword (not `0`; maps to a new `Value::Nil` variant - see `src/vm`)
-- `atomic` function modifier keyword
-- `rlimits` statement keyword
+- `nil` keyword - confirmed real (`temp/dgd/src/comp/parser.y`'s own
+  `NIL` token, `Node::createNil()`), maps to a new `Value::Nil`-shaped
+  variant member - see `src/vm`. Small: one new keyword, ordinary literal
+  shape, but a real (if small) CodeGen coupling to row 1.10 the moment it
+  exists as a token.
+- `atomic` function modifier keyword - confirmed real
+  (`temp/dgd/src/comp/parser.y`'s own `ATOMIC` token, same
+  `non_private` modifier-list production as `STATIC`/`NOMASK`/
+  `VARARGS`). The smallest real addition found in this whole pass: this
+  driver's own `kKeywords`/`modifierKeywords` mechanism already handles
+  exactly this shape generically.
+- `rlimits` statement keyword - confirmed real, but **wrong grammar**:
+  not `rlimits(ticks : stack)`. Real DGD (`temp/dgd/src/comp/
+  parser.y:566-582`): `RLIMITS '(' expr ';' expr ')' compound_stmt` --
+  semicolon, not colon, and the first expression is the **stack** limit,
+  the second is **ticks** (confirmed by the real error message order).
+  Real shape: `rlimits (stack_expr; ticks_expr) { body }`.
 - `parse_string` - handled as an efun, no lexer change needed
+  (unrelated to `parse_*`, row 0.13a's FluffOS package)
+- Newly found, not previously tracked anywhere: DGD's own closure/
+  function-pointer syntax is a third, distinct family from FluffOS's
+  `(: :)` and LDMud's `#'` -- `&ident(args)` / `&(*cast)(args)` (a "call
+  template"), plus `->`/`<-` for DGD's own persistent-object-call and
+  inherited-super-call conventions. Zero DGD lexer work exists for any of
+  this yet; flagged for whenever DGD's own dialect work is picked up, not
+  sized here.
 
-Concretely: add a `LpcDialect dialect_` member to `Lexer`; extend
-`lexIdentOrKeyword()` to push `#'` into a `LambdaRef` token and to recognize
-the new keywords when the matching dialect is active.
+Concretely, once the plumbing above lands: extend `kKeywords` (Lexer) and
+`modifierKeywords` (Parser, `Parser.cpp:70,80-83`) per dialect for
+`atomic`/`nil`; everything else above needs its own new lexer routine
+(`#'`, `'name`) or new grammar inside an existing literal parse path
+(mapping width, `rlimits`), not a one-line keyword-set addition.
 
 ### 2. Make the Parser dialect-aware
 
-`Parser` already takes a `Lexer`; add a `LpcDialect` parameter.
+`Parser` already takes a `Lexer`; add a `LpcDialect` parameter (see the
+plumbing note above -- this is genuinely one parameter threading through
+one real call site today, `ObjectManager::compile()`).
 
 **LDMud additions**
-- Parse `#'name` tokens into a new `LambdaRefExpr` AST node that CodeGen
-  turns into a `MakeClosure` instruction with `FP_LDMUD_SYMBOL` kind.
-- Parse `lambda(({ params }), body_array)` into a `LambdaExpr` AST node
-  (the body is an LPC array literal used as code - see `src/vm/instruct.md`
-  for how the VM executes it).
-- Parse `unbound_lambda(({ params }), body_array)` similarly.
+- Parse `#'name` (and its full real grammar above) into a new
+  `LambdaRefExpr`/`ClosureLitExpr` AST node that CodeGen turns into a
+  `MakeClosure` instruction. Blocked on the preprocessing-pipeline issue
+  above before this is worth scheduling.
+- Parse `'name` into a new `SymbolLiteral` AST node. Blocked on the new
+  `Value` variant member (`src/vm`) this needs to mean anything.
+- ~~Parse `lambda(({ params }), body_array)` into a `LambdaExpr` AST
+  node~~ / ~~`unbound_lambda(...)` similarly~~ - **wrong, removed.** See
+  the Lexer section above: these are ordinary function calls (array
+  literal argument, no new grammar), resolved entirely in `src/efun` +
+  `src/vm` once a real `lambda`/`unbound_lambda` efun exists to build a
+  closure from the array-encoded body.
 - ~~Parse `replaces` as an optional qualifier on `inherit "path";`.~~
   Resolved 2026-08-17 (ROADMAP row 1.6, rescoped): real LDMud has no
   `replaces` token anywhere in `inherit`'s own grammar -- re-grepped
@@ -80,22 +149,54 @@ the new keywords when the matching dialect is active.
   `inheritance_modifier` productions directly. Nothing for the Parser to
   add here; the real divergence is `replace_program()`'s own zero-argument
   form, an efun concern (`src/efun/EfunTable.cpp`), not a parser one.
-- Mapping width: `([ k:v1, v2, v3 ])` syntax where values per key > 1.
+- Mapping width: **wrong syntax, corrected.** Not `([ k:v1, v2, v3 ])` --
+  commas already separate different key entries, so they cannot also
+  separate same-key values. Real (`temp/ldmud/src/prolang.y`'s own
+  `m_expr_list2`/`m_expr_values`, lines 17224-17256): values for the
+  *same* key are semicolon-separated, `([ "a": 1; 2; 3, "b": 4; 5; 6 ])`;
+  every entry in one literal must have the same width (a real semantic
+  check: "Inconsistent number of values in mapping literal"). A second,
+  simpler literal exists for an empty mapping of given width:
+  `([: width_expr ])` (`F_M_ALLOCATE`), not previously documented here at
+  all. Moderate: self-contained inside the existing mapping-literal parse
+  path, no new AST node kind beyond a width field. Row 1.9 owns the
+  `m_allocate`/`m_indices`/`m_values` runtime side; this row owns both
+  literal syntaxes.
 
 **DGD additions**
-- Parse `atomic` as a function-declaration modifier (analogous to `nomask`).
-- Parse `rlimits(ticks : stack) { body }` as a `RlimitsStmt` AST node.
-- Parse `nil` as an `NilLiteral` AST node (not `IntLiteral{0}`).
+- Parse `atomic` as a function-declaration modifier (analogous to
+  `nomask`) - confirmed real, reuses the existing `modifierKeywords`
+  consumption loop verbatim, no new AST node needed at all. The
+  recommended first real per-dialect token (see ROADMAP.md's scoping
+  note for the full "why").
+- Parse `rlimits (stack_expr; ticks_expr) { body }` as a `RlimitsStmt`
+  AST node - corrected grammar above (was `(ticks : stack)`, wrong
+  separator and wrong argument order).
+- Parse `nil` as a `NilLiteral` AST node (not `IntLiteral{0}`) - confirmed
+  real, ordinary literal shape, coupled to row 1.10 for what CodeGen
+  actually emits.
 
 ### 3. Make CodeGen dialect-aware
 
-- `LambdaRefExpr` → `MakeClosure` opcode with `FP_LDMUD_SYMBOL` closure kind
-- `LambdaExpr` / `UnboundLambdaExpr` → synthesize a `FunctionEntry` from the
-  body array and emit `MakeClosure` pointing at it (see `src/vm` for
-  `Closure::Kind::LambdaArray`)
-- `RlimitsStmt` → new `PushRlimits` / `PopRlimits` opcodes (see `src/vm`)
-- `atomic` modifier → mark `FunctionEntry::isAtomic = true` (see `src/vm`)
-- `NilLiteral` → `PushNil` opcode
+- `LambdaRefExpr`/`ClosureLitExpr` (`#'...`) → `MakeClosure` opcode with
+  the appropriate closure kind (blocked on the preprocessing-pipeline
+  decision above)
+- `SymbolLiteral` (`'name`) → needs a real `Value` variant member first
+  (`src/vm`); no opcode to design until that lands
+- `RlimitsStmt` → new `PushRlimits` / `PopRlimits` opcodes (see `src/vm`),
+  corrected grammar above
+- `atomic` modifier → mark `FunctionEntry::isAtomic = true` (see
+  `src/vm`, row 1.12's own separate VM-level concern -- landing the
+  keyword alone is inert until then)
+- `NilLiteral` → `PushNil` opcode (or whatever placeholder row 1.10
+  settles on)
+- Mapping width literals (`([ k: v1; v2 ])`, `([: N ])`) → extend the
+  existing mapping-literal CodeGen path with the corrected grammar above,
+  no new AST node kind
+
+Explicitly **removed** from this section, not real: `LambdaExpr`/
+`UnboundLambdaExpr` → `MakeClosure` (`lambda()`/`unbound_lambda()` are
+ordinary efuns, `src/efun` + `src/vm` territory, not CodeGen's).
 
 ## Phase 2 tasks
 

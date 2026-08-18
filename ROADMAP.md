@@ -70,8 +70,8 @@ that never rewrite their own source out from under a running driver.
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
 | 1.1 | `LpcDialect` enum + config key `dialect` | `src/config` + `src/dialect` | [x] (the enum -- `LpcDialect`, `dialectName()`/`dialectFromString()` -- implemented 2026-08-24 in `src/dialect/LpcDialect.hpp`/`.cpp`; the `dialect` config key implemented 2026-08-24 (continued) in `Config::dialect()` (`src/config/Config.hpp`/`.cpp`, plain `"fluffos"`/`"ldmud"`/`"dgd"` string, kept out of the `LpcDialect` enum itself to avoid a `config`<->`dialect` library cycle since `src/dialect` already depends on `src/config`; parsed via `dialectFromString()` at the one real call site that needs the enum, `src/dialect/DialectSelect.cpp`). Defaults to `"fluffos"`, matching this driver's prior behavior exactly for every config file that never sets the key. Actually consumed by exactly one call site so far -- `main.cpp`'s `masterUidApply()` boot query, see row 1.4 -- every other applies still hardcodes FluffOS or is unimplemented) |
-| 1.2 | Dialect-aware Lexer: `#'`, `lambda`, `atomic`, `rlimits`, `nil` tokens | `src/compiler` + `src/dialect` | [ ] |
-| 1.3 | Dialect-aware Parser: LDMud symbol/lambda syntax, DGD `atomic`/`rlimits` | `src/compiler` + `src/dialect` | [ ] |
+| 1.2 | Dialect-aware Lexer: `#'`, `'name`, `atomic`, `rlimits`, `nil` tokens | `src/compiler` + `src/dialect` | [ ] (scoped, not implemented -- 2026-08-18. `lambda`/`unbound_lambda` removed from this row's real scope entirely, no keyword needed for either; `'name` symbol literals added, previously undocumented. See the full "1.2/1.3 scoping note" below the table) |
+| 1.3 | Dialect-aware Parser: LDMud `#'`/`'name` literals, mapping width, DGD `atomic`/`rlimits`/`nil` | `src/compiler` + `src/dialect` | [ ] (scoped, not implemented -- 2026-08-18, same pass as row 1.2. See the scoping note below the table for the full breakdown, the corrected mapping-width and `rlimits` grammars, and the proposed smallest first slice) |
 | 1.4 | Pluggable boot API: FluffOS master/simul_efun, LDMud master, DGD driver+auto | `src/apply` + `src/dialect` | [ ] (partial: `BootApi` abstract base plus `FluffOsBootApi`/`LdmudBootApi` implemented 2026-08-24 in `src/dialect`, deliberately trimmed to omit `connectApply()`/`netDeadApply()` and `DgdBootApi` per the still-open design note on this row -- see `src/dialect/instruct.md`. `masterUidApply()` alone is now wired for real: `main.cpp` calls the new `queryMasterUid(vm, bootApi)` helper (`src/dialect/MasterUidBoot.cpp`) right after master loads, routed through `VM::applyMaster()` against the real master object, 2026-08-24 (continued). `main.cpp`'s `BootApi` is now genuinely config-driven, 2026-08-24 (continued further) -- `makeBootApiForConfig()` (`src/dialect/DialectSelect.cpp`) selects `FluffOsBootApi`/`LdmudBootApi` from `Config::dialect()` (row 1.1), defaulting to FluffOS for any config that never sets the key; DGD throws `NotImplementedError` rather than silently picking a wrong dialect. Deliberately a small free function, not a `DialectFactory` class -- see `DialectSelect.hpp`'s own comment on why a factory is premature with only one real consumer. No `DialectFactory`, and every other `ApplyTable`/`VM::applyMaster()` call site (`Server.cpp`'s `"connect"`, `ObjectManager.cpp`'s `"compile_object"`/`"privs_file"`) still hardcodes its apply name string directly rather than routing through `BootApi` -- only the one UID call site was in scope) |
 | 1.5 | LDMud shadows: `shadow(ob)`, `unshadow()`, `query_allow_shadow` | `src/efun` | [x] (rescoped 2026-08-17: the row's own original title carried the same signature error `src/dialect/instruct.md`/`src/apply/instruct.md` had already flagged elsewhere -- `shadow(ob,1)` is FluffOS's shape, not LDMud's. Re-read the real sources directly: `temp/ldmud/src/func_spec` ("int shadow(object) no_lightweight;", one argument) + `temp/ldmud/src/simulate.c`'s own `f_shadow()`/`validate_shadowing()`/`f_unshadow()` (LDMud 3.6.8, this project's vendored clone). Confirmed divergences from the already-implemented FluffOS `shadow(ob, flag)` (row 0.6): one argument only (no query flag -- LDMud's own separate query mechanism, `query_shadowing()`, is **obsolete** in this exact 3.6.8 clone, relocated to `temp/ldmud/doc/obsolete/query_shadowing`, so the row's own "`query_shadowing`" target does not apply to a current LDMud and is correctly dropped, not implemented, for the dialect); returns int 1/0, never the shadowed object; master apply is `query_allow_shadow()`, not `valid_shadow()`; and -- a genuine driver-level asymmetry confirmed by reading both `validate_shadowing()`s side by side -- LDMud's has no "cannot shadow the master object" guard at all (FluffOS's does, already ported under 0.6), master protection under LDMud being purely an advisory mudlib convention inside `query_allow_shadow()`'s own body, not a driver mechanism. Also confirmed real LDMud has a second, genuinely FluffOS-absent efun, `void unshadow(void)` (`temp/ldmud/src/simulate.c`'s `f_unshadow()`; grepped the full vendored `fluffos-2.9-ds2.08` tree for "unshadow", zero hits) -- it only splices current_object out when current_object is itself shadowing something (reconnecting that victim to whoever was shadowing current_object), a genuine no-op when current_object is merely being shadowed by someone else with no victim of its own, confirmed from the C directly rather than the doc's looser prose. The row's third original item, "shadow-chain `call_other`", turned out to already be done and dialect-agnostic -- `VM::callFunction()`'s existing shadow-chain walk (implemented under row 0.6, see `src/object/instruct.md`) matches both dialects' documented call_other-redirection model (`doc/efun/shadow`'s own "if A shadows B... not even object B can call_other() itself" is already exercised by the existing `!= current_object` re-entry guard), so nothing further needed there. What was actually small and unambiguous: the `shadow()`/`unshadow()` efun-level signature and semantics work, implemented 2026-08-17 in `src/efun/EfunTable.cpp`, gated on `vm.config().dialect() == "ldmud"` exactly like row 1.6's `replace_program()` branch, with 4 new regression tests. Directory column corrected from `src/object` to `src/efun`, the only place any of this actually lives) |
 | 1.6 | LDMud `replace_program()` no-argument, sole-inherit auto-select | `src/efun` | [x] (rescoped 2026-08-17: the row's original premise -- a `replaces` directive in `inherit` -- **does not exist anywhere in real LDMud**. Re-grepped `temp/ldmud/src/prolang.y`'s own `inheritance_qualifier`/`inheritance_modifier` productions: the complete inherit-modifier set is `static`/`private`/`public`/`protected`/`nosave`/`nomask`/`deprecated`/`virtual`/`visible`, no `replaces` token anywhere in the grammar (`temp/ldmud/src` grep for the bare word `replaces` also turns up nothing but unrelated English prose in comments -- `array.c`, `ed.c`, `lex.c`, `object.c`, `efuns.c`, `swap.c`). The real, genuine per-dialect divergence lives entirely inside `replace_program()` itself, confirmed by reading both real implementations in full: `temp/ldmud/doc/efun/replace_program` + `temp/ldmud/src/object.c`'s `v_replace_program()` (LDMud 3.2.9+) accept `void replace_program()` with **no** argument, auto-selecting the object's sole inherited program when it has exactly one, throwing "requires argument for object with more than one inherit" when it has more, and "called with no inherited program" when it has none; real FluffOS's `temp/reference/fluffos-2.9-ds2.08/replace_program.c` own `f_replace_program()` has no such form at all -- it unconditionally rejects a missing/non-string arg via `bad_arg(1, ...)` before anything else runs, mandatory argument always. `replace_program(string)` itself was already implemented FluffOS-scoped under row 0.13 (`src/efun/EfunTable.cpp`, `f_replace_program`-equivalent); this row's actual, narrower scope is the LDMud-only zero-arg form. Small and unambiguous once rescoped -- implemented 2026-08-17 in the same `replace_program` efun registration, gated on `vm.config().dialect() == "ldmud"` (row 1.1's `Config::dialect()`, already reachable from `src/efun` with no new library dependency), with 3 new regression tests: sole-inherit auto-select applies and swaps correctly, more-than-one-inherit throws, and the fluffos-dialect zero-arg call is confirmed still rejected exactly as before this fix, unchanged. Directory column corrected from `src/compiler` + `src/object` to `src/efun`, the only place any of this actually lives) |
@@ -90,6 +90,227 @@ that never rewrite their own source out from under a running driver.
 - `valid_read`/`valid_write`: **genuinely bigger than a normal batch item, not LDMud-specific at all.** Read `temp/ldmud/src/simulate.c`'s own `check_valid_path()` in full: one shared function backing both applies (`apply_master(STR_VALID_WRITE/READ, 4)`, args `path, uid-or-0, func, ob` in that push order, confirmed matching `doc/master/valid_read`/`valid_write`'s own SYNOPSIS exactly), called from every file-touching efun -- `doc/master/valid_read`/`valid_write`'s own lists name `copy_file`, `ed_start`, `file_size`, `get_dir`, `print_file`/`cat`, `read_bytes`, `read_file`, `restore_object`, `tail` (read) and `copy_file`, `rename_from`/`rename_to`, `ed_start`, `garbage_collection`, `mkdir`, `memdump`, `objdump`, `opcdump`, `remove_file`/`rm`, `rmdir`, `save_object`, `write_bytes`, `write_file` (write). Checked whether this could be a small LDMud-only branch on an existing FluffOS mechanism the way `shadow()`/`snoop()`/`replace_program()` were: it cannot -- FluffOS has the identical real applies too (`temp/reference/fluffos-2.9-ds2.08/applies.h`'s own `APPLY_VALID_READ`(33)/`APPLY_VALID_WRITE`(38)), and this driver currently gates **zero** of its 11 already-implemented file efuns (`read_file`, `write_file`, `read_bytes`, `write_bytes`, `save_object`, `restore_object`, `rm`, `mkdir`, `rmdir`, `rename`, `get_dir`, confirmed by grep) with either dialect's version. This is a whole missing cross-cutting security feature for both dialects at once -- a new shared path-check helper plus wiring into 11+ call sites, each needing its own literal `func` string -- not a single-efun signature divergence. Same category as `parse_*`: sized well beyond a normal batch item, needs its own explicit go-ahead as a dedicated row rather than folding into 1.16's remaining-items list.
 
 No implementation this pass: all three blocked, none forced. `get_bb_uid` stays recorded as dead/unimplementable against this exact vendored source; `make_path_absolute` stays deferred behind `ed()`; `valid_read`/`valid_write` is recommended as its own future row (a real, well-scoped, dialect-shared file-permission feature) rather than staying folded into 1.16, whenever it gets an explicit go-ahead. `valid_query_snoop` (if `interactive_info()` is ever taken on as its own row) stays alongside it as previously noted) |
+
+**1.2/1.3 scoping note (2026-08-18, scoping pass only, nothing implemented):**
+rows 1.2/1.3 are the load-bearing prerequisite for most of what is left in
+Phase 1 -- mapping width (1.9), `#'symbol` (1.8), DGD `nil`/`rlimits`/
+`atomic` (1.10-1.12) all need real grammar support before their own
+VM/efun-side rows mean anything. Read the real grammar/lexer sources
+directly (`temp/ldmud/src/prolang.y`, `temp/ldmud/src/lex.c`,
+`temp/ldmud/src/func_spec`, `temp/dgd/src/comp/parser.y`,
+`temp/dgd/src/lex/lex.cpp`), not the existing plan above, which turned
+out wrong on several load-bearing points -- corrected below.
+
+**Current architecture, confirmed by reading the actual code, not
+assumed:** `Lexer` (`src/compiler/Lexer.cpp`) produces only six generic
+`TokenType`s (`Ident, Number, String, Symbol, Keyword, End`) -- there is
+no per-keyword or per-operator enum at all; `kKeywords` is a single flat
+`unordered_set<string>` (currently: type names, `mixed`/`function`,
+control flow, `static`/`private`/`public`/`protected`/`nomask`/
+`varargs`, `inherit`, `foreach`/`in`, `switch`/`case`/`default`), and
+`Parser.cpp` does its own semantic dispatch by comparing `token.text`
+directly (confirmed: `modifierKeywords`, `Parser.cpp:80-83`, already a
+generic consume-any-of-this-list loop function declarations run through
+for `static`/`private`/`nomask`/`varargs` etc). This is good news for
+scoping: most single-keyword additions are shallow in this specific
+codebase (extend two string sets, no token-type explosion), unlike a
+bison-derived grammar. **Neither `Lexer` nor `Parser` takes an
+`LpcDialect` parameter today** -- confirmed via both constructors
+(`Lexer(std::string source)`, `Parser(std::vector<Token> tokens)`) and
+their one real call site, `ObjectManager::compile()`
+(`src/object/ObjectManager.cpp:464-466`) -- so dialect-conditional
+keyword recognition cannot exist at all yet; this is the genuine
+prerequisite everything else in 1.2/1.3 sits on top of.
+
+**Corrections to the existing plan, confirmed by reading the real
+sources directly:**
+- **`lambda()`/`unbound_lambda()` are not keywords and need no new
+  grammar at all -- remove them from 1.2/1.3's scope entirely.**
+  `temp/ldmud/src/func_spec:497,500`: `closure lambda(null|mixed *,
+  mixed);` / `closure unbound_lambda(null|mixed *, mixed);` -- ordinary
+  efuns, the identical mechanism already confirmed for `bind_lambda()`
+  and `replace_program()` in rows 1.5-1.7. `temp/ldmud/doc/LPC/closures`'s
+  own worked example, `f = lambda( ({ 'x }), ({ #'environment, 'x }) );`,
+  is plain function-call syntax with an array literal argument -- nothing
+  for the Parser to add beyond what array literals and normal calls
+  already do. What the old plan called `LambdaExpr`/`UnboundLambdaExpr`
+  AST nodes do not need to exist; the real work is entirely `src/efun` +
+  `src/vm` (a real `lambda`/`unbound_lambda` efun that builds a closure
+  from the array-encoded body -- row 1.7/1.8 territory, not this row's).
+- **`#'name` is real, but far richer than "a name after `#'`", and is
+  blocked by a genuine architecture issue this driver has and real LDMud
+  does not.** Read `temp/ldmud/src/lex.c`'s own `closure()` function
+  (triggered from the main lexer's `case '#': if (*yyp == '\'') return
+  closure(yyp);`, confirmed at `lex.c:6158-6162`) and `symbol_operator()`
+  (`lex.c:1147-1677`) in full: `#'` covers roughly 50 distinct operator
+  spellings (`#'+`, `#'+=`, `#'++`, `#'<<=`, `#'==`, ... ), the `#'[...]`
+  index/range/map-index family (`#'[`, `#'[<`, `#'[,..]`, ...), the
+  aggregate-array closure `#'({`, three real scope prefixes
+  (`#'efun::name`, `#'sefun::name`, `#'lfun::name`, plus `#'var::name`
+  for a global-variable closure -- `temp/ldmud/doc/LPC/closures:37-46`),
+  and `#'Name::fun` for a direct reference to an inherited function. All
+  of this resolves to one token, `L_CLOSURE`. **Architecture problem
+  specific to this driver:** `ObjectManager::compile()` shells out to the
+  real system `cpp` binary before this driver's own `Lexer` ever sees the
+  source (`runPreprocessor()`, `src/object/ObjectManager.cpp:350-403`,
+  confirmed: `cmd = "cpp -I ... -x c ..."`, standard non-traditional GCC
+  cpp). Real LDMud has its own integrated preprocessor and never hits
+  this; this driver's own architecture does. Standard GCC `cpp -x c`
+  hard-errors ("invalid preprocessing directive") on any line whose first
+  non-whitespace character is `#` and does not match a real preprocessor
+  directive -- and `result.ok` is gated purely on `cpp`'s exit code
+  (`ObjectManager.cpp:401-403`). A bare `#'this_player;` statement
+  written on its own line (a completely ordinary way to write it) would
+  make the *whole file* fail preprocessing before this driver's Lexer/
+  Parser ever run, regardless of what they are taught to recognize. This
+  needs a real decision (escape/mask `#'`-shaped lines before handing the
+  file to `cpp` and restore them after, or stop shelling out to real
+  `cpp` for LDMud-dialect files, or something else) as part of scoping
+  this row properly, not just a lexer/parser change -- **this is the one
+  item in this note that is architecture-touching, not isolated.**
+- **`'name` (a bare leading quote, one or more) is a second, separate,
+  previously entirely undocumented LDMud construct: a `symbol` value.**
+  `temp/ldmud/src/lex.c`'s own `'` case (`lex.c:6184`ff, comment "':
+  Character constant or lambda symbol") produces `L_SYMBOL`
+  (`yylval.symbol.name`/`.quotes`), used directly in the `lambda()`
+  example above (`'x` names a parameter) and by real efuns
+  `symbol_function()`/`symbol_variable()`/`symbolp()`
+  (`temp/ldmud/doc/efun/symbol_function` etc). This is a distinct LPC
+  *type*, `symbol`, with no equivalent anywhere in this driver's `Value`
+  variant (`int64_t, double, string, object, array, mapping, closure` --
+  `include/amlp/vm/Value.hpp:16-25`) -- a real, previously-missed gap this
+  scoping pass surfaced, not previously on the roadmap in any row. Needs
+  its own `Value` variant member (a `src/vm` decision, out of this row's
+  own scope to resolve, only to flag) before the Lexer/Parser side can be
+  more than a token that has nowhere real to go.
+- **Mapping width literal syntax is not `([ k: v1, v2, v3 ])` --
+  commas cannot work, since the grammar already uses `,` to separate
+  different key entries.** Read `temp/ldmud/src/prolang.y`'s own
+  `m_expr_list2`/`m_expr_values` productions (`prolang.y:17224-17256`)
+  directly: the real separator between multiple values *for the same
+  key* is `;`, and `,` only ever separates *different* key entries --
+  `([ "a": 1; 2; 3, "b": 4; 5; 6 ])`, not `([ "a": 1, 2, 3, "b": 4, 5, 6
+  ])`. The grammar also enforces that every entry in one literal have the
+  same width ("Inconsistent number of values in mapping literal",
+  `prolang.y:17244`) -- a real semantic check, not just syntax. There is
+  also a separate, simpler literal for an *empty* mapping of a given
+  width, `([: width_expr ])` (`prolang.y:15200-15224`,
+  `F_M_ALLOCATE`) -- not previously documented anywhere in this repo.
+  Row 1.9 (`m_allocate`/`m_indices`/`m_values`) owns the VM/efun runtime
+  side of mapping width; this row owns the two literal syntaxes.
+- **DGD `rlimits` is not `rlimits(ticks : stack) { body }` -- wrong
+  separator and wrong argument order.** Read `temp/dgd/src/comp/parser.y`
+  directly (`parser.y:566-582`): the real grammar is `RLIMITS '(' expr
+  ';' expr ')' compound_stmt` -- semicolon, not colon -- and the first
+  expression is the **stack** limit, the second is **ticks** (confirmed
+  by the real error messages checking each in that order: "bad type for
+  stack rlimit" on the first, "bad type for ticks rlimit" on the second).
+  Real shape: `rlimits (stack_expr; ticks_expr) { body }`.
+- **DGD `atomic` is confirmed real and exactly as simple as the old plan
+  assumed.** `temp/dgd/src/comp/parser.y:326-328`: `ATOMIC { $$ =
+  C_ATOMIC; }`, parsed in the same `non_private` modifier-list production
+  as `STATIC`/`NOMASK`/`VARARGS` (`parser.y:301-330`) -- this driver's own
+  `modifierKeywords` mechanism (`Parser.cpp:80-83`) already generically
+  consumes exactly this shape. The smallest, most mechanically contained
+  real addition found in this entire scoping pass: no new AST node kind
+  needed at the lexer/parser layer at all, purely extending two existing
+  string sets. What `atomic` *means* (checkpoint/rollback) is row 1.12's
+  own, separate, still-unstarted VM concern -- landing the keyword alone
+  is syntactically real and inert until then, the same "recognized but
+  not yet semantically wired" shape already accepted elsewhere in this
+  project (e.g. the shadow work's documented `nomask`-check skip).
+- **DGD `nil` is confirmed real and simple.** `temp/dgd/src/comp/
+  parser.y:92,718`: `NIL` token, `Node::createNil()` -- parsed as an
+  ordinary primary-expression literal, the same shape as any other
+  literal token. Needs one new AST node kind (`NilLiteral`) and a
+  CodeGen decision for what it emits until row 1.10 (`nil` as a distinct
+  `Value` variant member) lands -- the smallest *new-AST-node* addition
+  found, second only to `atomic` in overall size, but not quite as
+  inert since a literal has to produce *something* today, which is a
+  real (if small) coupling to row 1.10 that `atomic` does not have.
+- **DGD's own closure/function-pointer syntax is a third, distinct
+  family, not currently on this roadmap in any row.** `temp/dgd/src/comp/
+  parser.y:771-794`: `&ident(args)` and `&(*cast_exp)(args)` (a
+  "call template", DGD's own function-pointer literal, unrelated to
+  FluffOS's `(: :)` or LDMud's `#'`), plus `RARROW`/`LARROW` (`->`/`<-`)
+  for DGD's own persistent-object-call and inherited-super-call
+  conventions respectively. Zero DGD lexer/parser work exists yet (`atomic`/
+  `rlimits`/`nil` above are the only DGD syntax currently tracked anywhere
+  on this roadmap) -- flagging this now, sized for whenever DGD's own
+  dialect work actually gets picked up (row 1.15 and beyond), not
+  something to size or implement in this pass.
+
+**Classification -- small/isolated vs. architecture-touching:**
+- **Small, isolated, no new AST/CodeGen surface:** DGD `atomic` modifier
+  keyword (extends two existing string sets only).
+- **Small, one new AST node, minor CodeGen coupling to row 1.10:** DGD
+  `nil` keyword/`NilLiteral`.
+- **Moderate, self-contained new grammar inside the existing
+  mapping-literal parse path, no new AST node kind beyond a width
+  field:** mapping width literals (`([ k: v1; v2 ])` and `([: N ])`),
+  now with the corrected `;`/`,` grammar above.
+- **Moderate, one new statement-level AST node
+  (`RlimitsStmt`), self-contained, does not touch expression grammar:**
+  DGD `rlimits (stack; ticks) { body }`, now with the corrected grammar
+  above; its own `PushRlimits`/`PopRlimits` opcodes remain row 1.11's
+  VM-side concern.
+- **Large, new AST node, and coupled to an entirely new `Value` variant
+  member (`symbol`) not previously tracked on this roadmap at all:**
+  `'name` symbol literals.
+- **Large, rich internal grammar (~50 operator spellings, index/range
+  forms, scope prefixes) but self-contained as one token kind, EXCEPT for
+  a genuine architecture problem in this driver's own preprocessing
+  pipeline (real `cpp` hard-errors on a line-initial `#'`) that has to be
+  decided before this can land at all:** `#'` closure literals.
+- **Removed from this row's scope entirely, zero lexer/parser work
+  needed:** `lambda()`/`unbound_lambda()` (ordinary efuns, `src/efun` +
+  `src/vm` territory, rows 1.7/1.8).
+- **Newly discovered, out of scope for now, sized for future DGD dialect
+  work:** DGD's own `&ident(args)` closure syntax and `->`/`<-`
+  operators.
+
+**Proposed smallest-possible first slice (not implemented this pass):**
+two parts, in order, chosen so neither needs redoing once the fuller
+scope above is tackled.
+1. **Dialect plumbing only, zero behavior change.** Add an `LpcDialect`
+   parameter to `Lexer`'s and `Parser`'s constructors (both currently
+   take none at all -- confirmed above), threaded through from
+   `ObjectManager::compile()`'s existing `Config&` via
+   `dialectFromString(config_.dialect())` (row 1.1's own machinery,
+   already used identically in `DialectSelect.cpp`), defaulting every
+   existing call site to `LpcDialect::FluffOS` -- the same "provably a
+   no-op for every config that never sets `dialect`" shape row 1.1's own
+   `Config::dialect()` used. No new keyword, no new AST node, nothing
+   user-visible changes this step; it only gives every later, real
+   addition (`atomic`, `nil`, mapping width, `#'`, `'name`, ...) a clean,
+   independent, dialect-gated landing spot instead of needing this same
+   plumbing threaded through piecemeal on each one's own turn.
+2. **DGD `atomic` as the first real per-dialect token**, riding on that
+   plumbing. The single smallest real syntax addition found in this
+   entire pass: extend `kKeywords` (Lexer) and `modifierKeywords`
+   (Parser) with `"atomic"`, gated on `dialect_ == LpcDialect::DGD`,
+   using the already-generic modifier-consumption loop at
+   `Parser.cpp:80-83` verbatim. No new `TokenType`, no new AST node kind,
+   no CodeGen change, no coupling to any other unfinished row (row 1.12's
+   own VM semantics stay separately deferred, exactly like the shadow
+   work's already-accepted `nomask`-skip precedent) -- a function
+   declared `atomic` under `dialect: dgd` parses instead of failing, and
+   is silently a no-op function until row 1.12 lands, which is a real,
+   testable, zero-risk before/after. `nil`/`NilLiteral` was considered as
+   the first real slice instead of `atomic` and is a close second (also
+   small, also isolated from the architecture-touching items) but was not
+   chosen for the recommendation: it needs a CodeGen emission decision
+   the moment it exists (there is no equally inert "recognized but
+   nothing happens yet" landing for a literal the way there is for a
+   modifier keyword), a real, if small, coupling to row 1.10 that
+   `atomic` avoids entirely. Both are viable; `atomic` is the
+   marginally smaller and cleaner of the two.
+
+Not proposed as part of any first slice, deliberately: `#'` (architecture
+decision needed first), `'name`/symbol (new `Value` variant member needed
+first), `lambda`/`unbound_lambda` (not this row's scope at all, see
+correction above), mapping width and `rlimits` (each a real, self-contained
+next step once the plumbing lands, but neither is smaller than `atomic`).
 
 ---
 
