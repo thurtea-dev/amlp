@@ -17348,6 +17348,101 @@ static void testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBare
     std::cout << "testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm OK\n";
 }
 
+// ROADMAP.md row 1.9's own first real slice: real LDMud's own names for
+// keys()/values() (see EfunTable.cpp's own comment on "m_indices"/
+// "m_values" for the full real-source citation and corpus-frequency
+// ranking that picked this over the rest of row 1.9's still-open scope).
+// Registered unconditionally, not gated on dialect -- matching this
+// table's own established convention (unshadow()'s own comment) -- so no
+// dialect argument anywhere in these three tests.
+static void testMIndicesReturnsMappingKeysSameOrderAsKeysEfun() {
+    std::string src =
+        "mixed *probe() {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2, \"c\": 3]);\n"
+        "    return m_indices(m);\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    amlp::Value result = vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(result.data));
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr->items.size() == 3);
+    assert(std::get<std::string>(arr->items[0].data) == "a");
+    assert(std::get<std::string>(arr->items[1].data) == "b");
+    assert(std::get<std::string>(arr->items[2].data) == "c");
+
+    std::cout << "testMIndicesReturnsMappingKeysSameOrderAsKeysEfun OK\n";
+}
+
+static void testMValuesBareFormReturnsColumnZeroValues() {
+    std::string src =
+        "mixed *probe() {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2, \"c\": 3]);\n"
+        "    return m_values(m);\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    amlp::Value result = vm.callFunction(obj, "probe", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(result.data));
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr->items.size() == 3);
+    assert(std::get<int64_t>(arr->items[0].data) == 1);
+    assert(std::get<int64_t>(arr->items[1].data) == 2);
+    assert(std::get<int64_t>(arr->items[2].data) == 3);
+
+    std::cout << "testMValuesBareFormReturnsColumnZeroValues OK\n";
+}
+
+static void testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth() {
+    // Real corpus evidence (see EfunTable.cpp's own comment): the
+    // overwhelming majority of real m_values() call sites are the bare
+    // one-argument form, matching this driver's own single-column
+    // Mapping exactly -- confirmed here to also accept an *explicit*
+    // "0" for the same result (real func_spec.c's own default), and to
+    // honestly reject any other column instead of silently returning
+    // column 0's values for a column the caller never actually asked
+    // for -- real N-column support stays row 1.9's own open scope, not
+    // faked here.
+    std::string src =
+        "mixed *probeExplicitZero() {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2]);\n"
+        "    return m_values(m, 0);\n"
+        "}\n"
+        "mixed *probeNonZero() {\n"
+        "    mapping m = ([\"a\": 1, \"b\": 2]);\n"
+        "    return m_values(m, 1);\n"
+        "}\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    amlp::Value result = vm.callFunction(obj, "probeExplicitZero", {});
+    assert(std::holds_alternative<std::shared_ptr<amlp::Array>>(result.data));
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr->items.size() == 2);
+    assert(std::get<int64_t>(arr->items[0].data) == 1);
+
+    bool threw = false;
+    try {
+        vm.callFunction(obj, "probeNonZero", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth OK\n";
+}
+
 // --- Wand of Creation (mudlib/clone/wand_of_creation.c) -------------------
 // Reads the real, shipped file from disk rather than duplicating its
 // source here, so these tests exercise exactly what the live driver
@@ -18444,6 +18539,9 @@ int main() {
     testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly();
     testHashQuoteEfunPrefixParsesToClosureLiteralExprWithForceEfun();
     testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm();
+    testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
+    testMValuesBareFormReturnsColumnZeroValues();
+    testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();
     testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld();
     testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld();
     testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject();

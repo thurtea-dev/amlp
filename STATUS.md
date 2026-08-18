@@ -3,6 +3,105 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): `m_indices()`/`m_values()` implemented as
+mapping width's own first real slice -- re-ranked the three original
+Phase 1 blockers after closures' highest-real-usage piece landed, picked
+by real corpus-frequency evidence, not size (630 tests, up from 627).**
+
+## Re-ranking
+
+Of the three original Phase 1 blockers -- `#'`/`'name` closures, mapping
+width, connect/disconnect -- closures just had its highest-real-usage
+slice landed (`#'efun::name`, last session). Re-ranked the remaining two
+the same way, by real evidence rather than assumption:
+
+**Connect/disconnect, checked directly against the real corpus this
+time, not just `src/dialect/instruct.md`'s own prose:** grepped
+`temp/core-lib` (the one confirmed genuinely LDMud-targeting corpus this
+repo has) for the real master-apply signature, `disconnect(object ob,
+string remaining)`. Zero real occurrences -- the 14 raw `disconnect(`
+hits found are all this mudlib's own unrelated database-connection-
+closing function (`protected nomask void disconnect(int handle)`,
+`lib/modules/secure/dataServices/dataService.c`), not the link-death
+apply at all. `core-lib`'s own real `secure/master.c` does not define
+`disconnect()` in any form. Real, but zero observed reliance on it in
+the only corpus available to check against.
+
+**Mapping width, re-examined for a genuinely separable first slice
+rather than re-confirming the whole row is too big (already on record):**
+searching for the real `m_allocate`/`m_values`/`m_indices`/`m_entry`/
+`m_reallocate`/`m_add`/`m_contains` efun family surfaced something the
+prior investigation had not separated out -- `m_indices`/`m_values`
+(real LDMud's own *names* for what this driver already has as `keys()`/
+`values()`) were not registered under any spelling at all, and `m_indices`
+alone has 544 real call sites in `core-lib`, `m_values` has 17. Unlike
+the rest of row 1.9's own scope (real N-column value semantics), a bare,
+width-agnostic `m_indices()`/`m_values()` needs zero changes to this
+driver's existing single-column `Mapping` type at all -- it already *is*
+column 0, the real default.
+
+**Result: mapping width's own `m_indices`/`m_values` first slice beats
+the disconnect bug on real evidence** -- 561 confirmed real call sites
+against zero, not a close call. Picked accordingly.
+
+**A real methodology correction along the way, not just a result** (same
+discipline as last session's `#'` corpus search): a naive `grep -c
+";"` inside mapping literals first suggested real `([ k: v1; v2 ])`
+mapping-width-literal usage in `core-lib` -- both apparent hits turned
+out to be a `;` inside an ordinary string value (`"35;1"`, an ANSI
+color-code string), not a real width-literal separator at all. Zero real
+occurrences of the actual mapping-width literal syntax, `m_allocate`,
+`m_entry`, `m_reallocate`, `m_add`, `m_contains`, or the `([: N ])`
+empty-width literal anywhere in the corpus -- confirmed by reading actual
+matched context, not trusting the raw count, the same discipline that
+already caught the `#'` search's own false positives last session.
+
+## What was built
+
+**`m_indices(mapping)`** (`src/efun/EfunTable.cpp`): thin wrapper over
+the exact same `Mapping::entries` iteration `keys()` already uses --
+real signature (`temp/ldmud/src/func_spec:479`) takes no width argument
+at all, so this is a complete, correct implementation, not a partial
+one.
+
+**`m_values(mapping, int col default: 0)`**: same shape as `values()`,
+plus the real optional width-column argument (`func_spec:481`). Column 0
+(the default, and the overwhelming majority of real usage -- 15 of 17
+real call sites) returns this driver's existing single value column
+correctly. A genuine non-zero column is honestly rejected with a clear
+error naming row 1.9's own still-open scope, rather than silently
+returning column 0's values for a column the caller never actually
+asked for and never finding out.
+
+Both registered unconditionally, not gated on dialect -- matching this
+table's own already-established convention (`unshadow()`'s own comment:
+efun *availability* is never withheld by dialect in this driver, only an
+existing shared name's own behavior branches).
+
+**3 new regression tests**, including one confirming the honest-rejection
+behavior specifically (explicit column 0 succeeds, column 1 throws).
+
+**Verified live against the real running driver**, real bundled
+`mudlib/`, default (fluffos) dialect -- these two efuns need no dialect
+gate, so no scratch config needed this time: three real `eval` calls all
+returned correct results (`m_indices` on a 3-entry mapping, bare
+`m_values`, explicit `m_values(m, 0)`), and a fourth (`m_values(m, 1)`)
+confirmed the rejection fires with the intended message.
+
+**One incidental, pre-existing, unrelated finding surfaced during live
+verification, not caused by this slice and not fixed here:** an uncaught
+runtime error during command dispatch (confirmed via `eval`) drops the
+connection and, in at least one observed run, the whole driver process
+along with it -- reproduced identically with an already-existing,
+unrelated error case (calling a genuinely undefined efun via `eval`),
+confirming this is a real, general robustness gap in uncaught-error
+handling during command dispatch, not something the `m_values` rejection
+introduced. Out of this session's scope; flagged here so it is not
+reintroduced ad hoc later without a record.
+
+ROADMAP.md row 1.9 updated with the full implementation record. Test
+count footer updated (627 to 630).
+
 **2026-08-18 (continued): `#'efun::name` scope-prefixed closure literal
 implemented and live-verified -- ranked by real corpus-frequency search
 across every vendored mudlib this repo has, the same method row 0.13's
