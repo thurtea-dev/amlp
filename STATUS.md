@@ -3,6 +3,215 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): self-assessment against the real 6-12 month
+goal, picked LDMud `#'name` closures as the next real multi-session
+commitment, implemented and live-verified a real first slice this same
+pass (not scoping-only) -- 625 tests, up from 623.**
+
+## Assessment
+
+**Efuns:** 242 currently registered (`grep -c registerEfun( src/efun/
+EfunTable.cpp`). Row 0.13's own real accounting (not the row title's
+older "~300" approximation): 270 real names in this exact vendored
+FluffOS reference build's own `efun_defs.c`, of which 40 non-`parse_*`
+names are confirmed genuine documented exclusions (architecture mismatch
+or zero-call-site deferral), leaving the 8-name `parse_*` natural-
+language parser package (row 0.13a) as the one real, sizeable,
+deliberately-deferred efun gap remaining -- everything else in Phase 0
+is closed.
+
+**Applies:** 19 known (`ApplyTable::known()`), 10 actually fired by the
+driver today (`create`, `init`, `connect`, `logon`, `process_input`,
+`net_dead`, `compile_object`, `heart_beat`, `id`, `catch_tell`), 9
+recognized but not yet fired -- `valid_read`/`valid_write` among them,
+already on record (row 1.16) as a real missing cross-cutting security
+feature affecting both FluffOS and LDMud mudlibs equally, not gated on
+any of this driver's 11 file efuns today.
+
+**Phase 0:** every row `[x]` except `0.13a` (`parse_*`, deliberately
+deferred, sized comparable to everything else in row 0.13 combined).
+Genuinely stable -- this is a solid foundation, not a gap.
+
+**Phase 1:** `1.1`/`1.5`/`1.6` done. `1.10` (DGD `nil`) done but
+comparison-only, not a real-compatibility item. `1.11`-`1.15` (DGD-only)
+correctly deprioritized last session -- comparison research, not Phase 1
+blockers. `1.16` (LDMud master apply table) has all three remaining
+items individually investigated and blocked (`get_bb_uid` dead in real
+LDMud itself, `make_path_absolute` needs `ed()` first, `valid_read`/
+`valid_write` needs its own dedicated row). The three real remaining
+Phase 1 blockers, per last session's own correction: `#'`/`'name`
+closures, mapping width, connect/disconnect -- see below for which one
+and why.
+
+**Phase 2/3:** entirely `[ ]`. Genuinely not blocking whether a mudlib
+can run at all -- JIT, hotboot, GC, persistence, concurrency, TLS,
+efun breadth beyond FluffOS, dev tooling, production hardening. Real
+production-polish work, correctly sequenced after Phase 1 per this
+file's own "Phase 1 before Phase 2" principle, not evidence of neglect.
+
+## Pick: LDMud `#'name` closure literals
+
+Weighed the three remaining Phase 1 blockers by real-world mudlib-
+compatibility impact, not size:
+
+- **`#'` closures (picked):** LDMud's own function-pointer/callback
+  syntax, used as pervasively in real LDMud codebases (`sort_array`/
+  `filter`/`map` callback arguments, event/delegation patterns) as this
+  driver's already-supported FluffOS `(: name :)` is for FluffOS ones.
+  Unsupported, this is a compile-time failure for most real LDMud mudlib
+  code beyond a trivial example, not a missing-feature gap confined to
+  one corner of it -- closer in kind to "can this driver run a real
+  LDMud mudlib at all" than the other two.
+- **Mapping width:** real, but narrower in reach -- only affects mudlibs
+  that specifically use LDMud's own wide-mapping idiom (`([ k: v1; v2
+  ])`, `m_allocate`/`m_values`/`m_indices`), not every LDMud codebase.
+- **Connect/disconnect:** real, but partial. Checked directly
+  (`src/dialect/instruct.md`): `connect` itself is already name-
+  compatible between FluffOS and LDMud (both use the same master apply),
+  so a real LDMud mudlib already logs in correctly under this driver
+  today. Only link-death/disconnect notification is actually broken
+  (LDMud's real apply is `disconnect(object ob, string remaining)`,
+  called on master with a different signature; this driver still only
+  ever fires FluffOS's `net_dead(object)` on the player, regardless of
+  configured dialect) -- a real bug, but not a whole-mudlib blocker the
+  way an unparseable core syntax construct is.
+
+`#'` closures wins on "which unlocks the most actual usage", not "which
+is smallest" -- confirmed the largest of the three per prior research
+(row 1.2/1.3's own scoping note called it "large, rich internal grammar
+... but self-contained ... EXCEPT for a genuine architecture problem").
+Broken into a real first slice this pass instead, the same way the
+broader dialect work got `atomic` then `nil` as its own first slices,
+rather than staying purely theoretical.
+
+## What was actually built
+
+**The architecture prerequisite, fixed for real.** Real system `cpp`
+hard-errors on any line whose first non-whitespace character is `#` and
+is not a real directive it recognizes -- confirmed directly against
+`cpp`'s own documented directive-parsing rule, not assumed -- and a bare
+`"#'name;"` statement on its own line (a completely ordinary way to
+write it) is exactly that shape; it would take the *whole file's*
+preprocessing down before this driver's own Lexer/Parser ever ran,
+regardless of what they were taught to recognize. Fixed in
+`ObjectManager.cpp`: `maskHashQuote()` replaces every `#'` occurrence in
+the raw source with a plain-identifier marker text before staging for
+`cpp` (`stageSourceForPreprocessing()`), and `unmaskHashQuote()` reverses
+it in `runPreprocessor()`'s own output. Runs unconditionally for every
+file, not gated on dialect -- nothing dialect-specific about the fix
+itself, and a file with no `#'` anywhere in it is untouched either way.
+
+**The Lexer.** `#` was not lexable at all before this pass, outside real
+preprocessor directives -- confirmed directly: it fell straight into
+`tokenize()`'s own "unrecognized character" branch, unlike `atomic`/
+`nil`, which were always at least valid (if unreserved) identifiers.
+New `Lexer::lexHashQuote()`, dispatched only when `dialect_ ==
+LpcDialect::LdMud && peekNext() == '\''`, combines `#` and `'` into one
+two-character `Symbol` token (`"#'"`) -- matching the existing `"->"`/
+`"::"`/`"++"` multi-char-symbol precedent already in this file, not a
+new `TokenType`. Under FluffOS/DGD, a bare `#` still throws exactly the
+same "unrecognized character" it always has -- zero behavior change for
+either.
+
+**The Parser.** `parsePrimary()` recognizes the combined `"#'"` token
+(double-gated on `dialect_ == LpcDialect::LdMud` again, the same belt-
+and-suspenders discipline `"atomic"`/`"nil"` already established),
+expects an `Ident` for the function name, and builds a
+**`ClosureLiteralExpr`** -- the exact same AST node the existing `"(:
+name :)"` case a few lines below it already builds, with `boundArgs`
+left empty (real LDMud semantics for this bare form: arguments are
+supplied by whoever calls the closure later, not baked in at the literal
+site). Reusing that node instead of inventing a new one meant this slice
+needed **zero** CodeGen or VM changes past the Parser check itself --
+`CodeGen.cpp`'s existing `PushClosure` emission and every downstream
+consumer (`funcall`/`evaluate`, `map`/`filter`/`sort_array` callbacks)
+already handle any `ClosureLiteralExpr` generically by function name,
+with no FluffOS-vs-LDMud distinction anywhere in that path.
+
+**Deliberately not covered by this slice**, matching the discipline
+already established for `atomic`'s own "keyword parses, semantics come
+later" precedent: `#'` operator spellings (`#'+`, `#'==`, `#'++`, ...),
+the `#'[` index/range/map-index forms, the `#'({` aggregate-array
+closure, and every scope prefix (`#'efun::`, `#'sefun::`, `#'lfun::`,
+`#'var::`, `#'Name::`). All confirmed still genuinely large per row
+1.2/1.3's own prior research; none of them touched this pass.
+
+**2 new regression tests**: `testLexerHashQuoteClosureOnlyRecognizedUnderLdmudDialect`
+(confirms `#` throws under FluffOS/DGD exactly as before, and combines
+into one `"#'"` token only under LdMud); `testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly`
+(routed through `ObjectVarHarness`, not `compileProgramObject`, so it
+actually exercises the real `cpp` preprocessing path and the masking
+fix, not just the Lexer/Parser in isolation -- its own source includes a
+bare `"#'lower_case;"` statement on its own line, the exact shape the
+architecture fix was needed for; under `dialect: ldmud` it also confirms
+real closure semantics, not just "it parsed": `funcall()` correctly
+resolves and calls the referenced function).
+
+**Verified live against the real running driver**, not just the test
+suite -- a real `dialect: ldmud` config booted against this driver's own
+actual bundled `mudlib/`, connected with a real telnet-negotiating
+client, three separate `eval` expressions in one session: `funcall(#'
+lower_case, "HELLO WORLD")` returns `"hello world"`; `mixed f = #'
+upper_case; return funcall(f, "hi there")` returns `"HI THERE"` (storing
+the closure in a variable before calling it, not just using it inline);
+`capitalize(funcall(#'lower_case, "YES"))` returns `"Yes"` (composed
+with another real efun). Clean boot, no errors. The scratch config used
+for this (`dialect: ldmud` added to a copy of `etc/driver.cfg`, port
+4001) lived only in the scratchpad, not staged -- this repo still has
+exactly one canonical driver config.
+
+ROADMAP.md rows 1.2 and 1.3 updated with the full implementation record;
+the row 1.2/1.3 scoping note's own "not proposed as part of any first
+slice" line (accurate history of what was proposed at the time) left
+unedited, with a short dated follow-up noting the architecture decision
+has since been made, rather than rewriting the historical sentence
+itself.
+
+**2026-08-18 (continued): `main.cpp`'s dead no-argv config-path fallback
+removed, replaced with a usage message and a nonzero exit -- flagged but
+not acted on during last session's dependency grep, fixed now (623
+tests, unchanged -- `main.cpp` is not part of the test binary, see
+below).**
+
+`main.cpp` used to default `configPath` to `"config/driver.cfg"` when no
+argv was given -- a path that has never existed anywhere in this repo
+(confirmed again this session: `find` turns up nothing at that path,
+same as when this was first noticed). A genuinely dead branch: every
+real invocation of this binary throughout the project's own history
+(`README.md`'s own documented usage, every live-verification session
+recorded in this file) already passes an explicit config path, so
+nothing has ever actually exercised the fallback.
+
+Considered repointing it at `etc/driver.cfg` instead (now the one
+canonical config, see this file's own consolidation entry above) --
+decided against it: a baked-in default still silently assumes the
+process runs from the repo root, an assumption nothing else in this
+codebase makes, and one the project's real usage pattern has never
+relied on either way. Removed the fallback instead: `argc < 2` now
+prints `"Usage: <argv[0]> <config-path> [max-iterations]"` to stderr and
+exits 1, rather than silently trying (and failing on) a path that was
+never real. Confirmed both paths directly: `./build/amlp` with no
+arguments now prints the usage message and exits 1; `./build/amlp
+etc/driver.cfg` (with `AMLP_MAX_ITERATIONS=2` to bound the run) still
+boots exactly as before.
+
+**No regression test added -- genuinely no reasonable place for one
+under the current architecture, not a shortcut.** `main.cpp` compiles
+into the `amlp` executable target only (`CMakeLists.txt`); the
+`amlp_tests` binary (`test/test_lexer.cpp`) links against every library
+subsystem (`core`, `config`, `compiler`, `vm`, `object`, `efun`,
+`apply`, `dialect`, `net`, `scheduler`) but never `main.cpp` itself --
+confirmed directly from the top-level `CMakeLists.txt`, not assumed.
+Testing this argv-handling change through the existing suite would need
+either extracting it into a separate, linkable function both targets
+share (a real, if small, design decision beyond the scope of this fix),
+or spawning the real `amlp` binary as a subprocess from a test, a
+pattern that does not exist anywhere in this suite today (every existing
+test drives an in-process `ObjectManager`/`VM` directly; live behavior
+of the real binary has only ever been verified manually, never through
+`ctest`). Neither was worth introducing for a two-line argv check.
+Confirmed manually instead, as noted above.
+
 **2026-08-18 (continued): consolidated to a single driver config,
 `etc/driver.cfg`, boots the real library mudlib -- `etc/driver_lil.cfg`
 removed, verified live (623 tests, unchanged, no source touched).**

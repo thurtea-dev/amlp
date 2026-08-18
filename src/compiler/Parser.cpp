@@ -202,6 +202,34 @@ AstPtr Parser::parsePrimary() {
         return lit;
     }
 
+    // "#'name" -- LDMud's own closure-literal prefix, bare-name first
+    // slice only (ROADMAP.md row 1.2/1.3's own scoping note; see
+    // Lexer::lexHashQuote()'s own comment for the full real-source
+    // citation and what is deliberately not covered yet -- operator
+    // spellings, #'[ forms, #'({ aggregates, scope prefixes). Reuses
+    // ClosureLiteralExpr verbatim, the exact same AST node the "(: name
+    // :)" case just below builds, rather than a new node kind: a bare
+    // "#'name" and a bare "(: name :)" are the same underlying concept
+    // (a closure bound to a function by name, no bound args), just two
+    // different dialects' own spelling of it -- so this gets CodeGen's
+    // existing PushClosure emission and every downstream VM/Closure
+    // consumer (funcall, evaluate, map/filter/sort_array callbacks) for
+    // free, with zero changes anywhere past this Parser check. Double-
+    // gated on dialect_ here too, same belt-and-suspenders discipline as
+    // "nil"/"atomic" above -- Lexer::tokenize() already only ever
+    // combines "#'" into one token under LpcDialect::LdMud, so this
+    // branch could not be reached under FluffOS/DGD in practice, but
+    // this is the one place that actually decides "is this a real
+    // closure literal", and it should not silently trust the Lexer's
+    // gate to hold forever.
+    if (checkText("#'") && dialect_ == LpcDialect::LdMud) {
+        advance(); // #'
+        Token nameTok = expect(TokenType::Ident, "closure literal function name after #'");
+        auto closure = std::make_unique<ClosureLiteralExpr>();
+        closure->functionName = nameTok.text;
+        return closure;
+    }
+
     // "(: name, bound_args... :)" -- closure/function-pointer literal
     // (see Ast.hpp's ClosureLiteralExpr and Value.hpp's Closure for the
     // real-source citation and scope). Recognized the same way "({"/"(["

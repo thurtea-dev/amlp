@@ -215,6 +215,66 @@ std::string rewriteAbsoluteIncludes(const std::string& source, const std::string
     return out.str();
 }
 
+// ROADMAP.md row 1.2/1.3's own scoping note: real system cpp (see
+// runPreprocessor's own module comment below) hard-errors on any line
+// whose first non-whitespace character is '#' and does not match a real
+// preprocessor directive it recognizes ("invalid preprocessing
+// directive") -- and LDMud's own "#'name" closure-literal syntax is
+// exactly that shape. A completely ordinary "#'some_function;" statement
+// written on its own line would otherwise take the *whole file's*
+// preprocessing down before this driver's own Lexer/Parser ever run,
+// regardless of what they are taught to recognize -- confirmed directly
+// against real cpp's own documented directive-parsing rule (only the
+// first non-whitespace token on a line is ever treated as a directive
+// introducer), not assumed. This was the one genuinely architecture-
+// touching prerequisite the scoping note flagged as needed before any
+// "#'" lexer/parser work could land at all.
+//
+// Fixed here by masking every "#'" occurrence in the raw source (not
+// just line-initial ones -- simpler and exactly as correct, since a
+// mid-line "#'" round-trips losslessly through this same mask/unmask
+// pair whether or not it would actually have tripped cpp) to a marker
+// text cpp treats as an ordinary identifier, then unmasking it back
+// after cpp returns (runPreprocessor()'s own result.output). Runs
+// unconditionally for every file, not gated on dialect -- nothing
+// dialect-specific about the fix itself (matches how
+// rewriteAbsoluteIncludes() above already runs unconditionally too); a
+// file with no "#'" anywhere in it, in any dialect, is untouched either
+// way. Whether a bare "#'name" is then recognized as anything by the
+// Lexer/Parser stays a real per-dialect question, handled separately
+// there (Lexer::tokenize(), gated on LpcDialect::LdMud).
+const std::string kHashQuoteMarker = "__AMLP_HASHQUOTE_MARKER__";
+
+std::string maskHashQuote(const std::string& source) {
+    std::string result;
+    result.reserve(source.size());
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (source[i] == '#' && i + 1 < source.size() && source[i + 1] == '\'') {
+            result += kHashQuoteMarker;
+            ++i; // also consume the '\'' -- the marker stands in for both characters
+        } else {
+            result += source[i];
+        }
+    }
+    return result;
+}
+
+std::string unmaskHashQuote(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    size_t pos = 0;
+    while (pos < text.size()) {
+        if (text.compare(pos, kHashQuoteMarker.size(), kHashQuoteMarker) == 0) {
+            result += "#'";
+            pos += kHashQuoteMarker.size();
+        } else {
+            result += text[pos];
+            ++pos;
+        }
+    }
+    return result;
+}
+
 struct StagedSource {
     bool ok = false;
     std::string tempPath;
@@ -274,7 +334,7 @@ StagedSource stageSourceForPreprocessing(const std::string& originalPath,
     }
 
     std::string rewritten = prefix + "# 1 \"" + originalPath + "\"\n" +
-        rewriteAbsoluteIncludes(buf.str(), mudlibRoot);
+        rewriteAbsoluteIncludes(maskHashQuote(buf.str()), mudlibRoot);
 
     char tmpPathTemplate[] = "/tmp/amlp_src_XXXXXX";
     int fd = mkstemp(tmpPathTemplate);
@@ -403,7 +463,7 @@ PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vecto
     // as a hard preprocessing failure was rejecting files with no actual
     // error in them (hit live loading secure/SimulEfun/SimulEfun.c).
     bool exitedOk = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    result.output = stripLineMarkers(outBuf.str());
+    result.output = unmaskHashQuote(stripLineMarkers(outBuf.str()));
     result.ok = exitedOk;
     return result;
 }

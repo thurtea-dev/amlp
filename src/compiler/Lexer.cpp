@@ -356,6 +356,34 @@ Token Lexer::lexSymbol() {
     return Token{TokenType::Symbol, std::string(1, c), startLine};
 }
 
+// LDMud's own closure-literal prefix, "#'name" (ROADMAP.md row 1.2/1.3's
+// own scoping note; confirmed against temp/ldmud/src/lex.c's own
+// closure() function, "case '#': if (*yyp == '\'') return closure(yyp);"
+// at lex.c:6158-6162). Real LDMud's own "#'" grammar is far richer than
+// this -- ~50 operator spellings (#'+, #'+=, ...), #'[ index/range/map-
+// index forms, #'({ aggregate-array closures, and #'efun::/#'sefun::/
+// #'lfun::/#'var::/#'Name:: scope prefixes, all resolving to one token,
+// L_CLOSURE -- deliberately not any of that here. This is the single
+// bare-name first slice only: "#'identifier", a plain lfun/efun/
+// simul_efun reference with no scope prefix, no bound args at the
+// literal site (matching real LDMud semantics for this exact form: any
+// arguments are supplied by whoever later calls the closure, not baked
+// in at the literal). Combined into one two-character Symbol token here
+// (matching the existing "->"/"::"/"++" precedent just above, not a
+// dedicated new TokenType) so Parser.cpp can recognize it with a single
+// checkText("#'") the same way it already recognizes "(:" -- see
+// Parser.cpp's own comment on ClosureLiteralExpr for why this reuses
+// that exact AST node rather than needing a new one: a bare "#'name" and
+// a bare "(: name :)" are the same underlying concept (a closure bound
+// to a function by name, no bound args), just two different dialects'
+// own spelling of it.
+Token Lexer::lexHashQuote() {
+    int startLine = line_;
+    advance(); // #
+    advance(); // '
+    return Token{TokenType::Symbol, "#'", startLine};
+}
+
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
 
@@ -380,6 +408,14 @@ std::vector<Token> Lexer::tokenize() {
             tokens.push_back(lexString());
         } else if (c == '\'') {
             tokens.push_back(lexChar());
+        } else if (c == '#' && dialect_ == LpcDialect::LdMud && peekNext() == '\'') {
+            // Gated the same way "atomic"/"nil" are gated for DGD above:
+            // reserving "#" for anything under FluffOS/DGD would risk
+            // breaking real code (and today it is simply not lexable at
+            // all outside real preprocessor directives, which never reach
+            // this point -- the "else" branch below throws "unrecognized
+            // character '#'", unchanged for both other dialects).
+            tokens.push_back(lexHashQuote());
         } else if (c == '@') {
             tokens.push_back(lexHeredoc());
         } else if (c == '$') {

@@ -17,7 +17,23 @@ void handleSignal(int) {
 }
 
 int main(int argc, char** argv) {
-    std::string configPath = (argc > 1) ? argv[1] : "config/driver.cfg";
+    // No fallback config path: this used to default to "config/driver.cfg",
+    // a path that has never existed anywhere in this repo (found during a
+    // dependency grep, not acted on until now) -- a silently-dead branch,
+    // since every real invocation of this binary, throughout this
+    // project's own history (README.md, every live-verification session
+    // recorded in STATUS.md), already passes an explicit config path.
+    // Repointing the default at etc/driver.cfg (now the one canonical
+    // config, see STATUS.md's consolidation entry) was considered instead
+    // of removing it, but would still silently assume the process runs
+    // from the repo root -- an assumption nothing else here makes, and
+    // one real invocation pattern has never actually relied on. Failing
+    // loudly with a usage message is more honest than guessing a path.
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <config-path> [max-iterations]\n";
+        return 1;
+    }
+    std::string configPath = argv[1];
 
     int maxIterations = 0;
     if (argc > 2) {

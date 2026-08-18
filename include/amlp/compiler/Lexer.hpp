@@ -35,6 +35,7 @@ private:
     Token lexString();
     Token lexChar();
     Token lexSymbol();
+    Token lexHashQuote();
     Token lexHeredoc();
     Token lexLambdaParam();
 

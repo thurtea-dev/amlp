@@ -17175,6 +17175,113 @@ static void testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectl
     std::cout << "testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly OK\n";
 }
 
+// ROADMAP.md row 1.2/1.3's own next real Phase 1 slice after the DGD work
+// above: LDMud's own "#'name" closure-literal prefix, bare-name form only
+// (confirmed against temp/ldmud/src/lex.c's own closure() function --
+// see Lexer::lexHashQuote()'s own comment for the full citation and what
+// is deliberately not covered yet). Same double-gated-per-dialect
+// discipline as "atomic"/"nil" above, but unlike either of those, "#" is
+// not lexable under FluffOS/DGD at all today (not merely misread as a
+// plain Ident the way "atomic"/"nil" are) -- so the "other dialects"
+// half of these tests confirms a genuine Lexer exception, not just a
+// different token type.
+static void testLexerHashQuoteClosureOnlyRecognizedUnderLdmudDialect() {
+    {
+        amlp::Lexer lexer("#'foo"); // default == FluffOS
+        bool threw = false;
+        try {
+            lexer.tokenize();
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+    {
+        amlp::Lexer lexer("#'foo", amlp::LpcDialect::FluffOS);
+        bool threw = false;
+        try {
+            lexer.tokenize();
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+    {
+        amlp::Lexer lexer("#'foo", amlp::LpcDialect::DGD);
+        bool threw = false;
+        try {
+            lexer.tokenize();
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+    {
+        amlp::Lexer lexer("#'foo", amlp::LpcDialect::LdMud);
+        auto tokens = lexer.tokenize();
+        assert(tokens.size() == 3); // "#'", "foo", End
+        assert(tokens[0].type == amlp::TokenType::Symbol);
+        assert(tokens[0].text == "#'");
+        assert(tokens[1].type == amlp::TokenType::Ident);
+        assert(tokens[1].text == "foo");
+        assert(tokens[2].type == amlp::TokenType::End);
+    }
+
+    std::cout << "testLexerHashQuoteClosureOnlyRecognizedUnderLdmudDialect OK\n";
+}
+
+static void testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly() {
+    // Deliberately routed through ObjectVarHarness, not compileProgramObject
+    // (which bypasses ObjectManager::compile() and its real cpp
+    // preprocessing step entirely) -- this needs the genuine end-to-end
+    // path to actually exercise the cpp-masking architecture fix
+    // (ObjectManager.cpp's maskHashQuote()/unmaskHashQuote()), not just
+    // the Lexer/Parser in isolation. The bare "#'lower_case;" statement on
+    // its own line below is the exact failure shape ROADMAP.md's own
+    // scoping note cited ("a bare #'this_player; statement written on its
+    // own line... would make the whole file fail preprocessing") -- if
+    // the masking fix regressed, this file would fail to compile under
+    // *any* dialect, including fluffos/dgd, not just misparse under them.
+    const char* src =
+        "string probe() {\n"
+        "    mixed f;\n"
+        "    #'lower_case;\n"
+        "    f = #'lower_case;\n"
+        "    return funcall(f, \"ABC\");\n"
+        "}\n";
+
+    {
+        ObjectVarHarness harness; // defaults to "fluffos", row 1.1
+        harness.writeFile("/hashquote_fluffos.c", src);
+        auto ob = harness.objects.cloneObject("/hashquote_fluffos");
+        assert(ob == nullptr);
+    }
+    {
+        ObjectVarHarness harness("dialect: dgd\n");
+        harness.writeFile("/hashquote_dgd.c", src);
+        auto ob = harness.objects.cloneObject("/hashquote_dgd");
+        assert(ob == nullptr);
+    }
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/hashquote_ldmud.c", src);
+        auto ob = harness.objects.cloneObject("/hashquote_ldmud");
+        assert(ob != nullptr);
+
+        // Real closure semantics, not just "it parsed": "#'lower_case" is
+        // stored in f with no bound args, and funcall() supplies "ABC" at
+        // call time -- the exact same PushClosure/evaluate machinery
+        // "(: lower_case :)" already uses (see
+        // testFuncallIsAnAliasOfEvaluate just above), reached here through
+        // LDMud's own spelling of the identical concept instead.
+        amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+        assert(std::holds_alternative<std::string>(result.data));
+        assert(std::get<std::string>(result.data) == "abc");
+    }
+
+    std::cout << "testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly OK\n";
+}
+
 // --- Wand of Creation (mudlib/clone/wand_of_creation.c) -------------------
 // Reads the real, shipped file from disk rather than duplicating its
 // source here, so these tests exercise exactly what the live driver
@@ -18267,6 +18374,8 @@ int main() {
     testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect();
     testLexerNilKeywordOnlyRecognizedUnderDgdDialect();
     testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly();
+    testLexerHashQuoteClosureOnlyRecognizedUnderLdmudDialect();
+    testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly();
     testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld();
     testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld();
     testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject();
