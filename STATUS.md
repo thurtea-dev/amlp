@@ -3,6 +3,69 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): fixed the ctest-vs-direct-run discrepancy flagged
+last session instead of leaving it filed away -- `ctest` and a direct
+`build/test/amlp_tests` run now report the identical 623 passing, from any
+working directory (623 tests, unchanged, no test content added or removed).**
+
+Root cause: `readMudlibFile()` (`test/test_lexer.cpp`, added in `61b00ab`
+for the three `testWandOfCreation*` tests) tried a fixed list of
+CWD-relative bases (`"../mudlib"`, `"mudlib"`, `"./mudlib"`) to find the
+real, shipped `mudlib/clone/wand_of_creation.c`. That resolves correctly
+for a direct run from `build/` (where `"../mudlib"` reaches the real repo
+`mudlib/`) but not for a `ctest` run, whose own working directory for this
+target is `build/test/` -- none of the three bases resolve there, so
+`wandSrc` came back empty and `assert(!wandSrc.empty())` aborted the whole
+binary before any later test ran. This is exactly the discrepancy the
+prior session's own row 0.15 entry noted and explicitly left as
+out-of-scope filed-away detail -- picked back up and actually fixed this
+pass rather than staying that way.
+
+No other read-real-file convention existed anywhere else in the test
+suite to match -- `readMudlibFile()`'s own three-base search was the only
+prior attempt at this, and it was the thing that was broken, not a
+convention to preserve. Fixed by baking the absolute repo root in at
+CMake configure time (`test/CMakeLists.txt`, new
+`target_compile_definitions(amlp_tests PRIVATE
+AMLP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")`) and having `readMudlibFile()`
+resolve through that instead of any CWD-relative guesswork -- correct
+regardless of what directory the binary happens to be invoked from, not
+just the two specific ones (`build/`, `build/test/`) that exposed the
+original bug. Confirmed working from three different working directories
+directly (`build/`, `build/test/`, the repo root via `./build/test/
+amlp_tests`), plus `ctest` itself, all reporting the same 623 passing.
+
+Deliberately did not change `ctest`'s own `WORKING_DIRECTORY` property as
+a workaround (the task's own instruction, and the more correct fix
+regardless): that would only have converged these two specific invocation
+paths onto whichever one was chosen, still leaving the test's own file
+resolution CWD-dependent and therefore still fragile to a third invocation
+shape (a differently-configured `ctest` label filter, an IDE test runner,
+a packaged/relocated build directory). The `AMLP_SOURCE_DIR` fix makes the
+test correct on its own terms instead.
+
+**Separately, scoped (not executed) a mudlib rename/rebuild the user
+asked about:** current `mudlib/` is a genuine, historically load-bearing
+vendored copy of the real third-party Lil starter mudlib (confirmed via
+`mudlib/readme`'s own real upstream text, plus extensive `STATUS.md`
+history using it specifically as a real-world efun conformance corpus --
+"diffed `EfunTable.cpp`'s registered names against Lil's own real efun
+table", multiple sessions), not something authored by this project.
+Asked whether to rename it and build "our own version" bundled with the
+wand of creation. Surfaced that tradeoff directly rather than executing
+blind: user chose to preserve an untouched copy of the current `mudlib/`
+tree as vendored reference material first (this project's own existing
+`temp/<name>/` convention -- `temp/core-lib`, `temp/dead-souls`,
+`temp/lima`, `temp/nightmare3`, etc., all real vendored mudlib corpora,
+gitignored, cited but never modified -- so `temp/lil/` is the naming fit,
+not `temp/reference/`, which `CLAUDE.md` reserves for the vendored
+FluffOS *driver* source specifically), then rebuild `mudlib/` itself,
+under the new name "library", stripped down to a login room plus the
+already-built wand of creation and nothing else Lil shipped with unless
+explicitly kept. Timing: after current ROADMAP work settles, not this
+session -- concrete before/after file plan requested first, before
+anything moves. See `mudlib/LIBRARY_MUDLIB_PLAN.md` for that plan.
+
 **2026-08-18 (continued): row 1.7's `bind_lambda()` decision confirmed
 already on record (no change needed); Phase 1 scanned end to end for
 the next smallest actionable item -- none found, nothing implemented

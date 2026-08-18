@@ -17185,14 +17185,20 @@ static void testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectl
 // EfunTable the live driver uses, driven through VM::dispatchCommand()
 // exactly like Server.cpp's own real call site.
 namespace {
+// AMLP_SOURCE_DIR (test/CMakeLists.txt) is the absolute repo root, baked
+// in at configure time -- correct regardless of the process's own working
+// directory at run time. Previously tried a fixed list of CWD-relative
+// bases ("../mudlib", "mudlib", "./mudlib"), which happened to work for a
+// direct run from build/ but not for a ctest run (working directory
+// build/test/, where none of those three resolve) -- a real
+// ctest-vs-direct-run discrepancy in what "all tests pass" meant,
+// confirmed and fixed rather than left filed away.
 std::string readMudlibFile(const std::string& relPath) {
-    for (const char* base : {"../mudlib", "mudlib", "./mudlib"}) {
-        std::ifstream f(std::string(base) + relPath);
-        if (f) {
-            std::ostringstream buf;
-            buf << f.rdbuf();
-            return buf.str();
-        }
+    std::ifstream f(std::string(AMLP_SOURCE_DIR) + "/mudlib" + relPath);
+    if (f) {
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        return buf.str();
     }
     return std::string();
 }
