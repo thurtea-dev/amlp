@@ -942,6 +942,108 @@ int reclaimSweepValue(Value& v, int depth) {
     return 0;
 }
 
+// ROADMAP.md row 1.16's own real cross-cutting gap, confirmed by real
+// corpus evidence, not assumption: `temp/core-lib/secure/master/
+// security.c` (RealmsMUD, the one confirmed genuinely LDMud-targeting
+// mudlib this repo has) defines real, non-trivial `valid_read()`/
+// `valid_write()` master applies -- privilege checks, a per-user access
+// list, a real access-result cache -- backing its own automated security
+// test suite (`lib/tests/secure/securityTest.c`). Before this, this
+// driver gated **zero** of its 11 file-touching efuns with either
+// dialect's real apply at all, so every file operation from a real
+// mudlib's own code silently ran fully permissive regardless of what
+// `valid_read()`/`valid_write()` were actually written to enforce -- not
+// a "mudlib fails to run" gap the way `#'` closures or (initially
+// suspected, then ruled out) `parse_*` are, but a real, confirmed
+// security-and-test-suite-correctness one, affecting both dialects
+// equally (real FluffOS has the identical applies -- `applies.h`'s own
+// `APPLY_VALID_READ`(33)/`APPLY_VALID_WRITE`(38)).
+//
+// The two real dialects' own actual call conventions genuinely differ,
+// confirmed by reading both real sources directly, not assumed from the
+// shared apply names alone:
+// - Real FluffOS (`file.c`'s own `check_valid_path()`): three arguments,
+//   `(path, call_object, call_fun)` -- no uid concept at all.
+// - Real LDMud (`doc/master/valid_read`/`valid_write`'s own SYNOPSIS,
+//   already confirmed in an earlier session): four arguments, `(path,
+//   uid-or-0, func, ob)` -- confirmed directly matching core-lib's own
+//   real definition just cited, `valid_write(string path, string uid,
+//   string method, object caller)`, same four names, same order. Calling
+//   a real LDMud-shaped 4-parameter function with only 3 positional
+//   arguments would silently leave its own real `caller` parameter unset
+//   -- exactly the parameter core-lib's own real `isPriviledgedObject
+//   (caller)` check depends on -- so this driver's own bare-vs-privileged
+//   access distinction would never actually trigger for the one real
+//   confirmed consumer this whole row exists for. Genuinely dialect-
+//   gated here, not a single unified shape, the same discipline already
+//   established for `shadow()`/`snoop()`/`replace_program()`.
+//
+// "uid" under the LDMud shape: this driver has no real uid/euid
+// hierarchy at all (only a single `privs_` field, already on record --
+// see LpcObject::privs()'s own comment) -- the closest real analog is
+// the calling object's own `privs()`, passed through exactly the same
+// "unset reads as 0" contract `query_privs()` itself already uses, not a
+// faked-up uid string. A real, honestly-scoped approximation, not a
+// silently-pretended full uid/euid model.
+//
+// Real semantics for the *result*, matching `check_valid_path()`
+// exactly: the master not defining `valid_read`/`valid_write` at all
+// (this driver's own real "undefined function call returns void"
+// contract, distinct at the `Value` level from an explicit `int` `0` --
+// confirmed via `std::monostate` vs `int64_t{0}`, no separate sentinel
+// needed the way real FluffOS's own `-1` return is) is a real,
+// permissive default: every existing mudlib that never defined either
+// apply (this driver's own bundled "library" mudlib included) keeps
+// working completely unchanged. An explicit integer `0` return denies.
+// A string return replaces the path (`sanitizedPath`, matching
+// `check_valid_path()`'s own `path = v->u.string;` and core-lib's own
+// real `valid_write()` return value on success). Anything else (e.g. a
+// bare truthy `1`) allows with the original path unchanged, matching
+// `check_valid_path()`'s own final `else` branch. Deliberately does not
+// also replicate real `legal_path()`'s own separate `..`/`#`-character
+// sanity checks below `check_valid_path()` in the same real function --
+// a different, narrower concern (basic path-traversal hygiene, already
+// partly covered by this driver's own existing mudlib-root-relative path
+// resolution) than the master-apply gate this row is specifically about.
+std::optional<std::string> checkValidPath(VM& vm, const std::string& rawPath, bool writeFlag,
+                                           const std::string& funcName) {
+    // Same "not loaded yet" skip already established for privs
+    // (ObjectManager::initPrivsForObject()'s own comment: "Skipped...
+    // when master_ itself is not loaded yet -- this only matters for
+    // master.c's own bootstrap load") -- real boot always has a master
+    // loaded well before any mudlib file efun could plausibly run, so
+    // this is not a real-world gap, only a real one for this driver's
+    // own test harness (many existing tests construct a bare VM/
+    // ObjectManager with no master loaded at all) and any equally bare
+    // embedding. VM::applyMaster() itself throws hard when no master is
+    // loaded (a real, intentional guard for callers that *need* a real
+    // master) -- checked here first instead so a missing master reads
+    // as the same permissive default as a master that simply never
+    // defined valid_read/valid_write, not a new hard failure mode this
+    // row would otherwise introduce into every file efun at once.
+    if (!vm.masterObject()) return rawPath;
+
+    auto caller = vm.currentObject();
+    std::vector<Value> args;
+    if (vm.config().dialect() == "ldmud") {
+        Value uidArg = (caller && caller->privs()) ? Value(*caller->privs()) : Value{};
+        args = {Value(rawPath), uidArg, Value(funcName), Value(caller)};
+    } else {
+        args = {Value(rawPath), Value(caller), Value(funcName)};
+    }
+    Value result = vm.applyMaster(writeFlag ? "valid_write" : "valid_read", std::move(args));
+
+    if (std::holds_alternative<std::monostate>(result.data)) return rawPath;
+    if (auto* denied = std::get_if<int64_t>(&result.data)) {
+        if (*denied == 0) return std::nullopt;
+        return rawPath;
+    }
+    if (auto* rewritten = std::get_if<std::string>(&result.data)) {
+        return *rewritten;
+    }
+    return rawPath;
+}
+
 // Backs replace_program() below. Real search_inherited() (replace_program.c):
 // a depth-first walk of prog's own direct inherits, checking each one's
 // own name for a match *before* recursing into it (matching real code's
@@ -1789,7 +1891,9 @@ void registerCoreEfuns() {
         }
         if (numLines < 0) return Value(int64_t{0});
 
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), false, "read_file");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         struct stat st;
         if (::stat(path.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) {
             return Value(int64_t{0});
@@ -1835,7 +1939,9 @@ void registerCoreEfuns() {
         bool truncate = args.size() > 2 && std::holds_alternative<int64_t>(args[2].data) &&
                         std::get<int64_t>(args[2].data) == 1;
 
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), true, "write_file");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         std::ofstream f(path, truncate ? std::ios::trunc : std::ios::app);
         if (!f) return Value(int64_t{0});
         f << std::get<std::string>(args[1].data);
@@ -6145,8 +6251,10 @@ void registerCoreEfuns() {
                                    std::get<int64_t>(args[1].data) == 0)) {
             throw LpcRuntimeError("get_dir: flags argument not implemented");
         }
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
         auto result = std::make_shared<Array>();
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), false, "get_dir");
+        if (!gated) return Value(result);
+        std::string path = vm.resolveMudlibPath(*gated);
 
         size_t slash = path.find_last_of('/');
         std::string dirPart = slash == std::string::npos ? "." : path.substr(0, slash);
@@ -6194,7 +6302,9 @@ void registerCoreEfuns() {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("rm: expected a string path argument");
         }
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), true, "rm");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         return Value(static_cast<int64_t>(::remove(path.c_str()) == 0 ? 1 : 0));
     });
 
@@ -6206,7 +6316,9 @@ void registerCoreEfuns() {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("mkdir: expected a string path argument");
         }
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), true, "mkdir");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         return Value(static_cast<int64_t>(::mkdir(path.c_str(), 0755) == 0 ? 1 : 0));
     });
 
@@ -6263,7 +6375,9 @@ void registerCoreEfuns() {
         // (ofstream simply won't open) rather than silently landing
         // somewhere else -- callers that need the directory to exist
         // make it themselves first (account_d.c's own ensure_dirs()).
-        std::string path = vm.resolveMudlibPath(normalizeSavePath(std::get<std::string>(args[0].data)));
+        auto gated = checkValidPath(vm, normalizeSavePath(std::get<std::string>(args[0].data)), true, "save_object");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         std::ofstream f(path, std::ios::trunc);
         if (!f) return Value(int64_t{0});
 
@@ -6284,7 +6398,9 @@ void registerCoreEfuns() {
         auto obj = vm.currentObject();
         if (!obj) throw LpcRuntimeError("restore_object: no current object to restore into");
 
-        std::string path = vm.resolveMudlibPath(normalizeSavePath(std::get<std::string>(args[0].data)));
+        auto gated = checkValidPath(vm, normalizeSavePath(std::get<std::string>(args[0].data)), false, "restore_object");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         std::ifstream f(path);
         if (!f) return Value(int64_t{0});
 
@@ -6621,8 +6737,16 @@ void registerCoreEfuns() {
             !std::holds_alternative<std::string>(args[1].data)) {
             throw LpcRuntimeError("rename: expected two string arguments");
         }
-        std::string from = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
-        std::string to   = vm.resolveMudlibPath(std::get<std::string>(args[1].data));
+        // Real doc/master/valid_write's own list names both
+        // "rename_from"/"rename_to" as real func strings this one real
+        // efun gates with -- two separate checks, one per path, not one
+        // shared "rename" check.
+        auto gatedFrom = checkValidPath(vm, std::get<std::string>(args[0].data), true, "rename_from");
+        if (!gatedFrom) return Value(int64_t{1}); // real do_rename() failure value
+        auto gatedTo = checkValidPath(vm, std::get<std::string>(args[1].data), true, "rename_to");
+        if (!gatedTo) return Value(int64_t{1});
+        std::string from = vm.resolveMudlibPath(*gatedFrom);
+        std::string to   = vm.resolveMudlibPath(*gatedTo);
         // Real do_rename() returns 0 on success, 1 on failure.
         return Value(static_cast<int64_t>(::rename(from.c_str(), to.c_str()) == 0 ? 0 : 1));
     });
@@ -6634,7 +6758,9 @@ void registerCoreEfuns() {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("rmdir: expected a string path argument");
         }
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), true, "rmdir");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         return Value(static_cast<int64_t>(::rmdir(path.c_str()) == 0 ? 1 : 0));
     });
 
@@ -6683,7 +6809,9 @@ void registerCoreEfuns() {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("read_bytes: expected a string filename argument");
         }
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), false, "read_bytes");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         int64_t start = 0, len = 0;
         if (args.size() > 1 && std::holds_alternative<int64_t>(args[1].data)) {
             start = std::get<int64_t>(args[1].data);
@@ -6726,7 +6854,9 @@ void registerCoreEfuns() {
             !std::holds_alternative<std::string>(args[2].data)) {
             throw LpcRuntimeError("write_bytes: expected (string, int, string)");
         }
-        std::string path = vm.resolveMudlibPath(std::get<std::string>(args[0].data));
+        auto gated = checkValidPath(vm, std::get<std::string>(args[0].data), true, "write_bytes");
+        if (!gated) return Value(int64_t{0});
+        std::string path = vm.resolveMudlibPath(*gated);
         int64_t start = std::get<int64_t>(args[1].data);
         const std::string& data = std::get<std::string>(args[2].data);
 

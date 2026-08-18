@@ -3,6 +3,137 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): fresh self-assessment (closures/mapping-width/
+disconnect all now landed or ruled out) -- `valid_read`/`valid_write`
+implemented and wired into all 11 file efuns, real corpus evidence
+confirms `parse_*` is likely the single highest-impact item left but
+genuinely too large for a contained slice, stopped and reported rather
+than forced (634 tests, up from 631).**
+
+## Re-ranking
+
+Everything the last assessment flagged as open has moved: bare `#'name`
+and `#'efun::name` closures landed, `m_indices`/`m_values` landed,
+connect/disconnect confirmed zero real evidence. Re-read ROADMAP.md and
+STATUS.md fresh and gathered new evidence for what is actually left,
+same method as every prior pick this session cluster -- real corpus
+call-site counts, not assumption.
+
+**`parse_*` (row 0.13a), re-examined with fresh eyes rather than
+re-trusting the original scoping note's own framing:** the original note
+cited "66 combined call-site hits across the 8 names in the vendored
+mudlib corpora" as a flat number. Checked what those hits actually are
+this time: `temp/dead-souls` (a real, extremely common FluffOS mudlib
+base) calls `parse_sentence()` **directly from its own core command
+dispatch**, `lib/lib/command.c` -- not a peripheral feature, the verb-
+parsing machinery basic gameplay commands go through. Real rule shapes
+actually used (`grep`ped `SetRules(...)` call sites directly) are mostly
+simple -- bare, single `LIV`/`OBJ`/`OBS`/`STR` tokens, or a token plus a
+literal preposition word (`"for LIV"`, `"to LIV STR"`) -- but even the
+simplest real usage needs genuine new infrastructure this driver has
+none of: a rule-string tokenizer, a sentence tokenizer, and a real
+noun-phrase-to-object resolution engine (matching real `parser.c`'s own
+`is_living`/`inventory_accessible`/`inventory_visible` master-callback-
+driven object-scope model, confirmed by reading the real 3419-line
+source directly, not assumed from the file's own size alone). Unlike
+`#'efun::` (reused the exact existing `ClosureLiteralExpr`/`Closure`
+machinery) or `m_indices`/`m_values` (reused the exact existing
+`Mapping::entries` iteration), there is nothing to reuse here -- a
+minimal-but-real slice would still be substantial new ground-up work,
+not a contained one-session commitment. **Stopped and reported rather
+than forced**, per this project's own established discipline (`bind_lambda()`/
+mapping width/DGD `atomic` all got the same treatment when the real
+scope turned out bigger than a normal batch item) -- `parse_*` stays
+exactly as unimplemented as before, now with a much sharper, corpus-
+confirmed understanding of just how high-impact it actually is whenever
+it does get picked up as its own explicit go-ahead.
+
+**`valid_read`/`valid_write` (row 1.16), the item this task explicitly
+flagged as one real candidate:** confirmed genuine, load-bearing real
+usage -- `temp/core-lib/secure/master/security.c` (RealmsMUD, the one
+confirmed genuinely LDMud-targeting corpus this repo has) defines real
+`valid_read()`/`valid_write()` with real privilege checks and a real
+access cache, backing its own automated `lib/tests/secure/
+securityTest.c`. Cross-cutting (both dialects share the real applies,
+confirmed directly against both real sources), well-bounded (a single
+shared gate helper plus wiring into 11 already-implemented file efuns,
+no new infrastructure needed), and genuinely achievable as a real,
+complete implementation in one session -- picked as the actual build,
+with `parse_*`'s own real scope reported honestly instead of forced into
+this slot.
+
+## What was built
+
+**`checkValidPath()`** (`EfunTable.cpp`, new): the shared gate behind
+both applies. Genuinely dialect-gated, not one unified shape, after
+reading both real call conventions directly rather than assuming they
+match just because the apply names do:
+- Real FluffOS (`file.c`'s own `check_valid_path()`): 3 args, `(path,
+  call_object, call_fun)` -- no uid concept at all.
+- Real LDMud (`doc/master/valid_read`/`valid_write`'s own SYNOPSIS,
+  confirmed matching core-lib's own real `valid_write(string path,
+  string uid, string method, object caller)` definition exactly, same
+  four names and order): 4 args, `(path, uid-or-0, func, ob)`.
+
+"uid" under the LDMud shape maps to the calling object's own `privs()`
+-- this driver's real closest analog (it has no uid/euid hierarchy at
+all, already on record), not a faked-up model. Real result semantics
+matched precisely: master not defining either apply at all is a
+permissive default (this driver's own real "undefined function returns
+void" contract, distinct from an explicit `int` `0` via the
+`std::monostate`/`int64_t` `Value` distinction already available for
+free) -- every existing mudlib that never defined either keeps working
+completely unchanged; explicit `0` denies; a string return rewrites the
+path; anything else allows with the original path.
+
+Wired into all 11 already-confirmed file efuns: `read_file`,
+`write_file`, `get_dir`, `rm`, `mkdir`, `save_object`, `restore_object`,
+`rename` (two checks, `rename_from`/`rename_to`, matching real doc's own
+two-name list), `rmdir`, `read_bytes`, `write_bytes`.
+
+**One real regression caught before landing, not after:** `checkValidPath()`
+initially called `VM::applyMaster()` directly, which throws hard when no
+master object is loaded at all -- a real, common case in this driver's
+own test harness (most existing file-efun tests never load one). Running
+the full suite after the first pass dropped from 631 to 148 passing,
+immediately surfacing it. Fixed by treating "no master loaded" as the
+same permissive default as "master loaded but does not define the
+apply", not a new failure mode this row would otherwise have introduced
+into every file efun at once -- confirmed back to the full count
+afterward.
+
+**4 new regression tests:** deny (write genuinely never happens, file
+never created), path rewrite (write lands at the master's own rewritten
+path, not the literal one), and the real per-dialect argument shape --
+a master function that captures and echoes back exactly what it
+received, confirming both the FluffOS 3-arg shape and the LDMud 4-arg
+shape (including the real `privs()`-as-uid mapping) end to end.
+
+**Verified live against the real running driver, real bundled `mudlib/`
+-- with a genuinely interesting discovery along the way:** `mudlib/
+inherit/master/valid.c` (inherited from stock Lil, carried through the
+earlier library-mudlib rebuild) already defines real `valid_write()`/
+`valid_read()`, unconditionally `return 1;` -- meaning this row's own
+fix newly makes them actually *fire* for the first time (they were dead
+code before, never called by anything), with zero behavior change for
+the shipped mudlib's own already-permissive default. Temporarily edited
+that same real file to selectively deny one specific test path (matching
+this project's own established "temporary test hook, removed after"
+precedent -- STATUS-ARCHIVE.md's own `cmd_zerotest`/`cmd_userptest`
+history), confirmed live via `eval`: `write_file()` to the denied path
+returns `0`, and `file_size()` on that same path returns `-1` -- the
+write genuinely never happened on disk, not just a fake return value.
+Also confirmed `eval` itself keeps working throughout (its own internal
+`write_file()` for `/tmp_eval_file.c` is a different, allowed path) --
+an early, blunter version of this test (`valid_write()` unconditionally
+denying everything) caught `eval.c`'s own internal write too, confirming
+the gate is genuinely comprehensive, not narrowly scoped to "mudlib
+code, not driver internals". Reverted the file to its exact original
+state afterward (`git diff` empty). A final live pass then confirmed the
+real, unmodified mudlib's own `create`/`purge` (wand of creation,
+`write_file()`-based) and `m_indices()` (last session's own work) both
+still work normally end to end.
+
 **2026-08-18 (continued): ran down the crash flagged last session --
 real bug found and fixed (an uncaught dispatch error never fired
 `net_dead()`, unlike ordinary link death), but the "took the whole

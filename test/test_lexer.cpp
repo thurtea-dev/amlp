@@ -3962,6 +3962,141 @@ static void testWriteFileThenReadFileRoundTrips() {
     std::cout << "testWriteFileThenReadFileRoundTrips OK\n";
 }
 
+// ROADMAP.md row 1.16's own real cross-cutting gap, confirmed by real
+// corpus evidence (see EfunTable.cpp's own checkValidPath() comment for
+// the full citation and dialect-shape derivation). The permissive
+// default when no master defines either apply is already exercised
+// continuously by testWriteFileThenReadFileRoundTrips just above (and
+// every other pre-existing file-efun test -- none of them load a master
+// object at all), so not repeated as its own test here; these three
+// cover the actual new behavior: deny, path rewrite, and the real
+// per-dialect argument shape.
+
+static void testValidWriteDeniesFileEfunWhenMasterExplicitlyReturnsZero() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_write(string path, mixed ob, string func) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/vw_deny_caller.c",
+        "int probe() { return write_file(\"/vw_deny_target.txt\", \"hello\"); }\n");
+    auto caller = harness.objects.cloneObject("/vw_deny_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::ifstream check(harness.tempDir + "/vw_deny_target.txt");
+    assert(!check.good()); // genuinely never created
+
+    std::cout << "testValidWriteDeniesFileEfunWhenMasterExplicitlyReturnsZero OK\n";
+}
+
+static void testValidWriteRewritesPathWhenMasterReturnsAString() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "string valid_write(string path, mixed ob, string func) { return \"/vw_redirected.txt\"; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/vw_rewrite_caller.c",
+        "int probe() { return write_file(\"/vw_original.txt\", \"hi\"); }\n");
+    auto caller = harness.objects.cloneObject("/vw_rewrite_caller");
+    assert(caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "probe", {});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    std::ifstream originalCheck(harness.tempDir + "/vw_original.txt");
+    assert(!originalCheck.good()); // never written to the literal path
+    std::ifstream redirectedCheck(harness.tempDir + "/vw_redirected.txt");
+    assert(redirectedCheck.good()); // written to the master's own rewritten path instead
+
+    std::cout << "testValidWriteRewritesPathWhenMasterReturnsAString OK\n";
+}
+
+static void testValidWriteReceivesRealArgumentShapePerDialect() {
+    // FluffOS (default): 3 args, (path, call_object, call_fun) -- no uid
+    // at all, confirmed against real file.c's own check_valid_path().
+    {
+        ObjectVarHarness harness;
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "mixed capturedOb;\n"
+            "string capturedFunc;\n"
+            "int valid_write(string path, mixed ob, string func) {\n"
+            "    capturedOb = ob;\n"
+            "    capturedFunc = func;\n"
+            "    return 1;\n"
+            "}\n"
+            "mixed query_captured_ob() { return capturedOb; }\n"
+            "string query_captured_func() { return capturedFunc; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        harness.writeFile("/vw_shape_fluffos.c",
+            "int probe() { return write_file(\"/vw_shape_f.txt\", \"x\"); }\n");
+        auto caller = harness.objects.cloneObject("/vw_shape_fluffos");
+        assert(caller != nullptr);
+        harness.vm.callFunction(caller, "probe", {});
+
+        auto master = harness.objects.masterObject();
+        amlp::Value ob = harness.vm.callFunction(master, "query_captured_ob", {});
+        assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(ob.data));
+        assert(std::get<std::shared_ptr<amlp::LpcObject>>(ob.data) == caller);
+        amlp::Value func = harness.vm.callFunction(master, "query_captured_func", {});
+        assert(std::holds_alternative<std::string>(func.data));
+        assert(std::get<std::string>(func.data) == "write_file");
+    }
+
+    // LDMud: 4 args, (path, uid-or-0, func, ob) -- confirmed against
+    // doc/master/valid_write's own real SYNOPSIS and core-lib's own real
+    // valid_write(string path, string uid, string method, object caller)
+    // definition, same names, same order. "uid" here is the calling
+    // object's own privs() (this driver's closest real analog to a real
+    // uid/euid hierarchy, see checkValidPath()'s own comment).
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "mixed capturedUid;\n"
+            "mixed capturedOb;\n"
+            "string capturedFunc;\n"
+            "int valid_write(string path, mixed uid, string func, mixed ob) {\n"
+            "    capturedUid = uid;\n"
+            "    capturedOb = ob;\n"
+            "    capturedFunc = func;\n"
+            "    return 1;\n"
+            "}\n"
+            "mixed query_captured_uid() { return capturedUid; }\n"
+            "mixed query_captured_ob() { return capturedOb; }\n"
+            "string query_captured_func() { return capturedFunc; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        harness.writeFile("/vw_shape_ldmud.c",
+            "int probe() { return write_file(\"/vw_shape_l.txt\", \"y\"); }\n");
+        auto caller = harness.objects.cloneObject("/vw_shape_ldmud");
+        assert(caller != nullptr);
+        caller->setPrivs(std::string("TestPriv"));
+        harness.vm.callFunction(caller, "probe", {});
+
+        auto master = harness.objects.masterObject();
+        amlp::Value uid = harness.vm.callFunction(master, "query_captured_uid", {});
+        assert(std::holds_alternative<std::string>(uid.data));
+        assert(std::get<std::string>(uid.data) == "TestPriv");
+        amlp::Value ob = harness.vm.callFunction(master, "query_captured_ob", {});
+        assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(ob.data));
+        assert(std::get<std::shared_ptr<amlp::LpcObject>>(ob.data) == caller);
+        amlp::Value func = harness.vm.callFunction(master, "query_captured_func", {});
+        assert(std::holds_alternative<std::string>(func.data));
+        assert(std::get<std::string>(func.data) == "write_file");
+    }
+
+    std::cout << "testValidWriteReceivesRealArgumentShapePerDialect OK\n";
+}
+
 static void testCreateRuntimeErrorFailsLoadInsteadOfCrashing() {
     ObjectVarHarness harness;
 
@@ -18165,6 +18300,9 @@ int main() {
     testNullStatementAsLoopBodyParsesAndExecutesAsNoOp();
     testReadFileReturnsFileContentAndFalsyForMissingFile();
     testWriteFileThenReadFileRoundTrips();
+    testValidWriteDeniesFileEfunWhenMasterExplicitlyReturnsZero();
+    testValidWriteRewritesPathWhenMasterReturnsAString();
+    testValidWriteReceivesRealArgumentShapePerDialect();
     testCreateRuntimeErrorFailsLoadInsteadOfCrashing();
     testAbsoluteIncludePathResolvesAgainstMudlibRoot();
     testCppWarningsDoNotFailPreprocessing();
