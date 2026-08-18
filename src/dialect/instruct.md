@@ -61,7 +61,23 @@ LDMud apply names - all of the above, plus:
   line: "Introduced in 3.2.1@40 replacing get_root_uid()." This clone is
   3.6.8, many releases past that rename), `"get_bb_uid"`, `"valid_read"`,
   `"valid_write"`, `"make_path_absolute"`, `"query_allow_shadow"` (master-
-  side shadow gate - confirmed real and correctly named already)
+  side shadow gate - confirmed real and correctly named already,
+  implemented 2026-08-17, row 1.5)
+  **2026-08-18, all three of the remaining names investigated in full,
+  none small enough to implement this pass -- see ROADMAP.md row 1.16 for
+  the complete citations:** `get_bb_uid` is genuinely dead in this exact
+  vendored 3.6.8 driver - grepped `STR_GET_BB_UID` across every real `.c`/
+  `.h` file, zero call sites; `doc/master/get_bb_uid`'s own claim that
+  `process_string()` calls it does not match `f_process_string()`'s/
+  `process_value()`'s actual C, read in full. `make_path_absolute` has
+  exactly one real call site, `ed.c`'s own line-editor filename
+  resolution - blocked on this driver having no `ed()` efun at all
+  (already excluded, `src/efun/instruct.md`). `valid_read`/`valid_write`
+  turned out not LDMud-specific at all - FluffOS has the identical real
+  applies (`fluffos-2.9-ds2.08/applies.h`'s own `APPLY_VALID_READ`/
+  `APPLY_VALID_WRITE`), and this driver gates none of its 11 existing
+  file efuns with either dialect's version yet; a whole missing
+  cross-cutting feature, sized like `parse_*`, not a signature divergence.
 - `"valid_snoop"`, `"valid_query_snoop"` - real LDMud master applies
   (`doc/master/valid_snoop`, `doc/master/valid_query_snoop`), not previously
   documented anywhere in this repo. Directly relevant: Phase 0's own snoop

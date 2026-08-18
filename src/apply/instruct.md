@@ -178,9 +178,42 @@ changes made):
     own HISTORY: "Introduced in 3.2.1@40 replacing get_root_uid()."); this
     clone is 3.6.8, many releases past that rename, and `get_root_uid` no
     longer exists.
-- `"get_bb_uid"` - returns the backbone (fallback) UID
-- `"valid_read"` / `"valid_write"` - path-level filesystem permission checks
-- `"make_path_absolute"` - resolve a relative path
+- `"get_bb_uid"` - returns the backbone (fallback) UID.
+  **Investigated 2026-08-18, not implementable against anything real in
+  this exact vendored driver:** `doc/master/get_bb_uid` claims
+  `process_string()` calls it when there is no current object, but
+  `temp/ldmud/src/efuns.c`'s own `f_process_string()`/`process_value()`,
+  read in full, make no such call at all. Grepped the generated constant
+  `STR_GET_BB_UID` across every real `.c`/`.h` file in `temp/ldmud/src`:
+  zero call sites anywhere in the driver -- the name appears only in the
+  string-table declaration and in `applied_spec` (a compile-time
+  type-check spec for the compiler, not a call-site generator, confirmed
+  by that file's own header comment). Dead scaffolding in this exact
+  build, the doc is stale, the C is authoritative. See ROADMAP.md row
+  1.16.
+- `"valid_read"` / `"valid_write"` - path-level filesystem permission
+  checks. **Investigated 2026-08-18:** not LDMud-specific at all -- real
+  FluffOS has the identical applies (`fluffos-2.9-ds2.08/applies.h`'s own
+  `APPLY_VALID_READ`(33)/`APPLY_VALID_WRITE`(38)) and this driver
+  currently gates none of its 11 existing file efuns with either
+  dialect's version. `temp/ldmud/src/simulate.c`'s own
+  `check_valid_path()`, read in full, confirmed one shared function
+  behind both applies (`apply_master(STR_VALID_WRITE/READ, 4)`, args
+  `path, uid-or-0, func, ob`, matching `doc/master/valid_read`/
+  `valid_write`'s own SYNOPSIS exactly) called from every file-touching
+  efun this driver already has. A whole missing cross-cutting security
+  feature for both dialects at once -- a new shared path-check helper
+  plus wiring into 11+ call sites -- not a single-efun signature
+  divergence; recommended as its own future row rather than staying
+  folded into 1.16. See ROADMAP.md row 1.16 for the full citation.
+- `"make_path_absolute"` - resolve a relative path. **Investigated
+  2026-08-18:** exactly one real call site in the whole driver,
+  `temp/ldmud/src/ed.c:1128`, inside the built-in line editor's own
+  relative-filename resolution -- blocked on this driver having no
+  `ed()` efun at all (already excluded elsewhere, see
+  `src/efun/instruct.md`'s own "`get_char`/`ed`/`origin`/`resolve`" note).
+  No other real caller to model against until `ed()` itself exists. See
+  ROADMAP.md row 1.16.
 - `"query_allow_shadow"` - master-side shadow permission check (see
   `src/object`), confirmed real and correctly named. Real LDMud shadow
   permission is two-layered, though: this master apply is only the second
