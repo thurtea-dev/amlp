@@ -73,6 +73,17 @@ enum class OpCode : uint8_t {
     // Call/CallEfun; no trailing data instruction needed since a
     // closure literal, unlike CallParent, has nothing else to encode).
     PushClosure,
+    // LDMud's own "#'efun::name" closure-literal prefix (ROADMAP.md row
+    // 1.2/1.3's own real corpus-frequency-ranked slice after bare
+    // "#'name" -- see Parser.cpp's own comment on ClosureLiteralExpr::
+    // forceEfun for the real doc citation). Identical shape to
+    // PushClosure (same operand/argCount meaning), a distinct opcode
+    // purely so VM::run() can construct a Closure whose own callClosure()
+    // resolution skips straight to the efun table, exactly the same
+    // Call/CallEfun split CodeGen.cpp's own forceEfun comment already
+    // documents for ordinary calls -- not a new Closure *kind*, just a
+    // forced resolution tier on the same underlying value shape.
+    PushEfunClosure,
     CallApply,
     MakeArray,
     MakeMapping,

@@ -145,6 +145,17 @@ struct Closure {
     // of whatever is already on the stack from the call site, not
     // appended after.
     std::vector<Value> boundArgs;
+    // LDMud's own "#'efun::name" closure-literal prefix ("closure to an
+    // efun", temp/ldmud/doc/LPC/closures's own real citation) -- when
+    // true, VM::callClosure() skips the normal tiered lfun/inherited ->
+    // simul_efun -> efun lookup and resolves functionName against the
+    // core efun table only, matching real LDMud semantics exactly:
+    // "#'efun::foo" is a closure to *the* efun foo, not whatever
+    // lfun/simul_efun of the same name this object might otherwise
+    // shadow it with. False for every other closure kind this driver
+    // constructs (both "(: name :)" and bare "#'name"), which keep the
+    // existing tiered resolution unchanged.
+    bool forceEfun = false;
 };
 
 } // namespace amlp

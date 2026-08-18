@@ -3,6 +3,152 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): `#'efun::name` scope-prefixed closure literal
+implemented and live-verified -- ranked by real corpus-frequency search
+across every vendored mudlib this repo has, the same method row 0.13's
+efun gaps used, not by grammar size (627 tests, up from 625).**
+
+## Ranking methodology and result
+
+Row 1.2/1.3's own deliberately-uncovered list had four remaining `#'`
+forms: operator spellings (`#'+`, `#'==`, ...), index forms (`#'[`),
+aggregate closures (`#'({`), and scope prefixes (`#'efun::`, etc.).
+Searched every corpus this repo actually has for real occurrences of
+each -- the already-extracted directories directly (`temp/core-lib`,
+`temp/dead-souls`, `temp/es2_mudlib`, `temp/lima`, `temp/nightmare3`,
+`temp/mudlib`, `temp/lil`, `temp/wiz_tools`), and the newer archives via
+`unzip -p`/`tar -xzO` piped straight into a search, never writing
+anything new to disk (`ds3.9.zip`, `dsI.zip`, `dsIIr10.zip`,
+`final_realms_fluffos_v1.zip`, `lpuni_fluffos_v1.zip`,
+`merentha_fluffos_v2.zip`, `skylib_fluffos_v3.zip`,
+`tmi2_fluffos_v3.zip`, `gurba-0.42-beta2.tar.gz`).
+
+**A real methodology correction along the way, not just a result:** a
+naive `grep "#'"` first returned 220 hits in `core-lib` alone, including
+what looked like 24 real operator-spelling occurrences. All 24 turned
+out to be one false positive repeated across files: a string literal
+templating placeholder, `'##CompositeSegment##'`, whose own trailing
+`##'` textually matches `#'` with no relation to closure syntax at all.
+A second, much larger false-positive class surfaced the same way:
+`##Name##'s` (this mudlib's own template-placeholder convention followed
+by a plain English possessive apostrophe-s, e.g. `##InitiatorName##'s
+weapon`) dropped `core-lib`'s own apparent bare-name count from 195 to
+33 once excluded. A third, smaller one: `lima`'s only apparent hit was
+literally the English abbreviation "the line #'s you want to move" (line
+*number's*), not code at all. Every one of these was caught by requiring
+the character immediately before `#` to be a real code-context character
+(whitespace, `(`, `,`, `=`, `;`, `{`, `[`, or a real operator character)
+rather than trusting a bare substring match -- confirmed by reading
+actual matched context for every category, not assumed from the raw
+count. `tmi2_fluffos_v3.zip` and `gurba-0.42-beta2.tar.gz` were spot-
+checked directly too (both correctly returned zero after filtering,
+`tmi2`'s own only apparent hit being the identical "#'s" = "number's"
+false positive) -- confirming, not just assuming, that FluffOS-family
+and DGD-family archives structurally cannot contain real LDMud-specific
+`#'` syntax at all, which none of the newer archives named for this
+search turned out to be (`ds3.9`/`dsI`/`dsIIr10` bundle FluffOS-family
+"ds"-patchlevel driver source per the prior inventory session, same for
+Final Realms/LPUniversity/Merentha/Skylib/TMI-2; Gurbalib is DGD-based).
+**One real corpus mismatch worth naming directly:** the task named
+"genesismud" as one corpus to check -- no such directory or archive
+exists anywhere under `temp/`, confirmed by `find`, not silently assumed
+absent.
+
+**Real result after filtering:** operator spellings, index forms, and
+aggregate closures -- zero confirmed real occurrences anywhere in the
+entire searched corpus. Scope prefixes -- exactly one, `temp/core-lib/
+secure/simulated-efuns/testing.c`'s own `apply(#'efun::call_out,method,
+delay,data)`. Thin evidence in absolute terms (only `core-lib` is
+confirmed genuinely LDMud-targeting among everything currently under
+`temp/`), but a real, non-tied result: scope prefixes is the only one of
+the four with any confirmed usage at all, so it is the real pick under
+the row 0.13 frequency-ranking method, not a coin flip presented as one.
+
+## Real LDMud semantics, read before implementing
+
+`temp/ldmud/doc/LPC/closures`'s own citation: "Closure literals can have
+prefixes to specify which type of closure shall be created:
+`#'efun::function_name`: closure to an efun, `#'sefun::function_name`:
+closure to a simul-efun, `#'lfun::function_name`: closure to an lfun,
+`#'var::variable_name`: closure to a global variable. Inherited programs
+can be given as prefixes, too." This splits into two genuinely different
+implementation shapes, not one uniform feature: `efun::`/`sefun::`/
+`lfun::` are all still ordinary function closures, just with an explicit
+forced resolution tier -- the exact same underlying `Closure`/
+`ClosureLiteralExpr` shape bare `#'name` already uses, just one added
+bool. `var::` is a structurally different closure *kind* entirely -- a
+reference to a variable, not a callable at all (real LDMud's own
+`CLOSURE_IDENTIFIER`, already on record from row 1.7's own `bind_lambda()`
+investigation as one of several distinct closure kinds this driver has no
+model of). Inherited-program prefixes need real inherit-name resolution
+this scoping pass never touched either.
+
+Scoped to exactly the one form with confirmed real evidence: `efun::`
+alone. `sefun::`/`lfun::` (zero corpus evidence, and would each need
+their own distinct forced-tier plumbing -- resolving against the
+simul_efun object specifically, or this object's own local functions
+only, neither the same check as `efun::`'s) and `var::`/inherited-program
+prefixes (zero evidence, and `var::` alone is a materially bigger
+feature) stay deliberately unimplemented. A bare `#'sefun`/`#'lfun` today
+parses as an honest bare-name closure literal naming a function literally
+called that, with the trailing `::name` left as a genuine parse error --
+not a silent misparse, the same acceptable failure shape `atomic`/`nil`
+already established under the "wrong" dialects.
+
+## What was built
+
+**`Closure::forceEfun`/`ClosureLiteralExpr::forceEfun`** (`Value.hpp`/
+`Ast.hpp`): one new bool field on each, default false, changing nothing
+for any closure this driver already builds (`(: name :)`, bare `#'name`,
+inline lambdas).
+
+**`PushEfunClosure`** (`Bytecode.hpp`, `CodeGen.cpp`, `VM.cpp`): a new
+opcode, identical operand/argCount shape to the existing `PushClosure`,
+built purely so a closure literal can pick which VM.cpp handler
+constructs it -- the exact same `Call`/`CallEfun` split `CodeGen.cpp`'s
+own `forceEfun` comment already documents for ordinary calls, applied to
+closure literals instead of call expressions.
+
+**`VM::callClosure()`**: one new check at the very top of its own
+resolution, before either tiered lookup runs -- when `forceEfun` is set,
+skip straight to the core efun table, throwing "undefined efun" if the
+name is not one, rather than ever giving this object's own lfun/inherited
+or simul_efun tier a chance to win first.
+
+**`Parser.cpp`**: recognized right after `#'` is consumed -- `efun`
+immediately followed by `::` takes the new path (consume both, read the
+real function name, set `forceEfun = true`); anything else falls through
+to the existing bare-name case unchanged. Zero Lexer changes needed at
+all: "efun" is not a reserved keyword in this driver (confirmed, matching
+the existing ordinary `efun::name(...)` call syntax's own comment on the
+exact same point) and "`::`" already lexes as an existing Symbol token,
+so both pieces `#'efun::name` needs were already tokenizable before this
+session touched anything.
+
+**2 new regression tests.** `testHashQuoteEfunPrefixParsesToClosureLiteralExprWithForceEfun`
+confirms the AST shape directly. `testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm`
+proves the real semantic this feature exists for, not just that it
+parses: a local function literally named `lower_case` (shadowing the
+real efun) defined in the same test object, then `funcall(#'lower_case,
+...)` resolving to the local override (`"SHADOWED:ABC"`) while
+`funcall(#'efun::lower_case, ...)` bypasses it and reaches the real efun
+(`"abc"`) -- the two closure forms genuinely resolving to two different
+targets from the exact same object.
+
+**Verified live against the real running driver**, real bundled
+`mudlib/`, `dialect: ldmud`: four separate `eval` expressions in one
+session -- `funcall(#'efun::lower_case, "HELLO WORLD")` returns `"hello
+world"`; `mixed f = #'efun::upper_case; return funcall(f, "hi there")`
+returns `"HI THERE"` (stored in a variable before calling); `capitalize(
+funcall(#'efun::lower_case, "YES"))` returns `"Yes"` (composed with
+another efun); `funcall(#'efun::sizeof, ({1,2,3}))` returns `3` (an
+array argument, not just strings). Clean boot, no errors. Same scratch
+`dialect: ldmud` config as last session's bare-`#'name` verification,
+still living only in the scratchpad, not staged.
+
+ROADMAP.md row 1.3 updated with the full implementation record. Test
+count footer updated (623 to 627 across this session's two `#'` slices).
+
 **2026-08-18 (continued): self-assessment against the real 6-12 month
 goal, picked LDMud `#'name` closures as the next real multi-session
 commitment, implemented and live-verified a real first slice this same

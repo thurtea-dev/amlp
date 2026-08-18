@@ -804,6 +804,21 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
     for (const auto& a : closure->boundArgs) args.push_back(a);
     for (auto& a : extraArgs) args.push_back(std::move(a));
 
+    // "#'efun::name" (Closure::forceEfun) -- real LDMud semantics skip
+    // straight to the core efun table, deliberately bypassing this
+    // object's own lfun/inherited and simul_efun tiers even if either
+    // happens to define a same-named function that would otherwise
+    // shadow it (temp/ldmud/doc/LPC/closures's own real citation: "closure
+    // to an efun"). Checked before either tiered lookup below, not after,
+    // so a same-named lfun/simul_efun never gets a chance to win first.
+    if (closure->forceEfun) {
+        if (!EfunTable::instance().exists(closure->functionName)) {
+            throw LpcRuntimeError("evaluate(): undefined efun: " + closure->functionName);
+        }
+        ObjectFrameGuard objectFrameGuard(callStack_, objectChangeStack_, owner);
+        return EfunTable::instance().call(closure->functionName, *this, args);
+    }
+
     FunctionLookupResult found = findFunctionInChain(owner->program(), closure->functionName);
     if (found.program) {
         // Real call_function_pointer()'s own real split (function.c):
@@ -2039,6 +2054,36 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 auto closure = std::make_shared<Closure>();
                 closure->owner = obj; // weak_ptr from shared_ptr, real current_object at bind time
                 closure->functionName = funcName;
+                closure->boundArgs.assign(localStack.end() - argc, localStack.end());
+                localStack.erase(localStack.end() - argc, localStack.end());
+
+                localStack.push_back(Value(closure));
+                ++ip;
+                break;
+            }
+
+            case OpCode::PushEfunClosure: {
+                // Identical construction to PushClosure just above except
+                // for the one flag that actually matters -- see
+                // Bytecode.hpp's own PushEfunClosure comment and Value.hpp's
+                // Closure::forceEfun for why this needs its own opcode
+                // rather than an extra branch inside the PushClosure case:
+                // same operand/argCount shape, same real precedent as the
+                // existing Call/CallEfun split.
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("PushEfunClosure: bad function name index");
+                }
+                const std::string& funcName = program.stringPool[instr.operand];
+
+                int argc = instr.argCount;
+                if (argc < 0 || static_cast<size_t>(argc) > localStack.size()) {
+                    throw LpcRuntimeError("PushEfunClosure: bad bound-arg count for " + funcName);
+                }
+                auto closure = std::make_shared<Closure>();
+                closure->owner = obj;
+                closure->functionName = funcName;
+                closure->forceEfun = true;
                 closure->boundArgs.assign(localStack.end() - argc, localStack.end());
                 localStack.erase(localStack.end() - argc, localStack.end());
 

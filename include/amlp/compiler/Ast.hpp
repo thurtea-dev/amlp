@@ -153,6 +153,12 @@ struct CatchExpr : AstNode {
 struct ClosureLiteralExpr : AstNode {
     std::string functionName;
     std::vector<AstPtr> boundArgs;
+    // LDMud's own "#'efun::name" prefix (see Value.hpp's Closure::
+    // forceEfun for the full real-source citation) -- only ever set true
+    // by Parser.cpp's own "#'efun::" recognition; every other closure
+    // literal this driver parses ("(: name :)" and bare "#'name") leaves
+    // it at the default false, unchanged resolution.
+    bool forceEfun = false;
 };
 
 // "(: comma_expr :)" -- the general "inline lambda" closure literal

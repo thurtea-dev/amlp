@@ -224,6 +224,46 @@ AstPtr Parser::parsePrimary() {
     // gate to hold forever.
     if (checkText("#'") && dialect_ == LpcDialect::LdMud) {
         advance(); // #'
+
+        // "#'efun::name" -- one of LDMud's own real closure-literal scope
+        // prefixes (temp/ldmud/doc/LPC/closures: "Closure literals can
+        // have prefixes to specify which type of closure shall be
+        // created: #'efun::function_name: closure to an efun,
+        // #'sefun::function_name: closure to a simul-efun, #'lfun::
+        // function_name: closure to an lfun, #'var::variable_name:
+        // closure to a global variable. Inherited programs can be given
+        // as prefixes, too."). Picked for this slice over the other three
+        // (deliberately still not covered: sefun::/lfun:: tier-forcing,
+        // var:: -- a genuinely different closure *kind*, a reference to a
+        // variable rather than a callable at all, not just a resolution-
+        // tier hint on the same shape -- and inherited-program prefixes)
+        // by real corpus-frequency ranking across every vendored mudlib
+        // this repo has, not by size: efun:: was the *only* scope prefix
+        // with any confirmed real occurrence anywhere in that search
+        // (`temp/core-lib/secure/simulated-efuns/testing.c`'s own
+        // "apply(#'efun::call_out,method,delay,data)"), and the operator-
+        // spelling/index-form/aggregate-closure forms had zero confirmed
+        // occurrences anywhere at all -- see this session's own STATUS.md
+        // entry for the full ranking and methodology. Recognized the same
+        // way ordinary "efun::name(...)" calls already are just below in
+        // this file (by literal text plus the following "::", not a
+        // reserved keyword -- "efun" is not reserved, so there is no
+        // ambiguity with a real function or object variable of that
+        // name): only advances past "efun::" when both tokens actually
+        // match, so a bare "#'efun" with no "::" following it correctly
+        // falls through to the plain bare-name case below instead
+        // (naming a real function literally called "efun", however
+        // unlikely).
+        if (check(TokenType::Ident) && peek().text == "efun" && peekAt(1).text == "::") {
+            advance(); // efun
+            advance(); // ::
+            Token nameTok = expect(TokenType::Ident, "closure literal function name after #'efun::");
+            auto closure = std::make_unique<ClosureLiteralExpr>();
+            closure->functionName = nameTok.text;
+            closure->forceEfun = true;
+            return closure;
+        }
+
         Token nameTok = expect(TokenType::Ident, "closure literal function name after #'");
         auto closure = std::make_unique<ClosureLiteralExpr>();
         closure->functionName = nameTok.text;

@@ -17282,6 +17282,72 @@ static void testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluates
     std::cout << "testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly OK\n";
 }
 
+// ROADMAP.md row 1.2/1.3's own next real corpus-frequency-ranked slice
+// after bare "#'name": LDMud's own "#'efun::name" scope-prefixed closure
+// literal (temp/ldmud/doc/LPC/closures's own real citation: "closure to
+// an efun"), picked over the other three deliberately-uncovered forms
+// (operator spellings, #'[ index forms, #'({ aggregates) because it was
+// the *only* one with any confirmed real occurrence anywhere across this
+// repo's full vendored corpus search -- see this session's own STATUS.md
+// entry for the full ranking. See Parser.cpp's own comment at the
+// "#'efun::" recognition site for the full citation and scoping
+// (sefun::/lfun:: tier-forcing and var:: -- a genuinely different closure
+// kind, not just a resolution-tier hint -- deliberately still not
+// covered).
+static void testHashQuoteEfunPrefixParsesToClosureLiteralExprWithForceEfun() {
+    amlp::Lexer lexer("mixed probe() { return #'efun::lower_case; }", amlp::LpcDialect::LdMud);
+    amlp::Parser parser(lexer.tokenize(), amlp::LpcDialect::LdMud);
+    auto program = parser.parseProgram();
+
+    auto& body = program->functions[0]->body->statements;
+    auto* ret = dynamic_cast<amlp::ReturnStmt*>(body[0].get());
+    assert(ret != nullptr);
+    auto* closure = dynamic_cast<amlp::ClosureLiteralExpr*>(ret->expr.get());
+    assert(closure != nullptr);
+    assert(closure->functionName == "lower_case");
+    assert(closure->forceEfun == true);
+    assert(closure->boundArgs.empty());
+
+    std::cout << "testHashQuoteEfunPrefixParsesToClosureLiteralExprWithForceEfun OK\n";
+}
+
+static void testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm() {
+    // The real semantic "#'efun::" is actually for, not just a spelling
+    // difference: real LDMud's own tiered closure resolution would
+    // otherwise let a local lfun of the same name win, exactly like a
+    // bare call would -- "#'efun::name" is the explicit escape hatch past
+    // that, guaranteed to reach the core efun regardless of what this
+    // object itself defines. Confirmed here by literally shadowing a real
+    // efun (lower_case) with a local function of the same name that
+    // returns an observably different, distinguishable value, then
+    // showing the two closure forms resolve to two different targets.
+    const char* src =
+        "string lower_case(string s) { return \"SHADOWED:\" + s; }\n"
+        "string probeBare() { return funcall(#'lower_case, \"ABC\"); }\n"
+        "string probeEfun() { return funcall(#'efun::lower_case, \"ABC\"); }\n";
+
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/hashquote_efun_shadow.c", src);
+    auto ob = harness.objects.cloneObject("/hashquote_efun_shadow");
+    assert(ob != nullptr);
+
+    // Bare "#'lower_case" resolves through the normal tiered lookup --
+    // this object's own local lower_case() wins, exactly like an ordinary
+    // bare call to lower_case(...) from inside this same object would.
+    amlp::Value bareResult = harness.vm.callFunction(ob, "probeBare", {});
+    assert(std::holds_alternative<std::string>(bareResult.data));
+    assert(std::get<std::string>(bareResult.data) == "SHADOWED:ABC");
+
+    // "#'efun::lower_case" bypasses that local override entirely and
+    // reaches the real core efun -- real lower_case("ABC") == "abc", not
+    // the local function's own "SHADOWED:ABC".
+    amlp::Value efunResult = harness.vm.callFunction(ob, "probeEfun", {});
+    assert(std::holds_alternative<std::string>(efunResult.data));
+    assert(std::get<std::string>(efunResult.data) == "abc");
+
+    std::cout << "testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm OK\n";
+}
+
 // --- Wand of Creation (mudlib/clone/wand_of_creation.c) -------------------
 // Reads the real, shipped file from disk rather than duplicating its
 // source here, so these tests exercise exactly what the live driver
@@ -18376,6 +18442,8 @@ int main() {
     testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly();
     testLexerHashQuoteClosureOnlyRecognizedUnderLdmudDialect();
     testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly();
+    testHashQuoteEfunPrefixParsesToClosureLiteralExprWithForceEfun();
+    testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm();
     testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld();
     testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld();
     testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject();

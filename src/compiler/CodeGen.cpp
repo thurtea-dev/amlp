@@ -402,8 +402,13 @@ void CodeGen::emitExpr(const AstNode& expr) {
             emitExpr(*argNode);
         }
         int nameIdx = internString(closure->functionName);
+        // Same Call/CallEfun split this file's own forceEfun comment
+        // already documents for ordinary calls, applied to closure
+        // literals instead -- see Bytecode.hpp's own PushEfunClosure
+        // comment.
+        OpCode op = closure->forceEfun ? OpCode::PushEfunClosure : OpCode::PushClosure;
         out_->code.push_back(
-            Instruction{OpCode::PushClosure, nameIdx, static_cast<int32_t>(closure->boundArgs.size())});
+            Instruction{op, nameIdx, static_cast<int32_t>(closure->boundArgs.size())});
         return;
     }
     if (auto* param = dynamic_cast<const LambdaParamExpr*>(&expr)) {
