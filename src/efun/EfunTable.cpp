@@ -3798,12 +3798,81 @@ void registerCoreEfuns() {
     // On success, the new shadow is inserted at the END of any existing
     // chain on ob (real "while (ob->shadowed) ob = ob->shadowed;" before
     // the assignment), matching real multi-shadow stacking order.
+    //
+    // ROADMAP row 1.5 (rescoped): real LDMud `shadow()` is a genuinely
+    // different efun, not just a renamed one -- confirmed directly
+    // against `temp/ldmud/src/func_spec` ("int shadow(object)
+    // no_lightweight;", one argument, no flag at all) and
+    // `temp/ldmud/src/simulate.c`'s own `f_shadow()`/`validate_shadowing()`
+    // (LDMud 3.6.8, this project's vendored clone). Three real
+    // divergences from the FluffOS shape just above: (1) always attach
+    // mode -- there is no query flag, LDMud's own separate query efun
+    // (`query_shadowing()`) is obsolete in this exact 3.6.8 clone
+    // (`temp/ldmud/doc/obsolete/query_shadowing`, moved out of
+    // `doc/efun` entirely -- so nothing to add for it here); (2) returns
+    // int 1/0, never the shadowed object; (3) the master apply is
+    // `query_allow_shadow()`, not `valid_shadow()`
+    // (`temp/ldmud/doc/master/query_allow_shadow`). One more genuine
+    // driver-level asymmetry, confirmed by reading `validate_shadowing()`
+    // in both real sources side by side: FluffOS's own version has an
+    // explicit "cannot shadow the master object" guard
+    // (`fluffos-2.9-ds2.08/interpret.c`'s "ob == master_ob" check,
+    // already ported below in the shared FluffOS path); LDMud's
+    // `validate_shadowing()` has no such check at the driver level at
+    // all -- master-object protection there is purely an *advisory*
+    // mudlib convention inside `query_allow_shadow()`'s own
+    // implementation ("should deny shadowing on all root objects", its
+    // own doc's wording), not a driver mechanism, so nothing to port for
+    // the LDMud branch here. Similarly, the "victim-side opt-out"
+    // instruct.md previously described as a second driver-enforced
+    // layer is not real either: `validate_shadowing()` only ever calls
+    // one apply, `query_allow_shadow()`; whether that apply's own LPC
+    // body chooses to call something like `victim->prevent_shadow(...)`
+    // is entirely up to the master file (and even LDMud's own two doc
+    // files disagree on the conventional name -- `doc/efun/shadow` says
+    // `query_prevent_shadow()`, `doc/master/query_allow_shadow` says
+    // `prevent_shadow()` -- further evidence it is prose convention, not
+    // driver-enforced grammar). Gated on `vm.config().dialect() ==
+    // "ldmud"` exactly like `replace_program()`'s own dialect branch.
     t.registerEfun("shadow", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
             throw LpcRuntimeError("shadow: expected an object as first argument");
         }
         auto ob = std::get<std::shared_ptr<LpcObject>>(args[0].data);
-        if (!ob || ob->isDestructed()) return Value{};
+        bool ldmud = vm.config().dialect() == "ldmud";
+        if (!ob || ob->isDestructed()) return ldmud ? Value(int64_t{0}) : Value{};
+
+        if (ldmud) {
+            auto self = vm.currentObject();
+            if (!self) return Value(int64_t{0});
+            if (ob == self) {
+                throw LpcRuntimeError("shadow: Can't shadow self.");
+            }
+            if (self->shadowing().lock()) {
+                throw LpcRuntimeError("shadow: Already shadowing.");
+            }
+            if (self->shadowedBy().lock()) {
+                throw LpcRuntimeError("shadow: Can't shadow when shadowed.");
+            }
+            if (self->environment().lock()) {
+                throw LpcRuntimeError(
+                    "shadow: The shadow must not reside inside another object.");
+            }
+            if (ob->shadowing().lock()) {
+                throw LpcRuntimeError("shadow: Can't shadow a shadow.");
+            }
+            auto master = vm.masterObject();
+            bool approved =
+                master && isTruthy(vm.callFunction(master, "query_allow_shadow", {Value(ob)}));
+            if (!approved) return Value(int64_t{0});
+            if (self->isDestructed()) return Value(int64_t{0});
+
+            auto victim = ob;
+            while (auto next = victim->shadowedBy().lock()) victim = next;
+            self->setShadowing(victim);
+            victim->setShadowedBy(self);
+            return Value(int64_t{1});
+        }
 
         bool attach = args.size() < 2 || !std::holds_alternative<int64_t>(args[1].data) ||
                       std::get<int64_t>(args[1].data) != 0;
@@ -3897,6 +3966,42 @@ void registerCoreEfuns() {
         ob->setShadowing(std::weak_ptr<LpcObject>());
         ob->setShadowedBy(std::weak_ptr<LpcObject>());
         return Value(int64_t{1});
+    });
+
+    // void unshadow(void) -- ROADMAP row 1.5's LDMud shadow work.
+    // Real LDMud-only efun, no FluffOS equivalent at all (grepped the
+    // full vendored fluffos-2.9-ds2.08 tree for "unshadow", zero hits).
+    // Confirmed against `temp/ldmud/src/simulate.c`'s own `f_unshadow()`
+    // (3.6.8): the guard is `current_object.u.ob->flags & O_SHADOW &&
+    // shadowing != NULL` -- this only fires when current_object is
+    // itself shadowing something. When it fires, it reconnects that
+    // victim directly to whoever was shadowing current_object (real
+    // "our victim is now shadowed by our shadow"), then clears both of
+    // current_object's own links. A real, subtle asymmetry confirmed by
+    // reading the C directly, not inferred from the doc's own looser
+    // prose ("if the calling object is being shadowed, that is also
+    // stopped"): if current_object is ONLY being shadowed by someone
+    // else and is not itself shadowing anything, the guard never fires
+    // and unshadow() is a genuine no-op -- an object cannot force
+    // itself out from under its own shadow this way. No dialect gate on
+    // *availability* here (unlike `shadow()`'s branch above, which
+    // changes a name both dialects share) -- this table has no existing
+    // precedent for withholding an efun's existence by dialect, only
+    // for branching an existing shared name's behavior, so this is
+    // simply registered like every other efun in the table.
+    t.registerEfun("unshadow", [](VM& vm, std::vector<Value>&) -> Value {
+        auto self = vm.currentObject();
+        if (!self) return Value{};
+        auto victim = self->shadowing().lock();
+        if (!victim) return Value{};
+
+        auto shadower = self->shadowedBy().lock();
+        victim->setShadowedBy(shadower);
+        if (shadower) shadower->setShadowing(victim);
+
+        self->setShadowing(std::weak_ptr<LpcObject>());
+        self->setShadowedBy(std::weak_ptr<LpcObject>());
+        return Value{};
     });
 
     // void replace_program(string name) -- real replace_program.c's own

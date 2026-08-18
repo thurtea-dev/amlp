@@ -40,7 +40,24 @@ Currently `maxEvalCost_` is checked as a flat per-`run()` ceiling and
 
 ## Phase 1 tasks
 
-### 1.7 - LDMud `lambda()` / `unbound_lambda()` / `bind()` closure kinds
+### 1.7 - LDMud `lambda()` / `unbound_lambda()` / `bind_lambda()` closure kinds
+
+**Name correction (2026-08-17):** `bind()` does not exist as an LDMud efun --
+the real name is `bind_lambda(closure cl [, object ob])`, confirmed against
+`temp/ldmud/doc/efun/bind_lambda` and `temp/ldmud/src/closure.c`'s own
+`v_bind_lambda()` (this project's vendored 3.6.8 clone). Investigated in real
+depth this pass (see ROADMAP.md row 1.7 for the full writeup) while doing the
+adjacent row 1.5 shadow work -- **not implemented**, confirmed genuinely
+bigger than a normal batch item. Two things the plan below does not yet
+account for, found by reading `v_bind_lambda()` in full: (1) real
+`CLOSURE_BOUND_LAMBDA` rebinding is reference-count-aware -- a shared bound
+lambda (`ref > 1`) gets copy-on-write cloned rather than rebound in place,
+so `bind_lambda()` itself needs more than a single `Kind::UnboundLambda`
+case; (2) a non-`this_object()` target `ob` goes through
+`privilege_violation("bind_lambda", this_object(), ob)`, a master-apply
+subsystem (`doc/concepts/privilege`) this driver has no equivalent of at
+all, separate from the UID-based FluffOS applies already implemented and
+from anything currently planned for closures.
 
 **New `Closure::Kind` enum values** (add to `Value.hpp`):
 - `Kind::MudosStyle` - current `(: :)` closures (rename from the implicit
@@ -48,7 +65,7 @@ Currently `maxEvalCost_` is checked as a flat per-`run()` ceiling and
 - `Kind::LambdaArray` - LDMud `lambda()`: body is a `std::shared_ptr<Array>`
   that the VM executes as LPC bytecode (see below)
 - `Kind::UnboundLambda` - like `LambdaArray` but has no bound `owner`; must be
-  `bind()`-ed before calling
+  `bind_lambda()`-ed before calling
 - `Kind::LdmudSymbol` - `#'name` reference: name is baked at construction; kind
   is one of `FP_EFUN`, `FP_LOCAL`, `FP_SIMUL` - resolve and cache on first call
 
@@ -56,8 +73,8 @@ Currently `maxEvalCost_` is checked as a flat per-`run()` ceiling and
 - `LambdaArray`: extract the `Array` body, interpret each element as either a
   literal value or a sub-instruction array (this is LDMud's own "arrays-as-code"
   format; see LDMud source `closure.c`).
-- `UnboundLambda`: throw "unbound lambda called without bind()" if the owner
-  is unset.
+- `UnboundLambda`: throw "unbound lambda called without bind_lambda()" if the
+  owner is unset.
 - `LdmudSymbol`: resolve name on first call (same tiered lookup as `Call`
   opcode), cache the resolved `FP_*` kind + index in the `Closure` struct to
   avoid re-resolving on subsequent calls.

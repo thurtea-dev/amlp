@@ -5717,6 +5717,164 @@ static void testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed() {
     std::cout << "testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed OK\n";
 }
 
+// ROADMAP row 1.5 (rescoped): real LDMud shadow() -- one argument,
+// returns int 1/0, master apply is query_allow_shadow() not
+// valid_shadow(). Confirmed against temp/ldmud/src/func_spec ("int
+// shadow(object) no_lightweight;") and simulate.c's own f_shadow()/
+// validate_shadowing() (3.6.8).
+static void testShadowLdmudDialectSingleArgReturnsIntAndUsesQueryAllowShadowApply() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int query_allow_shadow(object victim) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/shl1_victim.c", "void create() {}\n");
+    harness.writeFile("/shl1_shadow.c",
+        "mixed attach(object victim) { return shadow(victim); }\n");
+    auto victim = harness.objects.cloneObject("/shl1_victim");
+    auto shadowOb = harness.objects.cloneObject("/shl1_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(shadowOb, "attach", {amlp::Value(victim)});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    assert(victim->shadowedBy().lock() == shadowOb);
+
+    // Already shadowing -- attaching a second time must throw, same
+    // guard as the FluffOS path above.
+    harness.writeFile("/shl1_victim2.c", "void create() {}\n");
+    auto victim2 = harness.objects.cloneObject("/shl1_victim2");
+    bool threw = false;
+    try {
+        harness.vm.callFunction(shadowOb, "attach", {amlp::Value(victim2)});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testShadowLdmudDialectSingleArgReturnsIntAndUsesQueryAllowShadowApply OK\n";
+}
+
+static void testShadowLdmudDialectReturnsZeroNotVoidWhenMasterDenies() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int query_allow_shadow(object victim) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/shl2_victim.c", "void create() {}\n");
+    harness.writeFile("/shl2_shadow.c",
+        "mixed attach(object victim) { return shadow(victim); }\n");
+    auto victim = harness.objects.cloneObject("/shl2_victim");
+    auto shadowOb = harness.objects.cloneObject("/shl2_shadow");
+    assert(victim != nullptr && shadowOb != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(shadowOb, "attach", {amlp::Value(victim)});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+    assert(!victim->shadowedBy().lock());
+
+    std::cout << "testShadowLdmudDialectReturnsZeroNotVoidWhenMasterDenies OK\n";
+}
+
+// Real LDMud's own validate_shadowing() (simulate.c) has no "ob ==
+// master_ob" guard at all, unlike FluffOS's (interpret.c's explicit
+// "cannot shadow the master object" check, ported in the shared path
+// above) -- master-object protection under LDMud is purely an advisory
+// mudlib convention inside query_allow_shadow()'s own body, confirmed by
+// reading both real validate_shadowing() implementations side by side.
+static void testShadowLdmudDialectHasNoDriverLevelMasterObjectGuard() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int query_allow_shadow(object victim) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/shl3_shadow.c",
+        "mixed attach(object victim) { return shadow(victim); }\n");
+    auto shadowOb = harness.objects.cloneObject("/shl3_shadow");
+    auto master = harness.objects.masterObject();
+    assert(shadowOb != nullptr && master != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(shadowOb, "attach", {amlp::Value(master)});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    assert(master->shadowedBy().lock() == shadowOb);
+
+    std::cout << "testShadowLdmudDialectHasNoDriverLevelMasterObjectGuard OK\n";
+}
+
+// unshadow(): real LDMud-only efun (no FluffOS equivalent at all).
+// Confirmed against simulate.c's own f_unshadow(): it only acts when
+// current_object is itself shadowing something, splicing that victim
+// directly onto whoever was shadowing current_object; an object that is
+// merely being shadowed by someone else, with no victim of its own, gets
+// a genuine no-op -- it cannot force itself out from under its own
+// shadow this way.
+static void testUnshadowSplicesSelfOutOnlyWhenSelfIsItselfShadowingSomething() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int query_allow_shadow(object victim) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    // Case A: a chain x -> a -> b (x shadows a, a shadows b). Calling
+    // unshadow() as a must splice b directly under x and clear both of
+    // a's own links.
+    harness.writeFile("/shu_b.c", "void create() {}\n");
+    harness.writeFile("/shu_a.c",
+        "void create() {}\n"
+        "mixed attach(object victim) { return shadow(victim); }\n"
+        "void do_unshadow() { unshadow(); }\n");
+    harness.writeFile("/shu_x.c",
+        "void create() {}\n"
+        "mixed attach(object victim) { return shadow(victim); }\n");
+    auto b = harness.objects.cloneObject("/shu_b");
+    auto a = harness.objects.cloneObject("/shu_a");
+    auto x = harness.objects.cloneObject("/shu_x");
+    assert(b != nullptr && a != nullptr && x != nullptr);
+
+    // Both a and x attach to the SAME root victim b -- real shadow()
+    // always walks forward from the named target along its own
+    // shadowedBy chain to find the current outermost shadow and
+    // attaches there (confirmed above and in the FluffOS path this test
+    // file already exercises); calling shadow() with an intermediate
+    // shadow object as the argument, not the root victim, would instead
+    // trip "Can't shadow a shadow.".
+    harness.vm.callFunction(a, "attach", {amlp::Value(b)});
+    harness.vm.callFunction(x, "attach", {amlp::Value(b)});
+    assert(a->shadowing().lock() == b);
+    assert(a->shadowedBy().lock() == x);
+
+    harness.vm.callFunction(a, "do_unshadow", {});
+    assert(!a->shadowing().lock());
+    assert(!a->shadowedBy().lock());
+    assert(b->shadowedBy().lock() == x);
+    assert(x->shadowing().lock() == b);
+
+    // Case B: d is shadowed by e (e shadows d) but d itself shadows
+    // nothing. unshadow() called as d must be a genuine no-op.
+    harness.writeFile("/shu_d.c",
+        "void create() {}\n"
+        "void do_unshadow() { unshadow(); }\n");
+    harness.writeFile("/shu_e.c",
+        "void create() {}\n"
+        "mixed attach(object victim) { return shadow(victim); }\n");
+    auto d = harness.objects.cloneObject("/shu_d");
+    auto e = harness.objects.cloneObject("/shu_e");
+    assert(d != nullptr && e != nullptr);
+
+    harness.vm.callFunction(e, "attach", {amlp::Value(d)});
+    assert(d->shadowedBy().lock() == e);
+
+    harness.vm.callFunction(d, "do_unshadow", {});
+    assert(d->shadowedBy().lock() == e);
+    assert(e->shadowing().lock() == d);
+
+    std::cout << "testUnshadowSplicesSelfOutOnlyWhenSelfIsItselfShadowingSomething OK\n";
+}
+
 // --- snoop() / query_snoop() / query_snooping() (Phase 0.13, snoop family) -
 // Confirmed directly against fluffos-2.9-ds2.08's own f_snoop()/
 // new_set_snoop()/query_snoop()/query_snooping() (comm.c) before writing
@@ -17098,6 +17256,10 @@ int main() {
     testShadowDeniedWhenMasterHasNoValidShadowApproval();
     testShadowQueryFormAndQueryShadowingReturnBothDirectionsOrZero();
     testShadowRejectsSelfShadowAlreadyShadowingAndAlreadyShadowed();
+    testShadowLdmudDialectSingleArgReturnsIntAndUsesQueryAllowShadowApply();
+    testShadowLdmudDialectReturnsZeroNotVoidWhenMasterDenies();
+    testShadowLdmudDialectHasNoDriverLevelMasterObjectGuard();
+    testUnshadowSplicesSelfOutOnlyWhenSelfIsItselfShadowingSomething();
     testSnoopStartLinksBothDirectionsAndQueryReflectsThem();
     testSnoopOutputDuplicationCallsReceiveSnoopOnSnooperWithMatchingText();
     testSnoopDeniesNotInteractiveThrowsAndLoopReturnsFalsy();

@@ -198,6 +198,21 @@ changes made):
     concern to fix (it's `src/object`/`src/vm`/`src/compiler` territory
     for the actual Phase 1 rows), but it belongs here since this section
     is the LDMud apply-surface reference other rows will read.
+    **Resolved 2026-08-17 for the `shadow()` half:** implemented in
+    `src/efun/EfunTable.cpp` (ROADMAP row 1.5), gated on
+    `Config::dialect()`. One correction to this note's own "two-layered"
+    framing, found by reading `simulate.c`'s `validate_shadowing()`
+    directly: it is not driver-enforced two-layer permission at all --
+    the driver calls only `query_allow_shadow()`; a victim-side check is
+    purely whatever that apply's own mudlib body chooses to do, and
+    LDMud's own two doc files even disagree on what to call it
+    (`query_prevent_shadow()` vs `prevent_shadow()`). Also added real
+    LDMud's `unshadow()`, which has no FluffOS equivalent at all. The
+    `bind_lambda()` half remains genuinely unimplemented -- investigated
+    in real depth this same pass, confirmed bigger than a normal batch
+    item (closure-kind matrix plus a `privilege_violation()` subsystem
+    this driver has no equivalent of); see ROADMAP.md row 1.7 and
+    `src/vm/instruct.md` for the full scope and options.
 - `"valid_snoop"` / `"valid_query_snoop"` - real LDMud master applies
   (`doc/master/valid_snoop`, `doc/master/valid_query_snoop`), not
   previously documented anywhere in this repo. Directly relevant: Phase

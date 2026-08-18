@@ -81,10 +81,41 @@ earlier draft of this file carried:
   `query_allow_shadow()` already listed above. `src/object/instruct.md`
   should be checked against this the next time LDMud shadow semantics are
   actually implemented (Phase 1, not now).
+  **Resolved 2026-08-17:** implemented, and one part of this note itself
+  turned out to need correcting once `temp/ldmud/src/simulate.c`'s
+  `validate_shadowing()` was read directly rather than inferred from the
+  doc's prose: the "victim-side opt-out" is not a second driver-enforced
+  layer at all. The driver only ever calls one apply,
+  `query_allow_shadow()`; whether *that* apply's own LPC body consults
+  the victim (e.g. `victim->prevent_shadow(...)`) is entirely a mudlib
+  convention, not something `validate_shadowing()` itself checks -- and
+  even LDMud's own two doc files disagree on the convention's name
+  (`doc/efun/shadow` says `query_prevent_shadow()`,
+  `doc/master/query_allow_shadow` says `prevent_shadow()`), further
+  evidence it is prose, not grammar. Also found and ported: LDMud's
+  `validate_shadowing()` has no "cannot shadow the master object" guard
+  at all (FluffOS's does), and real LDMud has a second, FluffOS-absent
+  efun, `void unshadow(void)`. See ROADMAP.md row 1.5 for the full
+  citation trail; implemented in `src/efun/EfunTable.cpp` with 4 new
+  regression tests.
 - **`bind()` does not exist as an LDMud efun.** The real name is
   `bind_lambda(closure, object ob)` (`doc/efun/bind_lambda`) - rebinds an
   unbound lambda, or an efun/simul-efun/operator closure, to a different
   object. Row 1.7's "`bind()`" should read `bind_lambda()`.
+  **Investigated 2026-08-17, not implemented:** read
+  `temp/ldmud/src/closure.c`'s own `v_bind_lambda()` in full. Genuinely
+  bigger than a normal batch item -- it switches on a closure-kind
+  distinction (`CLOSURE_LFUN`/`CLOSURE_BOUND_LAMBDA`/
+  `CLOSURE_UNBOUND_LAMBDA`/efun-simul_efun-operator, including
+  reference-count-aware copy-on-write for shared bound lambdas) this
+  driver's single flat `Closure` struct has no equivalent of, and gates
+  non-self targets through `privilege_violation()`, a master-apply
+  subsystem that doesn't exist here at all. Row 1.7 itself
+  (`lambda()`/`unbound_lambda()`/`#'symbol`) is still entirely
+  unimplemented, so there is not yet a real bound/unbound lambda value
+  for a faithful `bind_lambda()` to rebind. See ROADMAP.md row 1.7 and
+  `src/vm/instruct.md`'s own matching note for the full scope and the
+  options left for whoever picks this up.
 - **The `replaces` directive in `inherit` does not exist anywhere in real
   LDMud.** Grepped the actual grammar (`src/prolang.y`'s own
   `inheritance_qualifier`/`inheritance_modifier` productions): the full set

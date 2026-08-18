@@ -458,6 +458,44 @@ the string argument, unconditionally. Added a `vm.config().dialect() ==
 case; every existing (string-argument) call path is untouched. See
 ROADMAP.md row 1.6 for the full citation trail.
 
+**ROADMAP row 1.5 (2026-08-17):** real LDMud `shadow()` genuinely
+diverges from the FluffOS shape already implemented above (0.6) --
+`temp/ldmud/src/func_spec`'s own `"int shadow(object) no_lightweight;"`
+confirms one argument, not `shadow(ob, flag)`. Added an `ldmud` branch to
+the same `shadow` registration: one argument, always attach, returns int
+1/0 not the shadowed object, master apply `query_allow_shadow()` not
+`valid_shadow()`, and (a real driver-level asymmetry, confirmed by
+reading `temp/ldmud/src/simulate.c`'s `validate_shadowing()` against
+FluffOS's own side by side) no "cannot shadow the master object" guard
+at all -- that protection is purely advisory mudlib convention under
+LDMud, not something the driver itself enforces. Also implemented
+`unshadow()` (`void unshadow(void)`, real LDMud-only, confirmed zero
+hits for "unshadow" anywhere in the vendored `fluffos-2.9-ds2.08` tree),
+registered unconditionally like every other efun in this table since
+this file has no existing precedent for withholding an efun's
+*existence* by dialect, only for branching a *shared* name's behavior
+(what the `shadow`/`replace_program` dialect branches both do). See
+ROADMAP.md row 1.5 for the full citation trail, including why the
+row's third original item (shadow-chain `call_other` redirection) turned
+out to already be done and dialect-agnostic under `VM::callFunction()`.
+
+**ROADMAP row 1.7 (`bind_lambda()`), investigated 2026-08-17, not
+implemented:** read `temp/ldmud/src/closure.c`'s own `v_bind_lambda()`
+in full while doing the row 1.5 work above (both were flagged together
+as "the shadow()/bind_lambda() divergence"). Confirmed genuinely bigger
+than a normal batch item, not a small efun-level fix like the two
+above: real `bind_lambda()` switches on a closure-*kind* distinction
+(`CLOSURE_LFUN` vs `CLOSURE_BOUND_LAMBDA` -- reference-count-aware,
+copy-on-write when shared -- vs `CLOSURE_UNBOUND_LAMBDA` vs
+efun/simul_efun/operator closures) this driver's single flat `Closure`
+struct (`Value.hpp`) has no equivalent of at all, and gates a non-self
+target through `privilege_violation()`, a master-apply subsystem with no
+existing counterpart here. Row 1.7 itself (`lambda()`/
+`unbound_lambda()`/`#'symbol`) is still entirely unimplemented, so there
+is no real bound/unbound lambda value yet for a faithful `bind_lambda()`
+to rebind. See ROADMAP.md row 1.7 and `src/vm/instruct.md` for the full
+scope and the options left on the table.
+
 `origin` was investigated just as deeply and still not implemented,
 now for a sharper, more specific reason than "needs per-call origin
 tagging" alone: real `f_origin()` (`efuns_main.c`) is genuinely simple,

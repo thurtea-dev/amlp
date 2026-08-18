@@ -80,8 +80,25 @@ live entirely in the `replace_program()` **efun**'s own argument handling
 `src/efun/EfunTable.cpp`. See ROADMAP.md row 1.6 for the full citation
 trail and `src/efun/instruct.md` for the efun-side detail.
 
-This requires a `replacedBy_` map in `ObjectManager` that `VM::findObject()`
-and `callFunction()` consult.
+### 1.5 - LDMud shadows (resolved: efun-level signature work, not `src/object`)
+
+Section 0.6 above names the FluffOS master apply as `query_allow_shadow()`
+-- that was wrong even for FluffOS at the time it was written (the real
+FluffOS apply is `valid_shadow()`, `applies_table.c`'s own
+`APPLY_VALID_SHADOW`, and that is what the actual implementation in
+`src/efun/EfunTable.cpp` correctly uses). `query_allow_shadow()` is real,
+but it is LDMud's name, not FluffOS's -- confirmed against
+`temp/ldmud/doc/master/query_allow_shadow`. Row 1.5 (LDMud shadow work)
+turned out to need no changes here in `src/object` at all: the shadow-chain
+`call_other` redirection built under 0.6 (`VM::callFunction()`'s shadow
+walk) is already dialect-agnostic and matches LDMud's own documented
+model too (`temp/ldmud/doc/efun/shadow`'s "not even object B can
+call_other() itself", already covered by the existing `!= current_object`
+re-entry guard). The real, narrow divergence -- `shadow()`'s own argument
+count/return type/master-apply-name, plus the LDMud-only `unshadow()`
+efun -- lives entirely in `src/efun/EfunTable.cpp`, gated on
+`Config::dialect()`, implemented 2026-08-17. See ROADMAP.md row 1.5 for
+the full citation trail.
 
 ### 1.14 - DGD Lightweight Objects (LWOs)
 
