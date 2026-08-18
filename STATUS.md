@@ -3,6 +3,52 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): inventory only -- 11 new reference archives added
+under `temp/`, listed without extracting, nothing implemented off of
+them.** Not extracted or processed per instruction; this is a record of
+what is there, for whenever it actually gets picked up.
+
+- `ds3.9.zip` (`ds3.9/`, 5,689 files) -- Dead Souls 3.9, bundling its own
+  driver source at `ds3.9/fluffos-2.23-ds03/`.
+- `dsI.zip` (`dsI/`, 1,673 files) -- an older Dead Souls I release,
+  bundling `dsI/fluffos-2.7-ds2.018/`.
+- `dsIIr10.zip` (`dsIIr10/`, 3,356 files) -- Dead Souls II release 10,
+  bundling `dsIIr10/fluffos-2.16-ds05/`.
+- `final_realms_fluffos_v1.zip` (`final_realms_fluffos_v1/`, 6,583
+  files) -- Final Realms, a FluffOS-based mudlib, bundling
+  `fluffos-2.9-ds2.11/`.
+- `lpuni_fluffos_v1.zip` (`lpuni_fluffos_v1/`, 1,617 files) -- LPUniversity,
+  bundling `fluffos-2.9-ds2.07/`.
+- `merentha_fluffos_v2.zip` (`merentha_fluffos_v2/`, 1,478 files) --
+  Merentha, bundling `fluffos-2.9-ds2.03/`.
+- `skylib_fluffos_v3.zip` (`skylib_fluffos_v3/`, 6,035 files) -- Skylib,
+  bundling `fluffos-2.9-ds2.04/`.
+- `tmi2_fluffos_v3.zip` (`tmi2_fluffos_v3/`, 2,660 files) -- TMI-2,
+  bundling `fluffos-2.16-ds05/`.
+- `gurba-0.42-beta2.tar.gz` (`gurbalib/`, 1,166 entries) -- Gurbalib, a
+  DGD-based mudlib bundling its own DGD driver source at `gurbalib/src/`
+  (real DGD driver filenames confirmed present -- `alloc.c`, `array.c`,
+  `comm.c`, `call_out.c`) -- potentially a second DGD driver source
+  variant alongside the already-extracted `temp/dgd/`, version
+  relationship not checked.
+- `lpmud-2.4.5.tar.gz` (607 entries, no wrapper directory -- extracts
+  flat into the current directory) -- classic LPMud 2.4.5, the
+  original LPC driver lineage. Not FluffOS/LDMud/DGD, the three
+  dialects this project actually targets -- historical/architectural
+  interest only unless that scope changes.
+- `nightmare-3.3.1.tar.gz` (`Nightmare-3.3.1/`, 1,790 entries, own
+  `mudlib/` subdirectory) -- possibly overlapping with the
+  already-extracted `temp/nightmare3/` (which already has its own
+  `driver/` + `lib/`), version/lineage relationship not checked.
+
+Six of the eight FluffOS-family archives above bundle a driver source
+tree named `fluffos-2.9-ds2.0X` or close (`ds2.03`, `ds2.04`, `ds2.07`,
+`ds2.11`, plus the `2.16`/`2.23` outliers and `dsI`'s older `2.7`) --
+the same "ds" patchlevel lineage as this project's own vendored
+`temp/reference/fluffos-2.9-ds2.08/`, at neighboring patchlevels. Worth
+noting for whenever cross-patchlevel diffing against the reference
+driver becomes relevant -- not investigated further this pass.
+
 **2026-08-18 (continued): fixed the ctest-vs-direct-run discrepancy flagged
 last session instead of leaving it filed away -- `ctest` and a direct
 `build/test/amlp_tests` run now report the identical 623 passing, from any
