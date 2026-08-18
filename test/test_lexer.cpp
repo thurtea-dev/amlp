@@ -8675,6 +8675,80 @@ static void testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose() {
     std::cout << "testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose OK\n";
 }
 
+// Real bug, found live investigating a flagged crash risk (not an actual
+// process crash on further investigation -- see this session's own
+// STATUS.md entry -- but a real, confirmed correctness gap):
+// Server::handleConnection()'s own per-line dispatch-error catch used to
+// call the *full* Connection::close() directly, which -- exactly like
+// testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose above
+// confirms is the *correct*, intentional behavior for an explicit
+// destruct()-driven close -- clears boundObject() immediately, so
+// fireNetDeadIfLinkDead() (called unconditionally right after, in the
+// real handleConnection()) always saw a null object and net_dead() never
+// fired. Unlike the destruct() case, this path is *not* supposed to skip
+// net_dead(): a player's own connection dying because their current
+// command threw an uncaught error is exactly the same real "this
+// interactive session just ended" event real FluffOS's remove_interactive()
+// already fires net_dead() for on ordinary link death (the peer-EOF case
+// above) -- there was never a real semantic reason for the error path to
+// behave differently, just an implementation bug (calling the wrong of
+// the two teardown methods). Fixed via Connection::markClosed() (the same
+// lightweight "just the flag" shape Connection::pollLines()'s own EOF
+// branch already used internally), reproducing handleConnection()'s own
+// exact fixed sequence manually here (dispatchLine() throws -> caught ->
+// markClosed() -> fireNetDeadIfLinkDead()), the same public-static-method
+// test seam every other test in this cluster already uses since
+// handleConnection() itself is private and requires a real listening
+// socket.
+static void testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nd_dispatch_error.c",
+        "int ran;\n"
+        "void net_dead() { ran = 1; }\n"
+        "void boom(string arg) { totally_undefined_efun_for_this_test(); }\n");
+    auto target = harness.objects.cloneObject("/nd_dispatch_error");
+    assert(target != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(target);
+
+    // Registers boom(string) as the pending input_to handler directly at
+    // the C++ level (the same slot the real "input_to(\"boom\")" efun
+    // call would populate from LPC) -- no separate LPC-level "start()"
+    // function needed just to get there, matching this test's own narrow
+    // purpose.
+    conn.setPendingInputTo(target, "boom", {});
+
+    amlp::OutputContext::set(&conn);
+    // Reproduces Server::handleConnection()'s own real fixed sequence by
+    // hand, the same public-static-method seam every other test in this
+    // cluster already uses (handleConnection() itself is private and
+    // needs a real listening socket):
+    bool caught = false;
+    try {
+        amlp::Server::dispatchLine(harness.vm, conn, "anything");
+    } catch (const std::exception&) {
+        caught = true;
+        conn.markClosed();
+    }
+    assert(caught); // boom()'s own undefined-efun call really did throw uncaught
+    amlp::Server::fireNetDeadIfLinkDead(harness.vm, conn);
+    amlp::OutputContext::set(nullptr);
+
+    // The real fix: net_dead() actually fired this time, unlike
+    // testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose's own
+    // (correct, unchanged) explicit-close case just above.
+    amlp::Value ranVal = target->variables()[0];
+    assert(std::holds_alternative<int64_t>(ranVal.data));
+    assert(std::get<int64_t>(ranVal.data) == 1);
+    assert(conn.closed());
+
+    ::close(fds[1]);
+    std::cout << "testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose OK\n";
+}
+
 // ---------------------------------------------------------------------
 // destruct() efun: closes the destructed object's OWN connection, not
 // whichever connection happens to be OutputContext::current()
@@ -18245,6 +18319,7 @@ int main() {
     testFireNetDeadIfLinkDeadCallsApplyWhenPeerClosesConnection();
     testFireNetDeadIfLinkDeadIsNoOpWhileConnectionStillOpen();
     testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose();
+    testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose();
     testDestructEfunClosesTargetObjectsOwnConnectionNotCallersConnection();
     testDestructEfunStillClosesOwnConnectionWhenSelfDestructing();
     testDestructEfunOnNonInteractiveObjectDoesNotTouchAnyConnection();

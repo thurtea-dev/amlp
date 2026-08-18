@@ -57,6 +57,30 @@ public:
     bool closed() const { return closed_; }
     void close();
 
+    // Marks the connection closed *without* the rest of close()'s own
+    // real cleanup (fd close, InteractiveRegistry removal, snoop unlink,
+    // clearing boundObject_) -- the same lightweight "just the flag"
+    // shape pollLines() already uses internally for the ordinary peer-
+    // EOF/read-error case (see its own body), exposed here so
+    // Server::handleConnection()'s per-line dispatch-error catch can use
+    // the identical two-phase shutdown: mark closed now, so
+    // Server::fireNetDeadIfLinkDead() (called immediately after, still
+    // seeing a valid boundObject()) gets a real chance to fire this
+    // object's own net_dead() apply -- real remove_interactive()'s own
+    // "the interactive object still exists to be notified" moment --
+    // before anything actually tears the connection down. The real
+    // teardown itself (this same close()) still happens moments later
+    // either way, once ~Connection() runs (see its own body) after
+    // Server::pollOnce()'s own closed()-connections pruning erases the
+    // last owning shared_ptr. Calling the full close() directly instead
+    // of this, from a context that still wants net_dead() to fire, was
+    // a real bug: it clears boundObject_ immediately, so by the time
+    // fireNetDeadIfLinkDead() runs its own "!obj -> return" check, the
+    // object is already gone and net_dead() silently never fires -- see
+    // Server.cpp's own comment at the fixed call site for the full
+    // citation.
+    void markClosed() { closed_ = true; }
+
     // Real set_call()'s own "if (flags & I_NOECHO) add_binary_message(ob,
     // telnet_yes_echo, ...)" (comm.c): sends IAC WILL ECHO immediately
     // (telling the client the server is taking over echo, so the client

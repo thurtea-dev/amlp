@@ -506,7 +506,30 @@ void Server::handleConnection(Connection& conn) {
             } catch (const std::exception& e) {
                 std::cerr << "[net] connection fd=" << conn.fd()
                            << " input handling failed: " << e.what() << "\n";
-                conn.close();
+                // markClosed(), not the full close(): a real bug, found
+                // live investigating a flagged crash risk -- calling the
+                // full close() here cleared boundObject_ immediately, so
+                // fireNetDeadIfLinkDead() below (which still runs
+                // unconditionally after this loop) always saw a null
+                // object and silently never fired this connection's own
+                // net_dead() apply. The ordinary peer-EOF/read-error path
+                // (Connection::pollLines()) never had this bug -- it only
+                // ever sets the lightweight "closed" flag itself, the
+                // same one markClosed() now exposes here, leaving
+                // boundObject() valid long enough for net_dead() to
+                // actually run before the real teardown (fd close,
+                // InteractiveRegistry removal, snoop unlink) happens a
+                // moment later via ~Connection() once Server::pollOnce()'s
+                // own closed()-connections pruning erases the last
+                // owning shared_ptr. Concretely, this used to mean a
+                // player whose current command threw an uncaught error
+                // never got set_heart_beat(0) run for them (real
+                // net_dead(), user.c) -- their own object stayed
+                // registered for a heart_beat tick that never stops
+                // firing for the rest of the process's lifetime, a real,
+                // permanent per-incident resource leak, not merely a
+                // missed notification.
+                conn.markClosed();
                 break;
             }
         }

@@ -3,6 +3,154 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): ran down the crash flagged last session --
+real bug found and fixed (an uncaught dispatch error never fired
+`net_dead()`, unlike ordinary link death), but the "took the whole
+process down" half of last session's own claim did not reproduce after
+thorough investigation and was very likely a self-inflicted artifact of
+running `pkill` moments before checking the log, not a genuine crash.
+Verified live with two real clients (631 tests, up from 630).**
+
+## Reproducing it
+
+Rebuilt the exact repro from last session (`eval return
+totally_undefined_efun_xyz()`) and tested far more rigorously than
+before: connected a second, independent client alongside the one that
+triggers the error, and never ran `pkill` myself while checking process
+status. Result: the triggering connection correctly closes; the driver
+process and the second connection are both completely unaffected.
+Repeated this across multiple runs, plus two extended stretches of pure
+`ps` polling (90+ and 100+ seconds, entirely via active `sleep`-then-check
+Bash calls, never idle) after the error -- the process stayed up every
+time. **Last session's own "in one observed run crashed the whole
+process" framing does not reproduce under rigorous re-testing** and is
+best explained by the `pkill -f "amlp etc/driver.cfg"` command that ran,
+both times, in the same breath as the log check that showed "amlp
+shutting down." -- confirmed directly: that message only ever prints
+after `Scheduler::run()`'s loop returns, and the loop's only real exit
+conditions are `maxIterations` (test-mode only, never used live) or
+`Scheduler::requestShutdown()`, which is only ever called from `main.cpp`'s
+own `SIGINT`/`SIGTERM` handler -- exactly what `pkill`'s default signal
+sends. This session's own testing separately hit one more confusing,
+unrelated wrinkle worth naming honestly: a background driver process
+left running with no `Bash` tool calls at all for an extended stretch
+(pure file-reading turns) once disappeared with no shutdown message and
+no core dump -- reproduced zero times when polled *actively* instead
+(the 90s/100s stretches above), so this looks like a property of this
+particular sandbox's own background-process lifecycle across idle
+tool-call gaps, not the driver -- flagged here rather than either
+chasing it further or silently ignoring it.
+
+## Reading the real code path
+
+Checked, as asked, whether command dispatch has the same per-connection
+try/catch isolation `Server.cpp` already documents elsewhere (its own
+`onNewConnection()` comment: "confirmed live: attempting
+/secure/std/login.c before it actually compiled took the whole process
+down on the very first connection" -- an earlier, already-fixed instance
+of this exact class of bug). Checked every real VM-entry point in
+`src/net`/`src/scheduler`, not just the one dispatch already had:
+
+- `Server::handleConnection()`'s own per-line dispatch loop -- already
+  wrapped, `try { dispatchLine(...) } catch (...) { ...; conn.close();
+  break; }`, with a comment already stating the exact isolation
+  principle this session was asked to confirm.
+- `Server::onNewConnection()`'s `master->connect()` and `logon()` calls
+  -- both already wrapped, matching the comment above.
+- `fireSocketCallback()` (socket read/write/close callbacks) -- already
+  wrapped.
+- `Scheduler::tickHeartbeats()` and `Scheduler::tickCallOuts()` -- both
+  already wrapped, per-object/per-entry, one failing `heart_beat()` or
+  `call_out()` target does not stop the rest from firing.
+- Every exception type this codebase actually throws (`grep`ped
+  directly, not assumed) -- `LpcRuntimeError`, `LpcThrownValue`,
+  `NotImplementedError`, `EvalCostError`, `std::invalid_argument` --
+  derives from `std::exception`, so every one of the `catch (const
+  std::exception&)` boundaries above genuinely catches all of them, no
+  type-level gap.
+
+**Command dispatch already has exactly the isolation asked about.** The
+real gap was narrower and different in kind: not a missing try/catch,
+but the dispatch-error catch calling the *wrong one* of two existing
+teardown methods.
+
+## The real bug
+
+`Connection::close()` (the *full* teardown -- fd close,
+`InteractiveRegistry` removal, snoop unlink, clearing `boundObject_`) and
+`Connection::pollLines()`'s own internal EOF/read-error handling (which
+only ever sets the lightweight `closed_` flag, leaving `boundObject_`
+intact) are two genuinely different things, by design: `Server::
+fireNetDeadIfLinkDead()` (called unconditionally right after either
+dispatch or `pollLines()`, `Server.cpp`) checks `conn.closed()` *and*
+`conn.boundObject()` still being non-null before firing `net_dead()` --
+the ordinary link-death path (peer EOF) correctly leaves `boundObject_`
+alone long enough for that check to see a real object and fire it;
+`Connection::~Connection()` (which calls the full `close()`) only runs
+later, once `Server::pollOnce()`'s own closed()-connections pruning
+erases the last owning `shared_ptr`. `testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose`
+(already in this suite) confirms the same full-`close()`-clears-
+`boundObject_`-first shape is *correct* for an explicit `destruct()` --
+real semantics do skip `net_dead()` there.
+
+`Server::handleConnection()`'s own dispatch-error catch block called the
+*full* `conn.close()` directly -- the same method that is correctly used
+for `destruct()`, but wrong here: this path is not `destruct()`, it is
+exactly the same "this interactive session just ended" event ordinary
+link death already is, and real semantics do not distinguish "why" the
+connection died for `net_dead()`'s own purposes. Calling the full
+`close()` cleared `boundObject_` before `fireNetDeadIfLinkDead()` (called
+unconditionally right after, unchanged) ever got a chance to see it, so
+`net_dead()` silently never fired for this one path -- concretely, real
+`user.c`'s own `net_dead()` calls `set_heart_beat(0)`, so a player whose
+current command threw an uncaught error kept a heart_beat registration
+that never stops firing for the rest of the process's own lifetime, a
+real, permanent per-incident resource leak (the object itself also stays
+in `LiveObjectRegistry` forever, unreachable but never freed) -- not
+merely a missed room notification, though that is real too (confirmed
+live below).
+
+## The fix
+
+New `Connection::markClosed()` (`Connection.hpp`): sets only the
+lightweight `closed_` flag, the exact same shape `pollLines()`'s own EOF
+branch already used internally, exposed publicly for the one real caller
+that needs it. `Server::handleConnection()`'s catch block now calls this
+instead of the full `close()` -- `fireNetDeadIfLinkDead()`, called right
+after, unchanged, now correctly sees a still-valid `boundObject()` and
+fires `net_dead()`, exactly matching the ordinary link-death path. The
+real teardown itself still happens moments later either way, via
+`~Connection()` once `pollOnce()`'s own pruning erases the connection --
+no observable delay, same poll cycle. `destruct()`'s own call site
+(`EfunTable.cpp`) is untouched -- it still correctly uses the full
+`close()`, still correctly skips `net_dead()`, confirmed unchanged by
+the existing `testFireNetDeadIfLinkDeadSkipsAfterExplicitConnectionClose`
+still passing.
+
+**1 new regression test**,
+`testUncaughtDispatchErrorStillFiresNetDeadUnlikeExplicitClose`:
+reproduces `Server::handleConnection()`'s own real fixed sequence by
+hand (`dispatchLine()` throws -> caught -> `markClosed()` ->
+`fireNetDeadIfLinkDead()`), the same public-static-method test seam the
+rest of this cluster already uses since `handleConnection()` itself is
+private. Confirms `net_dead()` now actually fires, unlike the (correct,
+unchanged) explicit-`destruct()`-close case the existing test cluster
+already covers right next to it.
+
+**Verified live with two real clients** against the real running driver,
+real bundled `mudlib/`: client A triggers the crash condition (`eval
+return totally_undefined_efun_xyz()`); A's own connection closes
+(confirmed via EOF); **client B -- a completely separate, unaffected
+session -- genuinely receives real `user.c`'s own `net_dead()` broadcast,
+`"stuf0 is link-dead."`**, live proof `net_dead()` actually fired this
+time, not just in the unit test; B then confirmed still fully functional
+afterward (`eval return 5+5` and `who` both work normally). Clean boot
+log throughout, process alive and responsive across the entire test.
+
+No ROADMAP.md row -- matching how the earlier `main.cpp` argv fix and the
+ctest-vs-direct-run fix were both recorded here only, not tracked as
+dialect/efun work.
+
 **2026-08-18 (continued): `m_indices()`/`m_values()` implemented as
 mapping width's own first real slice -- re-ranked the three original
 Phase 1 blockers after closures' highest-real-usage piece landed, picked
