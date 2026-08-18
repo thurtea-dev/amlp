@@ -448,6 +448,16 @@ implemented alongside it as a natural, small follow-on -- new
 `LpcObject::replacedProgramName_`, set only once a swap actually
 applies, cleared on destruct.
 
+**ROADMAP row 1.6 (2026-08-17):** what that row originally described (a
+`replaces` directive in `inherit`) doesn't exist in real LDMud; the real
+divergence lives here, in `replace_program()` itself. LDMud's own
+`void replace_program()` (no argument) auto-selects the object's sole
+direct inherit -- real FluffOS's `f_replace_program()` always requires
+the string argument, unconditionally. Added a `vm.config().dialect() ==
+"ldmud"` branch to the same registration above for the zero-argument
+case; every existing (string-argument) call path is untouched. See
+ROADMAP.md row 1.6 for the full citation trail.
+
 `origin` was investigated just as deeply and still not implemented,
 now for a sharper, more specific reason than "needs per-call origin
 tagging" alone: real `f_origin()` (`efuns_main.c`) is genuinely simple,

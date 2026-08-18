@@ -101,6 +101,18 @@ earlier draft of this file carried:
   are different-shaped features to implement (compiler-side vs VM-side),
   and whoever picks up 1.6 should re-read `doc/efun/replace_program` in
   full before deciding what the row is actually asking for.
+  **Resolved 2026-08-17:** rescoped and implemented. Reading
+  `doc/efun/replace_program` + `src/object.c`'s `v_replace_program()` in
+  full surfaced the real, genuine per-dialect divergence: LDMud's
+  `replace_program()` accepts a **zero-argument** call and auto-selects
+  the object's sole direct inherit, something real FluffOS's
+  `f_replace_program()` (`replace_program.c`) never allows (mandatory
+  string argument, unconditionally). `replace_program(string)` itself was
+  already FluffOS-scoped and done under row 0.13; this row's real, narrow
+  scope was just the LDMud-only no-arg form, implemented in
+  `src/efun/EfunTable.cpp` gated on `Config::dialect() == "ldmud"`, with
+  3 new regression tests. See ROADMAP.md row 1.6 for the full citation
+  trail.
 - **Link-death notification is `disconnect(object ob, string remaining)`,
   a master apply - not `net_dead`, and not object-level.** Confirmed via
   `src/comm.c`: `callback_master(STR_DISCONNECT, 2)`, and

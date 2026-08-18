@@ -221,6 +221,12 @@ changes made):
   different-shaped features; whoever picks up 1.6 should read
   `doc/efun/replace_program` in full before deciding what the row is
   actually asking for.
+  **Resolved 2026-08-17:** rescoped and implemented - see
+  `src/dialect/instruct.md`'s matching note and ROADMAP.md row 1.6. The
+  real divergence was LDMud's `replace_program()` accepting a
+  zero-argument call (auto-selecting the object's sole direct inherit),
+  which real FluffOS never allows; implemented in
+  `src/efun/EfunTable.cpp`, gated on `Config::dialect()`.
 - Link-death notification is `disconnect(object ob, string remaining)` - a
   **master** apply (`callback_master(STR_DISCONNECT, 2)` in `src/comm.c`),
   not an object-level one, and the name `net_dead` belongs to FluffOS

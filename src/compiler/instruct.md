@@ -73,7 +73,13 @@ the new keywords when the matching dialect is active.
   (the body is an LPC array literal used as code - see `src/vm/instruct.md`
   for how the VM executes it).
 - Parse `unbound_lambda(({ params }), body_array)` similarly.
-- Parse `replaces` as an optional qualifier on `inherit "path";`.
+- ~~Parse `replaces` as an optional qualifier on `inherit "path";`.~~
+  Resolved 2026-08-17 (ROADMAP row 1.6, rescoped): real LDMud has no
+  `replaces` token anywhere in `inherit`'s own grammar -- re-grepped
+  `temp/ldmud/src/prolang.y`'s `inheritance_qualifier`/
+  `inheritance_modifier` productions directly. Nothing for the Parser to
+  add here; the real divergence is `replace_program()`'s own zero-argument
+  form, an efun concern (`src/efun/EfunTable.cpp`), not a parser one.
 - Mapping width: `([ k:v1, v2, v3 ])` syntax where values per key > 1.
 
 **DGD additions**

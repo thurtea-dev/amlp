@@ -64,13 +64,21 @@ Shadows allow one object to intercept `call_other()` calls to another.
 
 ## Phase 1 tasks
 
-### 1.5 - LDMud `replaces` in inherit
+### 1.6 - LDMud `replaces` in inherit (resolved: no such directive exists)
 
-When `inherit "path" replaces "other_path";` is parsed (see `src/compiler`),
-`ObjectManager` must:
-1. Look up "other_path" in the loaded-object cache.
-2. Mark it as replaced by the new object.
-3. Redirect all future `call_other()` calls to the old path to the new object.
+This section (formerly mislabeled "1.5", ROADMAP's row is actually 1.6)
+described `inherit "path" replaces "other_path";` as a compile-time
+directive `ObjectManager` would need to resolve. That premise does not
+match real LDMud: re-grepped `temp/ldmud/src/prolang.y`'s own
+`inheritance_qualifier`/`inheritance_modifier` productions and there is no
+`replaces` token anywhere in the inherit grammar (the complete modifier
+set is `static`/`private`/`public`/`protected`/`nosave`/`nomask`/
+`deprecated`/`virtual`/`visible`). Nothing here for `src/object` or
+`ObjectManager` to build -- the real per-dialect divergence turned out to
+live entirely in the `replace_program()` **efun**'s own argument handling
+(a runtime call, not an `inherit` directive), implemented 2026-08-17 in
+`src/efun/EfunTable.cpp`. See ROADMAP.md row 1.6 for the full citation
+trail and `src/efun/instruct.md` for the efun-side detail.
 
 This requires a `replacedBy_` map in `ObjectManager` that `VM::findObject()`
 and `callFunction()` consult.

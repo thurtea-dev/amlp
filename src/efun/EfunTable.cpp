@@ -3940,11 +3940,46 @@ void registerCoreEfuns() {
     // throws "undefined function" at its own next call, matching real
     // semantics' intent even though this driver has nothing analogous to
     // guard against up front.
+    //
+    // ROADMAP row 1.6 (rescoped): real LDMud has no "replaces" directive
+    // in `inherit` at all -- grepped `src/prolang.y`'s own
+    // `inheritance_qualifier`/`inheritance_modifier` productions, the
+    // complete modifier set is `static`/`private`/`public`/`protected`/
+    // `nosave`/`nomask`/`deprecated`/`virtual`/`visible`, no `replaces`
+    // token anywhere. The real per-dialect divergence lives entirely in
+    // this efun's own argument handling instead (`doc/efun/replace_program`
+    // + `src/object.c`'s own `v_replace_program()`, LDMud 3.2.9+): LDMud
+    // accepts `void replace_program()` with **no** argument and
+    // auto-selects the object's sole direct inherit when it has exactly
+    // one, throwing "requires argument" when it has more than one and
+    // "no inherited program" when it has none. Real FluffOS has no such
+    // form at all -- `replace_program.c`'s own `f_replace_program()`
+    // unconditionally rejects a non-string arg via `bad_arg(1, ...)`
+    // before anything else runs. Gated below on `vm.config().dialect()`
+    // (row 1.1) rather than a full `LpcDialect` enum plumb-through, since
+    // efun already links Config and a bare string compare is all one
+    // call site needs -- no `src/dialect` library dependency added.
     t.registerEfun("replace_program", [](VM& vm, std::vector<Value>& args) -> Value {
-        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+        auto ob = vm.currentObject();
+        std::string target;
+        if (!args.empty() && std::holds_alternative<std::string>(args[0].data)) {
+            target = std::get<std::string>(args[0].data);
+        } else if (args.empty() && vm.config().dialect() == "ldmud") {
+            if (!ob) {
+                throw LpcRuntimeError("replace_program called with no current object");
+            }
+            const auto& inherits = ob->program().inherits;
+            if (inherits.empty()) {
+                throw LpcRuntimeError("replace_program called with no inherited program");
+            }
+            if (inherits.size() > 1) {
+                throw LpcRuntimeError(
+                    "replace_program() requires argument for object with more than one inherit");
+            }
+            target = inherits[0];
+        } else {
             throw LpcRuntimeError("replace_program: expected a string argument");
         }
-        auto ob = vm.currentObject();
         if (!ob) {
             throw LpcRuntimeError("replace_program called with no current object");
         }
@@ -3952,8 +3987,8 @@ void registerCoreEfuns() {
             throw LpcRuntimeError("replace_program on simul_efun object");
         }
 
-        std::string target = ObjectManager::normalizeFilename(std::get<std::string>(args[0].data));
-        auto newProgram = searchInheritedProgram(ob->program(), target);
+        std::string normalizedTarget = ObjectManager::normalizeFilename(target);
+        auto newProgram = searchInheritedProgram(ob->program(), normalizedTarget);
         if (!newProgram) {
             throw LpcRuntimeError(
                 "replace_program: program to replace the current with has to be inherited");

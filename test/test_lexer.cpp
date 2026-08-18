@@ -15762,6 +15762,93 @@ static void testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObj
     std::cout << "testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObject OK\n";
 }
 
+// ROADMAP row 1.6 (rescoped): real LDMud's void replace_program() with
+// no argument auto-selects the object's sole direct inherit -- doc/efun/
+// replace_program + src/object.c's own v_replace_program() (LDMud
+// 3.2.9+). Confirmed via "dialect: ldmud" (row 1.1's Config::dialect()),
+// same deferred-swap machinery as the explicit-argument form.
+static void testReplaceProgramNoArgAutoSelectsSoleInheritUnderLdmudDialect() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/rp3_parent.c",
+        "void create() {}\n"
+        "string tag() { return \"parent\"; }\n");
+    harness.writeFile("/rp3_child.c",
+        "inherit \"/rp3_parent\";\n"
+        "void create() {}\n"
+        "string special() { return \"special\"; }\n"
+        "void do_replace() { replace_program(); }\n");
+
+    auto ob = harness.objects.cloneObject("/rp3_child");
+    assert(ob != nullptr);
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "special", {}).data) == "special");
+
+    harness.vm.callFunction(ob, "do_replace", {});
+    harness.vm.processPendingReplacePrograms();
+
+    // Own function gone, inherited one still resolves -- the swap
+    // genuinely landed on /rp3_parent without naming it explicitly.
+    amlp::Value afterSwap = harness.vm.callFunction(ob, "special", {});
+    assert(afterSwap.isVoid());
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "tag", {}).data) == "parent");
+
+    std::cout << "testReplaceProgramNoArgAutoSelectsSoleInheritUnderLdmudDialect OK\n";
+}
+
+// Real "replace_program() requires argument for object with more than
+// one inherit" (object.c's own v_replace_program(), the num_arg < 1
+// branch) -- more than one direct inherit and no argument must throw,
+// not silently pick one.
+static void testReplaceProgramNoArgThrowsWithMultipleInheritsUnderLdmudDialect() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/rp4_a.c", "void create() {}\n");
+    harness.writeFile("/rp4_b.c", "void create() {}\n");
+    harness.writeFile("/rp4_child.c",
+        "inherit \"/rp4_a\";\n"
+        "inherit \"/rp4_b\";\n"
+        "void create() {}\n"
+        "void do_replace() { replace_program(); }\n");
+
+    auto ob = harness.objects.cloneObject("/rp4_child");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "do_replace", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testReplaceProgramNoArgThrowsWithMultipleInheritsUnderLdmudDialect OK\n";
+}
+
+// Real FluffOS has no no-argument form at all -- replace_program.c's own
+// f_replace_program() unconditionally rejects a non-string arg via
+// bad_arg(1, ...) before anything else runs, even for an object with
+// exactly one inherit. Confirms the ldmud-only branch above is genuinely
+// dialect-gated, not a global relaxation of the argument requirement.
+static void testReplaceProgramNoArgStillRequiresArgumentUnderFluffosDialect() {
+    ObjectVarHarness harness; // defaults to "fluffos", row 1.1
+    harness.writeFile("/rp5_parent.c", "void create() {}\n");
+    harness.writeFile("/rp5_child.c",
+        "inherit \"/rp5_parent\";\n"
+        "void create() {}\n"
+        "void do_replace() { replace_program(); }\n");
+
+    auto ob = harness.objects.cloneObject("/rp5_child");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "do_replace", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testReplaceProgramNoArgStillRequiresArgumentUnderFluffosDialect OK\n";
+}
+
 // function_owner(): the closure's own owner, or int 0 once that owner
 // is genuinely gone (not merely destructed-but-still-referenced --
 // Closure::owner is already a weak_ptr, real code applies no separate
@@ -17328,6 +17415,9 @@ int main() {
     testReplaceProgramDeferredSwapPreservesInheritedVariablesAndDropsOwnFunctions();
     testQueryReplacedProgramReflectsOnlyAnActuallyAppliedSwap();
     testReplaceProgramThrowsWhenTargetNotInheritedOrCalledOnSimulEfunObject();
+    testReplaceProgramNoArgAutoSelectsSoleInheritUnderLdmudDialect();
+    testReplaceProgramNoArgThrowsWithMultipleInheritsUnderLdmudDialect();
+    testReplaceProgramNoArgStillRequiresArgumentUnderFluffosDialect();
     testFunctionOwnerReturnsClosureOwnerOrZeroOnceOwnerIsGone();
     testNumClassesAlwaysReturnsZeroSinceClassDeclarationsDoNotExist();
     testSetAuthorAcceptsStringReturnsVoidAndThrowsOnWrongType();
