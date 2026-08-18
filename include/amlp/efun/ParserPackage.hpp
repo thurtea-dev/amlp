@@ -32,6 +32,28 @@ constexpr int Obs = ObjA | PluralModifier;  // real OBS_TOKEN
 constexpr int Lvs = LivA | PluralModifier;  // real LVS_TOKEN
 } // namespace ParserToken
 
+// real parse_info_t's own PI_* flag bits (packages/parser.h). Stored
+// directly on LpcObject (LpcObject::parseInfoFlags(), valid only while
+// LpcObject::hasParseInfo() is true -- see that method's own comment)
+// rather than in a separate struct real parse_info_t would be, since
+// this driver's object model already has one canonical per-object state
+// holder and nothing here needs pinfo's own separate allocation
+// lifetime. PI_LIVING/PI_INV_ACCESSIBLE/PI_INV_VISIBLE are cached
+// results of the is_living()/inventory_accessible()/inventory_visible()
+// applies (real interrogate_object(), packages/parser.c) -- not
+// produced or read by anything in this slice, listed here only so the
+// noun-phrase-resolution slice that does need them has the real bit
+// values on hand already, not rediscovered from parser.h again.
+namespace ParserInfoFlag {
+constexpr int Setup = 1;         // real PI_SETUP
+constexpr int Living = 2;        // real PI_LIVING (not yet produced/read -- see comment above)
+constexpr int VerbHandler = 4;   // real PI_VERB_HANDLER
+constexpr int RemoteLivings = 8; // real PI_REMOTE_LIVINGS
+constexpr int InvAccessible = 16; // real PI_INV_ACCESSIBLE (not yet produced/read)
+constexpr int InvVisible = 32;    // real PI_INV_VISIBLE (not yet produced/read)
+constexpr int Refresh = 64;      // real PI_REFRESH
+} // namespace ParserInfoFlag
+
 // real verb_node_t (packages/parser.h): one grammar rule registered
 // under a verb. tokens is real verb_node_t::token[] without its real 0
 // terminator (size() serves the same purpose here). lit[0]/lit[1] are
@@ -158,14 +180,39 @@ public:
     // DO_HASH()'s own bit mixing, never documented or relied on by any
     // real call site (parse_dump() is a debug/introspection tool), so a
     // well-defined order is a strict improvement, not a fidelity loss.
-    // A destructed handler prints "(destructed)" in place of real
-    // code's own "(/obname)" -- real code has no equivalent case (real
-    // parse_free(), called from free_object(), unlinks a destructed
-    // handler's own rules immediately; this slice does not port that
-    // cleanup yet, see .cpp comment), so this is this slice's own
-    // honest way of surfacing a rule whose handler is gone rather than
-    // silently hiding it or dereferencing a dangling pointer.
+    // A handler weak_ptr that fails to .lock() at all -- the object was
+    // reference-counted away without ever going through
+    // destructObject()/reloadObject() (nothing else calls
+    // onObjectDestroyed() below, real code's own free_object() has no
+    // equivalent path this driver lacks the same trigger for) -- still
+    // prints "(destructed)" as a graceful fallback rather than silently
+    // dropping the line or dereferencing a dangling pointer. Genuinely
+    // real FluffOS objects cannot reach this state (their own
+    // reference-counted free always runs parse_free() as part of the
+    // same free_object() call), so this is a deliberate, narrow
+    // difference from real behavior, not a gap in onObjectDestroyed()
+    // itself -- see its own comment for the real, eager cleanup path
+    // that keeps a properly-`destruct()`ed handler's rules from ever
+    // reaching dump() at all once it runs.
     static std::string dump();
+
+    // real parse_free() (packages/parser.c), called from free_object():
+    // if `destructed` was ever PI_VERB_HANDLER (successfully called
+    // parse_add_rule()/parse_add_synonym() at least once), unlinks every
+    // rule node it owns from every verb entry in the registry, then
+    // clears its own pinfo (matching real "FREE(pinfo);" -- once freed,
+    // `destructed->hasParseInfo()` reads back false, the same as an
+    // object real code's own free_object() actually deallocated).
+    // real remove_ids(pinfo) is not ported here since nothing in this
+    // slice populates the per-object noun/adj/plural id cache it frees
+    // (see LpcObject::parseInfoFlags()'s own comment) -- vacuous, not
+    // skipped. Wired into ObjectManager::destructObject()'s/
+    // reloadObject()'s own onDestructed callback (EfunTable.cpp's
+    // "destruct"/"reload_object" registrations), the exact same real
+    // trigger point and the exact same "fires once per object either
+    // call actually destructs, including every shadow-chain cascade
+    // link" shape SocketRegistry::closeAllOwnedBy() already uses there.
+    static void onObjectDestroyed(const std::shared_ptr<LpcObject>& destructed);
 
 private:
     static std::unordered_map<std::string, std::vector<VerbEntry>>& verbs();

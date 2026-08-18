@@ -9,6 +9,7 @@
 #include "amlp/object/ObjectManager.hpp"
 #include "amlp/config/Config.hpp"
 #include "amlp/efun/EfunTable.hpp"
+#include "amlp/efun/ParserPackage.hpp"
 #include "amlp/core/Errors.hpp"
 #include "amlp/net/Connection.hpp"
 #include "amlp/net/OutputContext.hpp"
@@ -18487,6 +18488,130 @@ static void testParseAddSynonymCoexistsWithAPlainVerbOfTheSameNameAndParseRemove
     std::cout << "testParseAddSynonymCoexistsWithAPlainVerbOfTheSameNameAndParseRemoveOnlyTouchesThePlainOne OK\n";
 }
 
+// --- parse_free()/parse_refresh(): row 0.13a's third parse_* slice.
+// Real PI_* flags (LpcObject::parseInfoFlags()), eager rule-node
+// cleanup on real destruction, and the LIVINGS_ARE_REMOTE apply both
+// parse_add_rule() and parse_refresh() fire.
+
+static void testParseFreeRealDestructEfunEagerlyRemovesTheDestructedHandlersOwnRuleNodes() {
+    // Unlike testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists
+    // above (which calls VM::destructObject() directly with no callback,
+    // deliberately exercising dump()'s own "(destructed)" fallback for a
+    // scenario real FluffOS can never reach) -- this one goes through the
+    // real, LPC-visible destruct() efun, the actual path
+    // ObjectManager::destructObject()'s own onDestructed callback
+    // (ParserPackage::onObjectDestroyed(), wired in EfunTable.cpp's own
+    // "destruct" registration) fires from.
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/zzzephemeral.c",
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzephemeral\", \"OBJ\");\n"
+        "}\n"
+        "void selfDestruct() { destruct(this_object()); }\n");
+    auto handler = harness.objects.cloneObject("/zzzephemeral");
+    assert(handler != nullptr);
+    harness.vm.callFunction(handler, "setup", {});
+
+    harness.writeFile("/zzzobserver2.c", "string probe() { return parse_dump(); }\n");
+    auto observer = harness.objects.cloneObject("/zzzobserver2");
+    assert(observer != nullptr);
+
+    amlp::Value before = harness.vm.callFunction(observer, "probe", {});
+    assert(std::get<std::string>(before.data).find("Verb zzzephemeral:\n  (/zzzephemeral) OBJ\n") !=
+           std::string::npos);
+
+    harness.vm.callFunction(handler, "selfDestruct", {});
+
+    amlp::Value after = harness.vm.callFunction(observer, "probe", {});
+    const std::string& afterDump = std::get<std::string>(after.data);
+    // Real eager parse_free() cleanup: the rule node is gone entirely,
+    // not merely shown as "(destructed)" -- the verb entry's own header
+    // line survives empty (real code never deletes the VerbEntry itself,
+    // same as parse_remove()). Scoped to this test's own "Verb
+    // zzzephemeral:" block specifically -- the global registry (see
+    // ParserPackage's own class comment) also carries an unrelated,
+    // deliberately-permanent "(destructed)" entry from
+    // testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists
+    // above by this point in the run, so a whole-dump substring check
+    // for "(destructed)" would be a false failure, not a real one.
+    size_t block = afterDump.find("Verb zzzephemeral:\n");
+    assert(block != std::string::npos);
+    size_t blockEnd = afterDump.find("Verb ", block + 1);
+    std::string section =
+        afterDump.substr(block, blockEnd == std::string::npos ? std::string::npos : blockEnd - block);
+    assert(section == "Verb zzzephemeral:\n");
+
+    std::cout << "testParseFreeRealDestructEfunEagerlyRemovesTheDestructedHandlersOwnRuleNodes OK\n";
+}
+
+static void testParseRefreshThrowsWhenParseInitWasNeverCalledExceptForTheMasterObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "void refreshSelf() { parse_refresh(); }\n");
+    assert(harness.objects.loadMasterObject());
+
+    // Every ordinary object throws when parse_init() was never called.
+    harness.writeFile("/zzzrefreshguard.c", "int probe() {\n"
+                                             "    if (!catch(parse_refresh())) return 0;\n"
+                                             "    return 1;\n"
+                                             "}\n");
+    auto ob = harness.objects.cloneObject("/zzzrefreshguard");
+    assert(ob != nullptr);
+    amlp::Value result = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<int64_t>(result.data) == 1);
+
+    // real f_parse_refresh()'s own master_ob special case: "if
+    // (current_object == master_ob) { ...; if (!master_ob->pinfo)
+    // return; }" -- the master calling parse_refresh() on itself is a
+    // silent no-op even though it never called parse_init() either,
+    // unlike every other object above.
+    auto master = harness.vm.masterObject();
+    assert(master != nullptr);
+    assert(!master->hasParseInfo());
+    harness.vm.callFunction(master, "refreshSelf", {}); // must not throw
+
+    std::cout << "testParseRefreshThrowsWhenParseInitWasNeverCalledExceptForTheMasterObject OK\n";
+}
+
+static void testParseAddRuleAndParseRefreshBothFireLivingsAreRemoteAndSetTheFlagWhenTruthy() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c", "void create() {}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/zzzremote.c",
+        "int remote_flag;\n"
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzremoteverb\", \"OBJ\");\n"
+        "}\n"
+        "int livings_are_remote() { return remote_flag; }\n"
+        "void setRemoteFlag(int v) { remote_flag = v; }\n"
+        "void refresh() { parse_refresh(); }\n");
+    auto ob = harness.objects.cloneObject("/zzzremote");
+    assert(ob != nullptr);
+
+    // livings_are_remote() returns 0 (falsy) by default -- real
+    // parse_add_rule() still fires the apply, but PI_REMOTE_LIVINGS
+    // must stay unset.
+    harness.vm.callFunction(ob, "setup", {});
+    assert((ob->parseInfoFlags() & amlp::ParserInfoFlag::VerbHandler) != 0);
+    assert((ob->parseInfoFlags() & amlp::ParserInfoFlag::RemoteLivings) == 0);
+
+    // Flip it truthy, then call parse_refresh() -- real code re-checks
+    // livings_are_remote() there too (PI_VERB_HANDLER is set, so the
+    // real "if (pi->flags & PI_VERB_HANDLER)" branch fires).
+    harness.vm.callFunction(ob, "setRemoteFlag", std::vector<amlp::Value>{amlp::Value(static_cast<int64_t>(1))});
+    harness.vm.callFunction(ob, "refresh", {});
+    assert((ob->parseInfoFlags() & amlp::ParserInfoFlag::RemoteLivings) != 0);
+
+    std::cout << "testParseAddRuleAndParseRefreshBothFireLivingsAreRemoteAndSetTheFlagWhenTruthy OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -19137,6 +19262,9 @@ int main() {
     testParseAddSynonymAliasFormMakesNewVerbResolveThroughToOldVerbsRules();
     testParseAddSynonymThreeArgFormCopiesOnlyTheMatchingRuleAndChecksOwnership();
     testParseAddSynonymCoexistsWithAPlainVerbOfTheSameNameAndParseRemoveOnlyTouchesThePlainOne();
+    testParseFreeRealDestructEfunEagerlyRemovesTheDestructedHandlersOwnRuleNodes();
+    testParseRefreshThrowsWhenParseInitWasNeverCalledExceptForTheMasterObject();
+    testParseAddRuleAndParseRefreshBothFireLivingsAreRemoteAndSetTheFlagWhenTruthy();
     std::cout << "all tests passed\n";
     return 0;
 }

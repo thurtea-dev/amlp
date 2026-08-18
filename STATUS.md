@@ -3,6 +3,81 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): `parse_free()`/`parse_refresh()` implemented,
+`parse_*` (row 0.13a) slice three -- picked after confirming from source
+that the fuller `parse_info_t`'s own noun/adj/plural cache is not
+actually separable from the noun-phrase resolution engine, only its
+flag/cleanup half is (646 tests, up from 643).**
+
+Asked explicitly not to default to "parse_info_t/parse_refresh()/
+parse_free() next" without checking whether something else unblocks more
+of what's left first. Re-read `interrogate_object()` (packages/parser.c),
+the real function that actually populates `parse_info_t`'s own noun/
+adjective/plural id cache, and confirmed it has exactly one real call
+site in the whole file: `load_objects()`, itself only reachable from
+`parse_sentence()`. The cache-*population* half of item (7) genuinely
+cannot be built ahead of (8) (the noun-phrase resolution engine) --
+there would be nothing real to call it from and nothing real to test.
+What *is* genuinely separable, confirmed the same way: real
+`parse_free()` (called from `free_object()`, unlinking a destructed
+handler's own rule nodes) and real `f_parse_refresh()`'s own flag/apply
+mechanics (the `PI_SETUP`/`PI_REFRESH`/`PI_VERB_HANDLER` bit dance, the
+master-object special case, and the `LIVINGS_ARE_REMOTE` apply/
+`PI_REMOTE_LIVINGS` flag) -- neither touches the cache itself. Also
+briefly reconsidered whether the sentence tokenizer's own word-splitting
+front end (item 6) might be a better pick instead, since it looked more
+separable at first glance -- checked and ruled out: it has no real efun
+surface of its own to expose it through independent of the matcher
+(`parse_rules()`) it feeds into, so building it now would leave nothing
+live-testable via `eval`, the same discipline every slice so far has
+kept to.
+
+This also surfaced a real, genuine gap in the very first `parse_*`
+slice's own `parse_add_rule()`: real code also fires the same
+`LIVINGS_ARE_REMOTE` apply and sets `PI_VERB_HANDLER`/`PI_REMOTE_LIVINGS`
+there, deliberately deferred at the time as "purely for sentence-
+matching, not observable by add_rule/dump/remove" -- corrected this
+session now that the flag storage it needed exists anyway.
+
+Implemented: `LpcObject::parseInfoFlags()` (real `parse_info_t::flags`,
+valid only while `hasParseInfo()` is true), a new `ParserInfoFlag`
+namespace (`ParserPackage.hpp`) with the real `PI_*` bit values;
+`ParserPackage::onObjectDestroyed()` (real `parse_free()`) wired into
+both `destruct` and `reload_object`'s existing `onDestructed` callback,
+the same real trigger point `SocketRegistry::closeAllOwnedBy()` already
+uses there; the `parse_refresh` efun in full (guard error, master-object
+special case, flag manipulation, the apply re-check with real code's own
+`O_DESTRUCTED` guard); and `parse_add_rule()`'s own retroactive fix
+(fires the same apply, sets the same two flags, faithfully missing the
+same `O_DESTRUCTED` guard real code's own asymmetric two call sites
+have -- a real, harmless omission in the original FluffOS source, not
+invented here).
+
+4 new regression tests, including one that specifically distinguishes
+two now-separately-real scenarios rather than conflating them: a
+destructed handler's rule genuinely vanishing from `parse_dump()`
+entirely (the new, real, eager cleanup path via the actual `destruct()`
+efun) versus the pre-existing "(destructed)" fallback text (a real,
+narrow gap this driver's own reference-counted memory model can still
+hit -- calling `VM::destructObject()` directly with no callback, which
+genuine FluffOS could never reach at all since its own free is always
+synchronous with `parse_free()`). 646 tests passing, up from 643, zero
+regressions. **Verified live against the real running driver, real
+bundled `mudlib/`**, same harness-tracked `run_in_background`/`TaskStop`
+methodology as the previous slice: a real cloned object's rule vanished
+from `parse_dump()` entirely, immediately, after a real `destruct()`
+call; a real `livings_are_remote()` call-counter (written into the live
+test object itself) confirmed the apply fires exactly once from
+`parse_add_rule()` and a second time from a following `parse_refresh()`;
+the ordinary no-`parse_init()` guard fired correctly via `catch()`.
+Driver process stayed healthy throughout, confirmed via active polling.
+
+See ROADMAP.md row 0.13a for the full updated breakdown; its next-slice
+recommendation now points at the sentence tokenizer and the noun-phrase
+resolution engine together, both now confirmed (not merely assumed) to
+be the two remaining real prerequisites for anything resembling actual
+`parse_sentence()` behavior.
+
 **2026-08-18 (continued): crash-claim resolved (the driver process does
 not crash on an uncaught dispatch error, rigorously re-confirmed; stale
 notes in ROADMAP.md/STATUS.md fixed to match), then `parse_add_synonym()`

@@ -443,4 +443,42 @@ std::string ParserPackage::dump() {
     return out;
 }
 
+void ParserPackage::onObjectDestroyed(const std::shared_ptr<LpcObject>& destructed) {
+    if (!destructed) return;
+    // real "if (pinfo->flags & PI_VERB_HANDLER) { ... }" -- an object
+    // that never successfully registered a rule (parse_add_rule()/
+    // parse_add_synonym() always set this flag on success, see their
+    // own EfunTable.cpp registrations) has nothing to unlink; skip the
+    // full registry walk entirely, matching real code's own guard.
+    if (!destructed->hasParseInfo() || !(destructed->parseInfoFlags() & ParserInfoFlag::VerbHandler)) {
+        destructed->setHasParseInfo(false);
+        destructed->setParseInfoFlags(0);
+        return;
+    }
+
+    // real "for (i = 0; i < VERB_HASH_SIZE; i++) { verb_t *v = verbs[i];
+    // while (v) { ... unlink every node whose handler == pinfo->ob ...
+    // v = v->next; } }" -- every verb entry, every name, not scoped to
+    // one verb the way removeRules() (parse_remove()'s own real
+    // equivalent) is. Synonym entries have no nodes of their own in
+    // this driver's representation (see VerbRuleNode's own comment), so
+    // iterating them here is harmless, matching real code's own
+    // accidental-but-inert behavior on a verb_syn_t there.
+    for (auto& [name, entries] : verbs()) {
+        for (auto& entry : entries) {
+            auto& nodes = entry.nodes;
+            nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                                        [&](const VerbRuleNode& n) { return n.handler.lock() == destructed; }),
+                        nodes.end());
+        }
+    }
+
+    // real remove_ids(pinfo) is a no-op here (nothing in this slice
+    // populates the noun/adj/plural id cache it would free -- see
+    // LpcObject::parseInfoFlags()'s own comment); real "FREE(pinfo);"
+    // is this.
+    destructed->setHasParseInfo(false);
+    destructed->setParseInfoFlags(0);
+}
+
 } // namespace amlp

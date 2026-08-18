@@ -3503,8 +3503,16 @@ void registerCoreEfuns() {
         // that method's own header comment for why this has to be a
         // callback threaded down from here rather than a direct call
         // inside ObjectManager itself.
+        // real "if (ob->pinfo) parse_free(ob->pinfo);" (object.c's own
+        // free_object(), called once destructObject()'s own refcount
+        // actually drops -- reached from the same callback, not a
+        // separate real call site, since this driver's own memory
+        // model has no separate free_object() step to hook into
+        // directly, see ParserPackage::onObjectDestroyed()'s own
+        // comment).
         vm.destructObject(ob, [](const std::shared_ptr<LpcObject>& destructed) {
             SocketRegistry::closeAllOwnedBy(destructed);
+            ParserPackage::onObjectDestroyed(destructed);
         });
 
         // Real destruct_object(): "if (ob->interactive)
@@ -3598,6 +3606,7 @@ void registerCoreEfuns() {
         // destructing, not just for a bare destruct() call specifically.
         vm.reloadObject(ob, [](const std::shared_ptr<LpcObject>& destructed) {
             SocketRegistry::closeAllOwnedBy(destructed);
+            ParserPackage::onObjectDestroyed(destructed);
         });
         return Value{};
     });
@@ -4744,6 +4753,82 @@ void registerCoreEfuns() {
 
         ParserPackage::addRule(std::get<std::string>(args[0].data), std::get<std::string>(args[1].data), ob,
                                 fetchParserLiterals(vm));
+
+        // real "handler->pinfo->flags |= PI_VERB_HANDLER; ... ret =
+        // apply(LIVINGS_ARE_REMOTE, handler, 0, ORIGIN_DRIVER); if
+        // (!IS_ZERO(ret)) handler->pinfo->flags |= PI_REMOTE_LIVINGS;"
+        // -- not ported in the first parse_* slice (deferred as
+        // "purely for sentence-matching, not observable by
+        // add_rule/dump/remove"), now real and worth doing correctly
+        // since this slice adds the PI_* flag storage this needed all
+        // along. Real code has no O_DESTRUCTED guard after this
+        // specific apply (unlike parse_refresh()'s own copy of the same
+        // call, which does check) -- if livings_are_remote() destructs
+        // `ob` itself, real code would already be touching a freed
+        // pinfo; this driver's own LpcObject is never actually freed on
+        // destruct (see LpcObject::isDestructed()'s own comment), so
+        // setting a flag on it here afterward is harmless either way,
+        // and porting the missing guard would just be inventing
+        // stricter behavior than real code actually has.
+        ob->setParseInfoFlags(ob->parseInfoFlags() | ParserInfoFlag::VerbHandler);
+        Value remoteRet = vm.callFunction(ob, "livings_are_remote", {});
+        if (isTruthy(remoteRet)) {
+            ob->setParseInfoFlags(ob->parseInfoFlags() | ParserInfoFlag::RemoteLivings);
+        }
+        return Value{};
+    });
+
+    // void parse_refresh() -- real packages/parser.c's f_parse_refresh():
+    // informs the parser that current_object's own cached noun/adjective/
+    // plural id data (not yet populated by anything in this driver, see
+    // LpcObject::parseInfoFlags()'s own comment) may be stale and should
+    // be recomputed the next time it is actually needed. Real semantics
+    // ported in full even though the cache itself is not populated yet:
+    // the master_ob special case (clears the master's own PI_VERB_HANDLER-
+    // independent MS_HAS_USERS-equivalent... this driver has not ported
+    // interrogate_master()'s USERS half either, see EfunTable.cpp's own
+    // parse_add_rule comment, so this reduces to "master_ob with no
+    // pinfo returns early, doing nothing" -- still a real, correct,
+    // observable no-throw path, not skipped); the "not known by the
+    // parser" guard; the PI_SETUP/PI_REFRESH flag dance (real "pi->flags
+    // &= PI_VERB_HANDLER; pi->flags |= PI_REFRESH;" when PI_SETUP was
+    // set, or just "pi->flags &= PI_VERB_HANDLER;" otherwise -- both
+    // reduce to "keep only PI_VERB_HANDLER, plus PI_REFRESH if a real
+    // cache existed to invalidate", faithfully reproduced via the same
+    // bitwise AND/OR even though PI_SETUP itself is never actually set
+    // by anything in this slice); and the same real PI_VERB_HANDLER ->
+    // livings_are_remote() -> PI_REMOTE_LIVINGS re-check parse_add_rule()
+    // above now also does, this time with real code's own O_DESTRUCTED
+    // guard (isDestructed() here) after the apply, matching the one real
+    // difference between these two real call sites exactly.
+    t.registerEfun("parse_refresh", [](VM& vm, std::vector<Value>&) -> Value {
+        auto ob = vm.currentObject();
+        if (!ob) return Value{};
+
+        if (ob == vm.masterObject()) {
+            if (!ob->hasParseInfo()) return Value{};
+        }
+
+        if (!ob->hasParseInfo()) {
+            throw LpcRuntimeError("parse_refresh: object is not known by the parser (call parse_init() first)");
+        }
+
+        int flags = ob->parseInfoFlags();
+        if (flags & ParserInfoFlag::Setup) {
+            flags &= ParserInfoFlag::VerbHandler;
+            flags |= ParserInfoFlag::Refresh;
+        } else {
+            flags &= ParserInfoFlag::VerbHandler;
+        }
+        ob->setParseInfoFlags(flags);
+
+        if (flags & ParserInfoFlag::VerbHandler) {
+            Value remoteRet = vm.callFunction(ob, "livings_are_remote", {});
+            if (ob->isDestructed()) return Value{};
+            if (isTruthy(remoteRet)) {
+                ob->setParseInfoFlags(ob->parseInfoFlags() | ParserInfoFlag::RemoteLivings);
+            }
+        }
         return Value{};
     });
 
