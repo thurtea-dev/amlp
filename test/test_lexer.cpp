@@ -20,6 +20,7 @@
 #include "amlp/dialect/FluffOsBootApi.hpp"
 #include "amlp/dialect/LdmudBootApi.hpp"
 #include "amlp/dialect/MasterUidBoot.hpp"
+#include "amlp/dialect/DialectSelect.hpp"
 #include <algorithm>
 #include <cassert>
 #include <iostream>
@@ -16680,6 +16681,82 @@ static void testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply() {
     std::cout << "testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply OK\n";
 }
 
+// Config::dialect() and makeBootApiForConfig() -- ROADMAP row 1.1's own
+// config-driven dialect switch, scoped to unblocking main.cpp's one
+// masterUidApply() call site. The tests below exercise the real,
+// end-to-end call path (Config -> makeBootApiForConfig() -> a real
+// compiled master object via queryMasterUid()/VM::applyMaster()), not
+// just BootApi construction in isolation.
+
+static void testConfigDialectDefaultsToFluffosWhenUnsetMatchingPriorHardcodedBehavior() {
+    ObjectVarHarness harness;
+    assert(harness.config.dialect() == "fluffos");
+    std::cout << "testConfigDialectDefaultsToFluffosWhenUnsetMatchingPriorHardcodedBehavior OK\n";
+}
+
+static void testConfigDialectReadsAnExplicitlyConfiguredValue() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    assert(harness.config.dialect() == "ldmud");
+    std::cout << "testConfigDialectReadsAnExplicitlyConfiguredValue OK\n";
+}
+
+static void testMakeBootApiForConfigSelectsTheRightBootApiForARealQueryMasterUidCallAtRuntime() {
+    // Default/unset dialect: must behave exactly as it did before this
+    // config key existed -- FluffOsBootApi, get_root_uid() -- proving
+    // this change is a genuine no-op for every config file that never
+    // sets "dialect".
+    {
+        ObjectVarHarness harness;
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "string get_root_uid() { return \"ROOT-DEFAULT\"; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        auto bootApi = amlp::makeBootApiForConfig(harness.config);
+        assert(bootApi->masterUidApply() == "get_root_uid");
+        auto uid = amlp::queryMasterUid(harness.vm, *bootApi);
+        assert(uid.has_value());
+        assert(*uid == "ROOT-DEFAULT");
+    }
+
+    // Explicit "dialect: ldmud" config: must genuinely call
+    // get_master_uid() instead, selected entirely by config, not by a
+    // hardcoded BootApi type the way main.cpp used to before this
+    // session.
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/unused.c",
+            "void create() {}\n"
+            "string get_master_uid() { return \"ROOT-LDMUD-CONFIG\"; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        auto bootApi = amlp::makeBootApiForConfig(harness.config);
+        assert(bootApi->masterUidApply() == "get_master_uid");
+        auto uid = amlp::queryMasterUid(harness.vm, *bootApi);
+        assert(uid.has_value());
+        assert(*uid == "ROOT-LDMUD-CONFIG");
+    }
+
+    std::cout << "testMakeBootApiForConfigSelectsTheRightBootApiForARealQueryMasterUidCallAtRuntime OK\n";
+}
+
+static void testMakeBootApiForConfigThrowsForDgdSinceDgdBootApiDoesNotExistYet() {
+    // DGD stays explicitly out of scope this pass -- a config asking
+    // for it must fail loudly, not silently fall back to some other
+    // dialect's BootApi.
+    ObjectVarHarness harness("dialect: dgd\n");
+
+    bool threw = false;
+    try {
+        amlp::makeBootApiForConfig(harness.config);
+    } catch (const amlp::NotImplementedError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testMakeBootApiForConfigThrowsForDgdSinceDgdBootApiDoesNotExistYet OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -17283,6 +17360,10 @@ int main() {
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
     testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime();
     testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply();
+    testConfigDialectDefaultsToFluffosWhenUnsetMatchingPriorHardcodedBehavior();
+    testConfigDialectReadsAnExplicitlyConfiguredValue();
+    testMakeBootApiForConfigSelectsTheRightBootApiForARealQueryMasterUidCallAtRuntime();
+    testMakeBootApiForConfigThrowsForDgdSinceDgdBootApiDoesNotExistYet();
     std::cout << "all tests passed\n";
     return 0;
 }

@@ -3,6 +3,74 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-24 (continued): `Config::dialect()` implemented and wired into
+`main.cpp`'s `masterUidApply()` call site -- the boot-time UID query is
+now genuinely config-driven (`"fluffos"`/`"ldmud"`, defaulting to
+`"fluffos"` unchanged) instead of hardcoded to `FluffOsBootApi` (600
+tests, up from 596).**
+
+Closes the gap the prior entry's own comment flagged directly: `main.cpp`
+was hardcoded to `FluffOsBootApi` because `Config::dialect()` (row 1.1)
+didn't exist. Scoped to exactly what unblocks that one call site, per
+this session's own instruction -- no DGD, no connect/disconnect, no
+other apply.
+
+**`Config::dialect()`** (`src/config/Config.hpp`/`.cpp`): a plain
+`std::string`, same `key: value` config-file convention every other
+`Config` field already uses, default `"fluffos"`. Deliberately not the
+`LpcDialect` enum itself -- `src/dialect` already depends on `src/config`
+for `Config`, so `Config` depending back on `src/dialect` for the enum
+type would be a library cycle. Parsing into the real enum happens where
+it's actually needed, `dialectFromString()` inside the new
+`makeBootApiForConfig()`.
+
+**`makeBootApiForConfig(const Config&)`** (new
+`src/dialect/DialectSelect.hpp`/`.cpp`): a small free function, not the
+`DialectFactory` class `src/dialect/instruct.md` sketches. Skipped the
+factory deliberately -- that class's whole reason to exist is being
+handed to several independent consumers (`ApplyTable`, `ObjectManager`,
+`Lexer`/`Parser`, `VM`, per that file's own "how dialect flows through
+the driver" diagram), none of which exist yet; only `main.cpp`'s one
+`queryMasterUid()` call site does. A `switch` over `dialectFromString
+(config.dialect())` returning `FluffOsBootApi`/`LdmudBootApi` is the
+entire body. DGD throws `NotImplementedError` ("DgdBootApi does not
+exist yet") rather than silently falling back to some other dialect's
+`BootApi` -- a config asking for an unsupported dialect should fail
+loudly, not misbehave quietly. Promote this to a real `DialectFactory`
+once a second consumer actually needs the same construction logic.
+
+`main.cpp` now calls `amlp::makeBootApiForConfig(config)` in place of
+the prior hardcoded `amlp::FluffOsBootApi bootApi(config);`, holding the
+result in a `unique_ptr<BootApi>` since the concrete type is now
+runtime-selected rather than fixed at compile time.
+
+**Confirmed live against the real `amlp` binary, not just the test
+suite**, all three cases: `etc/driver.cfg` unmodified (no `dialect` key)
+still prints `master does not define get_root_uid()`, byte-for-byte the
+same as before this session; the same config with `dialect: ldmud`
+appended prints `master does not define get_master_uid()` instead,
+proving the switch is genuinely config-driven; and the same config with
+`dialect: dgd` appended terminates with an uncaught
+`amlp::NotImplementedError: not implemented: dgd dialect (DgdBootApi
+does not exist yet)` rather than booting with the wrong dialect silently
+selected.
+
+Four new regression tests (600 total, up from 596, all passing across
+three consecutive runs plus `ctest`): `Config::dialect()` defaults to
+`"fluffos"` when unset and reads back an explicitly configured value;
+the actual end-to-end case the prior entry's own gap called for --
+`makeBootApiForConfig()` feeding a real `queryMasterUid()` call against
+a real compiled master object, once for the default/unset config
+(confirming it still calls `get_root_uid()` and gets back the master's
+own real return value, not just a name-equality check) and once for
+`dialect: ldmud` (confirming `get_master_uid()` fires instead, driven
+entirely by config); and the DGD case throwing `NotImplementedError`
+rather than silently constructing the wrong `BootApi`.
+
+ROADMAP.md row 1.1 flipped to `[x]` (both the enum and the config key
+now exist and are genuinely consumed, even if only by this one call
+site so far); row 1.4's own note updated with this session's progress.
+
 **2026-08-24 (continued): `BootApi::masterUidApply()` wired into the real
 runtime for the first time -- `main.cpp` now genuinely calls
 `get_root_uid()` on the master object at boot, routed through

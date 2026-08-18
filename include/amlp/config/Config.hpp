@@ -40,6 +40,18 @@ public:
     // included.
     const std::string& globalIncludeFile() const { return globalIncludeFile_; }
 
+    // Which LPC dialect this driver runs as -- "fluffos" (default),
+    // "ldmud", or "dgd" (see src/dialect/LpcDialect.hpp's own
+    // dialectFromString() for the string<->enum mapping actually used).
+    // Kept as a plain string here, not the LpcDialect enum itself: src/
+    // dialect already depends on src/config for Config, so Config
+    // depending back on src/dialect would be a library cycle. Parsing
+    // happens at the one real call site that needs the enum
+    // (src/dialect/DialectSelect.cpp's makeBootApiForConfig()). Defaults
+    // to "fluffos" so every existing config file that never sets this
+    // key keeps behaving exactly as it did before this key existed.
+    const std::string& dialect() const { return dialect_; }
+
 private:
     std::string mudlibRoot_ = "./test/mudlib_stub";
     std::string masterFile_ = "/master";
@@ -50,6 +62,7 @@ private:
     std::string simulEfunFile_ = "";
     std::string mudName_ = "AMLP";
     std::string globalIncludeFile_ = "";
+    std::string dialect_ = "fluffos";
 
     std::unordered_map<std::string, std::string> raw_;
 };
