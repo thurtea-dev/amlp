@@ -3,6 +3,48 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): consolidated to a single driver config,
+`etc/driver.cfg`, boots the real library mudlib -- `etc/driver_lil.cfg`
+removed, verified live (623 tests, unchanged, no source touched).**
+
+Grepped the whole repo for `driver.cfg` and `mudlib_stub` (test/, src/,
+include/, CMakeLists.txt, any `.sh` scripts, `.claude/`) before changing
+anything, per instruction. Found: `src/main.cpp`'s own no-argv fallback
+default is `"config/driver.cfg"`, a different, nonexistent path,
+unrelated. `include/amlp/config/Config.hpp`'s own `mudlibRoot_` class
+member defaults to `"./test/mudlib_stub"` -- but confirmed via every
+`Config config;` bare-construction site in `test/test_lexer.cpp` that no
+automated test actually exercises this default for real file I/O: the
+synthetic-source tests never call `ObjectManager::loadObject()`/
+`cloneObject()` at all, and every real-file-I/O test uses
+`ObjectVarHarness`, which always calls `loadFromFile()` with its own
+explicit temp `mudlib_root`. No test calls `mudlibRoot()` directly
+either. Every other hit was either the test harness's own unrelated
+synthetic temp config file (same filename, different purpose), a
+comment citing `etc/driver.cfg`/`mudlib_stub` as real-world motivating
+context, or dated `STATUS.md`/`STATUS-ARCHIVE.md` history. Nothing in
+`CMakeLists.txt`, no shell scripts, nothing in `.claude/`. Conclusion:
+nothing beyond manual boot testing depended on either the file's content
+or the stub directory's real files -- safe to consolidate.
+
+`etc/driver.cfg`'s content replaced wholesale with `etc/driver_lil.cfg`'s
+(port included, 4000 -- literal "replace with driver_lil.cfg's content"
+per instruction, not a cherry-picked merge), header comment rewritten to
+describe the consolidation and explicitly note `test/mudlib_stub/` is
+untouched on disk, just no longer referenced by any config file (not
+deleted -- consolidating configs is not the same thing as deciding the
+stub mudlib itself is unneeded, and nothing asked for that).
+`etc/driver_lil.cfg` removed. `README.md`'s build/run section collapsed
+back to the single command.
+
+Verified live with a real telnet-negotiating client against the single
+remaining `etc/driver.cfg`: login shows "Welcome to Library!", the
+entrance hall's description prints on arrival, `create`/`purge` both
+confirmed working. Clean boot, no errors. One scratch artifact from the
+live test itself (`data/created/consolidation_gizmo.c`) removed
+afterward, same as every previous time this exact live-test byproduct
+has come up.
+
 **2026-08-18 (continued): ROADMAP.md scope clarification -- DGD is now
 recorded as a comparison-only reference dialect, not a required Phase 1
 target, no code touched (623 tests, unchanged).**

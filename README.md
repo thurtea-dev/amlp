@@ -10,16 +10,8 @@ cmake --build build -j4
 ctest --test-dir build --output-on-failure
 ```
 
-Two driver configs exist right now:
-
 ```
 ./build/amlp etc/driver.cfg
-```
-
-boots against `test/mudlib_stub/`, a minimal mudlib used only to exercise the driver.
-
-```
-./build/amlp etc/driver_lil.cfg
 ```
 
 boots the driver's own bundled mudlib under `mudlib/` ("library", a stripped-down rebuild of Lil with one starting room and the wand of creation, see `mudlib/LIBRARY_MUDLIB_PLAN.md`).
