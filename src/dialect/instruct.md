@@ -69,6 +69,21 @@ LDMud apply names - all of the above, plus:
   gate at all (no `APPLY_VALID_SNOOP` in `applies.h`) - LDMud genuinely
   differs here, confirming this is a real per-dialect divergence, not a
   FluffOS-build quirk.
+  **`valid_snoop` implemented 2026-08-17 (ROADMAP row 1.16), alongside a
+  fuller re-scope of `snoop()` than this note alone implied.** Reading
+  `temp/ldmud/src/comm.c`'s own `set_snoop()`/`v_snoop()` directly (not
+  just `doc/efun/snoop`'s prose, which turned out stale) surfaced two more
+  real divergences: the apply is called for both the start *and* stop
+  forms, and real `snoop()` returns a plain `int` (1/0/-1), never the
+  object, despite the doc's own "object snoop(...)" SYNOPSIS text --
+  `func_spec`'s `"int snoop(object, void|object);"` and `v_snoop()`'s own
+  `put_number(sp, i)` are authoritative. `valid_query_snoop` intentionally
+  left unimplemented: it exists only to gate `query_snoop()`, which is
+  itself obsolete in this exact 3.6.8 clone
+  (`temp/ldmud/doc/obsolete/query_snoop`) - real modern LDMud replaced it
+  with `interactive_info(ob, II_SNOOP_*)`, a materially larger, different
+  efun this driver has no equivalent of at all. See ROADMAP.md row 1.16
+  for the full citation trail.
 - `hasAutoObject()` → false
 
 Two more corrections, not apply names but signature/mechanism errors an

@@ -494,7 +494,42 @@ existing counterpart here. Row 1.7 itself (`lambda()`/
 `unbound_lambda()`/`#'symbol`) is still entirely unimplemented, so there
 is no real bound/unbound lambda value yet for a faithful `bind_lambda()`
 to rebind. See ROADMAP.md row 1.7 and `src/vm/instruct.md` for the full
-scope and the options left on the table.
+scope and the options left on the table. **Decision (2026-08-17): stays
+deferred (option (c) of the three recorded above), no partial stand-in.**
+`lambda()`/`unbound_lambda()` are themselves entirely unimplemented
+prerequisites -- there is no real lambda value yet for any `bind_lambda()`
+to rebind, so a stand-in would only be exercising this driver's
+pre-existing FluffOS-style closures under a name that means something
+structurally different in real LDMud. Stays deferred alongside `parse_*`
+(row 0.13a) and the connect/disconnect design question until row 1.7's
+own prerequisite work gets an explicit go-ahead.
+
+**ROADMAP row 1.16 (`snoop()`/`valid_snoop()`), 2026-08-17:** scanning
+the remaining Phase 1 rows for the next small, unambiguous dialect
+divergence (same method as rows 1.5/1.6) turned up `snoop()`. Real LDMud
+`temp/ldmud/src/comm.c`'s own `set_snoop()`/`v_snoop()`, read in full,
+not `doc/efun/snoop`'s own prose (which turned out stale on the return
+type): `master->valid_snoop(by, victim-or-0)` gates both the start and
+stop forms (FluffOS gates neither -- `applies.h` has no
+`APPLY_VALID_SHADOW`-style `APPLY_VALID_SNOOP` entry at all, already
+documented above); real `snoop()` returns a plain `int` (1 success / -1
+snoop-loop-would-result / 0 any other failure), never the object --
+`func_spec`'s own `"int snoop(object, void|object);"` and `v_snoop()`'s
+own `put_number(sp, i)` contradict `doc/efun/snoop`'s stale "object
+snoop(...)" SYNOPSIS text, confirming the C over the doc; and a
+non-interactive victim on the start form is a normal `0` return, never
+the thrown error the FluffOS path above raises. Added an `ldmud` branch
+to the same `snoop` registration, reusing the existing anti-loop walk
+unchanged (the same cycle-detection fact, just tagged `-1` under this
+branch instead of a plain denial) and the existing
+`snooping()`/`snoopedBy()` fields. 5 new regression tests. `query_snoop()`
+left untouched -- it is obsolete as an LPC-visible efun in this exact
+3.6.8 clone (`temp/ldmud/doc/obsolete/query_snoop`), replaced by
+`interactive_info(ob, II_SNOOP_*)`, confirmed via live call sites in
+`comm.c`'s `f_interactive_info()` -- a materially larger, different efun
+out of scope for this pass, so `valid_query_snoop` (which exists only to
+gate that replacement) was not implemented either. See ROADMAP.md row
+1.16 for the full citation trail.
 
 `origin` was investigated just as deeply and still not implemented,
 now for a sharper, more specific reason than "needs per-call origin

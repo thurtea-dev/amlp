@@ -221,6 +221,21 @@ changes made):
   LDMud genuinely differs here, a real per-dialect divergence worth
   carrying into whichever row eventually gives `snoop()` dialect-aware
   behavior.
+  **`valid_snoop` implemented 2026-08-17.** `snoop()` itself needed a
+  fuller re-scope than this note alone flagged: reading
+  `temp/ldmud/src/comm.c`'s own `set_snoop()`/`v_snoop()` in full showed
+  the apply gates both the start and stop forms (not just start), and
+  that real `snoop()` returns a plain `int` (1/0/-1), never the object --
+  `doc/efun/snoop`'s own "object snoop(...)" SYNOPSIS text is stale;
+  `func_spec`'s `"int snoop(object, void|object);"` and `v_snoop()`'s own
+  `put_number(sp, i)` are what the driver actually does. Implemented in
+  `src/efun/EfunTable.cpp`'s `snoop` registration, gated on
+  `Config::dialect()`, 5 new regression tests. `valid_query_snoop` left
+  unimplemented on purpose -- it only ever gated `query_snoop()`, which is
+  itself obsolete in this exact 3.6.8 clone
+  (`temp/ldmud/doc/obsolete/query_snoop`), replaced by the much larger
+  `interactive_info(ob, II_SNOOP_*)` this driver has no equivalent of.
+  See ROADMAP.md row 1.16 for the full citation trail.
 - The `replaces` directive in `inherit` **does not exist anywhere in real
   LDMud** - grepped the actual grammar (`src/prolang.y`'s
   `inheritance_qualifier`/`inheritance_modifier` productions): the

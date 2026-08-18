@@ -6127,6 +6127,180 @@ static void testSnoopSnooperDestructedClearsVictimsSnoopedBy() {
     std::cout << "testSnoopSnooperDestructedClearsVictimsSnoopedBy OK\n";
 }
 
+// ROADMAP row 1.16 (LDMud master apply name table): real LDMud snoop()
+// returns a plain int (1/0/-1), never the object -- confirmed against
+// temp/ldmud/src/func_spec's own "int snoop(object, void|object);" and
+// v_snoop()'s own put_number(sp, i), which genuinely contradicts
+// doc/efun/snoop's own stale "object snoop(...)" SYNOPSIS text -- and
+// gates BOTH the start and stop forms through master->valid_snoop(by,
+// victim-or-0), unlike FluffOS which has no such apply at all.
+static void testSnoopLdmudDialectStartReturnsIntOneAndUsesValidSnoopApply() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_snoop(object me, object you) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/snl1_victim.c", "void create() {}\n");
+    harness.writeFile("/snl1_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n");
+    auto victim = harness.objects.cloneObject("/snl1_victim");
+    auto snooper = harness.objects.cloneObject("/snl1_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    amlp::Value started = harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    assert(std::holds_alternative<int64_t>(started.data));
+    assert(std::get<int64_t>(started.data) == 1);
+    assert(victim->snoopedBy().lock() == snooper);
+
+    ::close(fds[1]);
+    std::cout << "testSnoopLdmudDialectStartReturnsIntOneAndUsesValidSnoopApply OK\n";
+}
+
+static void testSnoopLdmudDialectReturnsZeroWhenMasterDeniesEitherForm() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_snoop(object me, object you) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/snl2_victim.c", "void create() {}\n");
+    harness.writeFile("/snl2_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n"
+        "mixed stop() { return snoop(this_object()); }\n");
+    auto victim = harness.objects.cloneObject("/snl2_victim");
+    auto snooper = harness.objects.cloneObject("/snl2_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    // Start form denied.
+    amlp::Value started = harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    assert(std::holds_alternative<int64_t>(started.data));
+    assert(std::get<int64_t>(started.data) == 0);
+    assert(!victim->snoopedBy().lock());
+
+    // Stop form also goes through valid_snoop() under LDMud (unlike
+    // FluffOS, where stopping is always unconditionally allowed) -- a
+    // denying master blocks it too, confirmed against set_snoop()'s own
+    // "The function calls master->valid_snoop() to test if the snoop is
+    // allowed" comment, which is not scoped to the start form only.
+    amlp::Value stopped = harness.vm.callFunction(snooper, "stop", {});
+    assert(std::holds_alternative<int64_t>(stopped.data));
+    assert(std::get<int64_t>(stopped.data) == 0);
+
+    ::close(fds[1]);
+    std::cout << "testSnoopLdmudDialectReturnsZeroWhenMasterDeniesEitherForm OK\n";
+}
+
+static void testSnoopLdmudDialectStopFormReturnsOneWhenSomethingWasUnlinkedElseZero() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_snoop(object me, object you) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/snl3_victim.c", "void create() {}\n");
+    harness.writeFile("/snl3_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n"
+        "mixed stop() { return snoop(this_object()); }\n");
+    auto victim = harness.objects.cloneObject("/snl3_victim");
+    auto snooper = harness.objects.cloneObject("/snl3_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(victim);
+
+    // Nothing to stop yet -- real set_snoop()'s own "if (!on ||
+    // on->closing) return 0;" path.
+    amlp::Value stoppedEmpty = harness.vm.callFunction(snooper, "stop", {});
+    assert(std::holds_alternative<int64_t>(stoppedEmpty.data));
+    assert(std::get<int64_t>(stoppedEmpty.data) == 0);
+
+    harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    assert(victim->snoopedBy().lock() == snooper);
+
+    amlp::Value stoppedReal = harness.vm.callFunction(snooper, "stop", {});
+    assert(std::holds_alternative<int64_t>(stoppedReal.data));
+    assert(std::get<int64_t>(stoppedReal.data) == 1);
+    assert(!victim->snoopedBy().lock());
+
+    ::close(fds[1]);
+    std::cout << "testSnoopLdmudDialectStopFormReturnsOneWhenSomethingWasUnlinkedElseZero OK\n";
+}
+
+static void testSnoopLdmudDialectNonInteractiveVictimReturnsZeroNotThrow() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_snoop(object me, object you) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    // victim never gets a Connection attached -- not interactive.
+    harness.writeFile("/snl4_victim.c", "void create() {}\n");
+    harness.writeFile("/snl4_snooper.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n");
+    auto victim = harness.objects.cloneObject("/snl4_victim");
+    auto snooper = harness.objects.cloneObject("/snl4_snooper");
+    assert(victim != nullptr && snooper != nullptr);
+
+    amlp::Value started = harness.vm.callFunction(snooper, "start", {amlp::Value(victim)});
+    assert(std::holds_alternative<int64_t>(started.data));
+    assert(std::get<int64_t>(started.data) == 0);
+
+    std::cout << "testSnoopLdmudDialectNonInteractiveVictimReturnsZeroNotThrow OK\n";
+}
+
+static void testSnoopLdmudDialectChainCycleReturnsNegativeOne() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int valid_snoop(object me, object you) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/snl5_a.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n");
+    harness.writeFile("/snl5_b.c",
+        "mixed start(object victim) { return snoop(this_object(), victim); }\n");
+    auto a = harness.objects.cloneObject("/snl5_a");
+    auto b = harness.objects.cloneObject("/snl5_b");
+    assert(a != nullptr && b != nullptr);
+
+    int fdsA[2];
+    int fdsB[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsA) == 0);
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fdsB) == 0);
+    amlp::Connection connA(fdsA[0]);
+    amlp::Connection connB(fdsB[0]);
+    connA.attach(a);
+    connB.attach(b);
+
+    amlp::Value r1 = harness.vm.callFunction(a, "start", {amlp::Value(b)});
+    assert(std::holds_alternative<int64_t>(r1.data));
+    assert(std::get<int64_t>(r1.data) == 1);
+
+    // B now tries to snoop A -- would create a 2-cycle. Real
+    // set_snoop()'s own loop check returns -1 specifically for this case,
+    // distinct from a plain 0 denial.
+    amlp::Value r2 = harness.vm.callFunction(b, "start", {amlp::Value(a)});
+    assert(std::holds_alternative<int64_t>(r2.data));
+    assert(std::get<int64_t>(r2.data) == -1);
+
+    ::close(fdsA[1]);
+    ::close(fdsB[1]);
+    std::cout << "testSnoopLdmudDialectChainCycleReturnsNegativeOne OK\n";
+}
+
 // --- telnet IAC negotiation, echo suppression, NAWS (Phase 0.8) ----------
 // AF_UNIX socketpair, same convention as the rest of this file's net
 // tests: fds[0] is what Connection reads from, fds[1] stands in for the
@@ -17267,6 +17441,11 @@ int main() {
     testSnoopStopFormUnlinksAndReturnsByItself();
     testSnoopVictimDisconnectClearsBothSidesOfTheRelationship();
     testSnoopSnooperDestructedClearsVictimsSnoopedBy();
+    testSnoopLdmudDialectStartReturnsIntOneAndUsesValidSnoopApply();
+    testSnoopLdmudDialectReturnsZeroWhenMasterDeniesEitherForm();
+    testSnoopLdmudDialectStopFormReturnsOneWhenSomethingWasUnlinkedElseZero();
+    testSnoopLdmudDialectNonInteractiveVictimReturnsZeroNotThrow();
+    testSnoopLdmudDialectChainCycleReturnsNegativeOne();
     testIacSequencesAreStrippedAndNeverReachDispatchedLines();
     testIacIacIsAnEscapedLiteral0xffDataByteNotACommand();
     testTelnetWillEchoAndNawsAreSilentlyAcceptedOtherOptionsRefused();

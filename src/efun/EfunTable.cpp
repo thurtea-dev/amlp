@@ -4220,27 +4220,105 @@ void registerCoreEfuns() {
     // new_set_snoop()'s own two "terminate previous" scans, then the new
     // link is made. Returns victim on success, 0 on denial.
     //
-    // Deliberately NOT gated on any master()->valid_snoop() apply, unlike
-    // shadow()'s own valid_shadow() gate just above -- confirmed
-    // exhaustively against this exact reference build: applies.h defines
-    // APPLY_VALID_SHADOW (36) but has no APPLY_VALID_SNOOP entry at all,
-    // new_set_snoop() itself never calls apply()/master_ob for
-    // permission, and func_spec.c's own snoop() signature carries no such
-    // hook either. This is a real, load-bearing difference from shadow(),
-    // not an oversight in either direction: real FluffOS leaves snoop
-    // authorization entirely to the mudlib layer (a wizard-only command
-    // wrapping this efun with its own check before ever calling it), and
-    // this driver matches that by adding no invented gate here.
-    t.registerEfun("snoop", [](VM&, std::vector<Value>& args) -> Value {
+    // Deliberately NOT gated on any master()->valid_snoop() apply under
+    // FluffOS, unlike shadow()'s own valid_shadow() gate just above --
+    // confirmed exhaustively against this exact reference build:
+    // applies.h defines APPLY_VALID_SHADOW (36) but has no
+    // APPLY_VALID_SNOOP entry at all, new_set_snoop() itself never calls
+    // apply()/master_ob for permission, and func_spec.c's own snoop()
+    // signature carries no such hook either. This is a real, load-bearing
+    // difference from shadow(), not an oversight in either direction:
+    // real FluffOS leaves snoop authorization entirely to the mudlib
+    // layer (a wizard-only command wrapping this efun with its own check
+    // before ever calling it), and this driver matches that by adding no
+    // invented gate to the FluffOS path below.
+    //
+    // ROADMAP row 1.16 (LDMud master apply name table): real LDMud
+    // `snoop()` genuinely diverges, confirmed by reading
+    // `temp/ldmud/src/comm.c`'s own `v_snoop()`/`set_snoop()` in full
+    // (3.6.8), not just `doc/efun/snoop`'s own prose (which turned out
+    // stale on the return type -- see below). Three real differences
+    // from the FluffOS shape just above: (1) `master->valid_snoop(by,
+    // victim-or-0)` is called for **both** forms, start and stop, not
+    // just start (`set_snoop()`'s own comment: "The function calls
+    // master->valid_snoop() to test if the snoop is allowed", called
+    // unconditionally before anything else); (2) return type is plain
+    // `int`, never the object -- confirmed against `temp/ldmud/src/
+    // func_spec`'s own `"int snoop(object, void|object);"` declaration
+    // and `v_snoop()`'s own `put_number(sp, i)`, which genuinely
+    // contradicts `doc/efun/snoop`'s own stale "object snoop(...)" /
+    // "Return <snoopee> on success" SYNOPSIS text -- the doc is wrong,
+    // the C is authoritative; (3) a non-interactive victim on the start
+    // form is a normal `0` return (`set_snoop()`'s own "if
+    // (!(O_SET_INTERACTIVE(on, you)) || on->closing) return 0;"), never
+    // a thrown error the way the FluffOS path above does. `set_snoop()`
+    // also distinguishes a snoop-loop denial (`return -1`) from every
+    // other failure (`return 0`) -- this driver's existing anti-loop walk
+    // below already detects the identical condition (this driver's
+    // snooping()/snoopedBy() model a single mutual link per object, the
+    // same graph shape LDMud's own snoop_on/snoop_by pair represents,
+    // just traversed from the opposite end -- "is victim already
+    // (transitively) snooping by" is the same fact as LDMud's own "is by
+    // already (transitively) being snooped via victim's own chain"),
+    // reused here rather than re-derived, just tagged `-1` under this
+    // branch instead of the FluffOS path's plain denial. `query_snoop()`
+    // itself is obsolete as an LPC-visible efun in this exact 3.6.8
+    // clone (`temp/ldmud/doc/obsolete/query_snoop`) -- its real
+    // replacement, `interactive_info(ob, II_SNOOP_*)`, is a materially
+    // different, much larger efun this driver has no equivalent of at
+    // all, out of scope for this pass; nothing changed for
+    // `query_snoop()`/`query_snooping()` here.
+    t.registerEfun("snoop", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data)) {
             throw LpcRuntimeError("snoop: expected an object as first argument");
         }
         auto by = std::get<std::shared_ptr<LpcObject>>(args[0].data);
-        if (!by || by->isDestructed()) return Value{};
+        bool ldmud = vm.config().dialect() == "ldmud";
+        if (!by || by->isDestructed()) return ldmud ? Value(int64_t{0}) : Value{};
 
         bool hasVictim = args.size() > 1 &&
                           std::holds_alternative<std::shared_ptr<LpcObject>>(args[1].data) &&
                           std::get<std::shared_ptr<LpcObject>>(args[1].data);
+        auto victim = hasVictim ? std::get<std::shared_ptr<LpcObject>>(args[1].data) : nullptr;
+
+        if (ldmud) {
+            auto master = vm.masterObject();
+            Value victimArg = hasVictim ? Value(victim) : Value(int64_t{0});
+            bool approved =
+                master && isTruthy(vm.callFunction(master, "valid_snoop", {Value(by), victimArg}));
+            if (!approved) return Value(int64_t{0});
+            if (by->isDestructed()) return Value(int64_t{0});
+
+            if (!hasVictim) {
+                bool hadSnoop = false;
+                if (auto prev = by->snooping().lock()) {
+                    prev->setSnoopedBy(std::weak_ptr<LpcObject>());
+                    hadSnoop = true;
+                }
+                by->setSnooping(std::weak_ptr<LpcObject>());
+                return Value(int64_t{hadSnoop ? 1 : 0});
+            }
+
+            if (victim->isDestructed()) return Value(int64_t{0});
+            if (!InteractiveRegistry::find(victim)) return Value(int64_t{0});
+
+            auto tmp = by;
+            while (tmp) {
+                if (tmp == victim) return Value(int64_t{-1});
+                tmp = tmp->snoopedBy().lock();
+            }
+
+            if (auto prevVictim = by->snooping().lock()) {
+                prevVictim->setSnoopedBy(std::weak_ptr<LpcObject>());
+            }
+            if (auto prevSnooper = victim->snoopedBy().lock()) {
+                prevSnooper->setSnooping(std::weak_ptr<LpcObject>());
+            }
+            victim->setSnoopedBy(by);
+            by->setSnooping(victim);
+            return Value(int64_t{1});
+        }
+
         if (!hasVictim) {
             if (auto prev = by->snooping().lock()) {
                 prev->setSnoopedBy(std::weak_ptr<LpcObject>());
@@ -4249,7 +4327,6 @@ void registerCoreEfuns() {
             return Value(by);
         }
 
-        auto victim = std::get<std::shared_ptr<LpcObject>>(args[1].data);
         if (victim->isDestructed()) return Value{};
         if (!InteractiveRegistry::find(victim)) {
             throw LpcRuntimeError("snoop: Second argument of snoop() is not interactive!");
