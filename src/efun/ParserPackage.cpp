@@ -205,42 +205,32 @@ std::string ParserPackage::ruleString(const std::vector<int>& tokens, const std:
     return out;
 }
 
-std::unordered_map<std::string, VerbEntry>& ParserPackage::verbs() {
-    static std::unordered_map<std::string, VerbEntry> table;
+std::unordered_map<std::string, std::vector<VerbEntry>>& ParserPackage::verbs() {
+    static std::unordered_map<std::string, std::vector<VerbEntry>> table;
     return table;
 }
 
-void ParserPackage::addRule(const std::string& verb, const std::string& rule,
-                             const std::shared_ptr<LpcObject>& handler, const std::vector<std::string>& literals) {
-    cachedLiterals() = literals;
-
-    int weight = 0;
-    std::vector<int> tokens = tokenizeRule(rule, cachedLiterals(), weight);
-
-    auto& table = verbs();
-    auto it = table.find(verb);
-    // real "if (verb_entry->match_name == verb && verb_entry->real_name
-    // == verb && !(verb_entry->flags & VB_IS_SYN)) break;" -- a
-    // synonym entry never counts as an existing plain-rule entry to
-    // extend, a fresh one is created alongside it instead (not
-    // reachable in this slice, isSynonym is always false here, but
-    // matches real dedup logic exactly for when parse_add_synonym()
-    // lands).
-    if (it == table.end() || it->second.isSynonym) {
-        VerbEntry entry;
-        entry.realName = verb;
-        entry.matchName = verb;
-        it = table.emplace(verb, std::move(entry)).first;
+namespace {
+// real "if (verb_entry->match_name == verb && verb_entry->real_name ==
+// verb && !(verb_entry->flags & VB_IS_SYN)) break;" -- the one shape
+// every real plain (non-synonym) verb entry has: real_name==match_name
+// ==name, isSynonym==false. Used by addRule() (find-or-create) and by
+// addSynonym()'s own "oldVerb must already be a real verb" lookup
+// (real code's separate `vb` search uses the same condition minus the
+// name argument being the same on both sides, which is automatically
+// true for a plain entry).
+VerbEntry* findPlainEntry(std::vector<VerbEntry>& entries, const std::string& name) {
+    for (auto& e : entries) {
+        if (e.realName == name && e.matchName == name && !e.isSynonym) return &e;
     }
+    return nullptr;
+}
 
-    VerbRuleNode node;
-    node.tokens = tokens;
-    node.weight = weight;
-    node.handler = handler;
+void fillLitFromTokens(VerbRuleNode& node) {
     // real "for (i = 0, j = 0; tokens[i]; i++) if (tokens[i] <= 0 && j <
     // 2) lit[j++] = -(tokens[i]+1);" -- first two literal-token indices,
     // scanning every token, not stopping the scan once both are found.
-    for (int t : tokens) {
+    for (int t : node.tokens) {
         if (t > 0) continue;
         int litIndex = -(t + 1);
         if (node.lit[0] == -1) {
@@ -249,67 +239,205 @@ void ParserPackage::addRule(const std::string& verb, const std::string& rule,
             node.lit[1] = litIndex;
         }
     }
+}
+} // namespace
+
+void ParserPackage::addRule(const std::string& verb, const std::string& rule,
+                             const std::shared_ptr<LpcObject>& handler, const std::vector<std::string>& literals) {
+    cachedLiterals() = literals;
+
+    int weight = 0;
+    std::vector<int> tokens = tokenizeRule(rule, cachedLiterals(), weight);
+
+    auto& entries = verbs()[verb];
+    VerbEntry* target = findPlainEntry(entries, verb);
+    if (!target) {
+        VerbEntry entry;
+        entry.realName = verb;
+        entry.matchName = verb;
+        entries.push_back(std::move(entry));
+        target = &entries.back();
+    }
+
+    VerbRuleNode node;
+    node.tokens = tokens;
+    node.weight = weight;
+    node.handler = handler;
+    fillLitFromTokens(node);
 
     // real "verb_node->next = verb_entry->node; verb_entry->node =
     // verb_node;" -- prepend, newest first.
-    it->second.nodes.insert(it->second.nodes.begin(), std::move(node));
+    target->nodes.insert(target->nodes.begin(), std::move(node));
+}
+
+void ParserPackage::addSynonym(const std::string& newVerb, const std::string& oldVerb, const std::string& rule,
+                                const std::shared_ptr<LpcObject>& caller, const std::vector<std::string>& literals) {
+    // real "if (old_verb == new_verb) error(\"Verb cannot be a synonym
+    // for itself.\\n\");" -- a plain string-content comparison here;
+    // real code's own version is a shared-string *pointer* comparison,
+    // but shared strings guarantee unique interning, so the observable
+    // condition (same text) is identical either way.
+    if (newVerb == oldVerb) {
+        throw LpcRuntimeError("parse_add_synonym: a verb cannot be a synonym for itself");
+    }
+
+    // real code's own `old_verb = SHARED_STRING(sp-1)` can come back
+    // null purely from FluffOS's own global shared-string table never
+    // having interned that exact text before (a real, but driver-
+    // internal, quirk this driver has no equivalent of -- Value::string
+    // is a plain std::string, no interning table at all), which real
+    // code checks separately ("if (!old_verb) error(...)") before even
+    // trying the verb lookup below. That separate check is redundant
+    // with the lookup's own failure case for every real, observable
+    // purpose (an unregistered name fails the same "is not a verb!"
+    // error whichever check catches it first), so this driver only
+    // needs the one lookup-failure check that actually matters here.
+    // find(), not operator[]: a lookup miss must not leave a spurious
+    // empty entry behind in the registry (operator[] would silently
+    // default-construct one).
+    VerbEntry* vb = nullptr;
+    if (auto oldIt = verbs().find(oldVerb); oldIt != verbs().end()) {
+        vb = findPlainEntry(oldIt->second, oldVerb);
+    }
+    if (!vb) {
+        throw LpcRuntimeError("parse_add_synonym: '" + oldVerb + "' is not a verb");
+    }
+
+    auto& newEntries = verbs()[newVerb];
+    bool wantSynonym = rule.empty();
+    // real "if (verb_entry->real_name == new_verb && verb_entry->
+    // match_name == old_verb) { if (rule) { if (!(flags & VB_IS_SYN))
+    // break; } else { if (flags & VB_IS_SYN) break; } }" -- reuse an
+    // existing entry only if it already has the right (rule-copy vs
+    // alias) shape; otherwise a fresh one is created alongside it.
+    VerbEntry* target = nullptr;
+    for (auto& e : newEntries) {
+        if (e.realName == newVerb && e.matchName == oldVerb && e.isSynonym == wantSynonym) {
+            target = &e;
+            break;
+        }
+    }
+    if (!target) {
+        VerbEntry entry;
+        entry.realName = newVerb;
+        // real code sets match_name to old_verb here unconditionally,
+        // for BOTH forms -- even a freshly-created 3-arg rule-copy
+        // entry's own match_name is old_verb, not new_verb, which is
+        // why parse_dump() can print "Verb new_verb (old_verb):" for a
+        // rule-copied verb, matching a real, if slightly surprising,
+        // behavior (see VerbEntry's own class comment) rather than the
+        // "real_name==match_name" shape a plain parse_add_rule()-created
+        // entry always has.
+        entry.matchName = oldVerb;
+        newEntries.push_back(std::move(entry));
+        target = &newEntries.back();
+    }
+
+    if (!rule.empty()) {
+        cachedLiterals() = literals;
+        int weight = 0;
+        std::vector<int> tokens = tokenizeRule(rule, cachedLiterals(), weight);
+
+        // real "for (vn = vb->node; vn; vn = vn->next) { for (i = 0;
+        // tokens[i]; i++) if (vn->token[i] != tokens[i]) break; if
+        // (!tokens[i] && !vn->token[i]) break; }" -- find the exact
+        // rule (by full token-sequence equality) already registered
+        // under oldVerb.
+        VerbRuleNode* found = nullptr;
+        for (auto& n : vb->nodes) {
+            if (n.tokens == tokens) {
+                found = &n;
+                break;
+            }
+        }
+        if (!found) {
+            throw LpcRuntimeError("parse_add_synonym: no such rule defined under '" + oldVerb + "'");
+        }
+        auto foundHandler = found->handler.lock();
+        if (foundHandler != caller) {
+            throw LpcRuntimeError("parse_add_synonym: rule owned by a different object");
+        }
+
+        // real "memcpy(verb_node, vn, ...)" -- a full copy of the
+        // matched node (same tokens/lit/weight/handler), prepended onto
+        // the target entry, which stays non-synonym.
+        VerbRuleNode copy = *found;
+        target->nodes.insert(target->nodes.begin(), std::move(copy));
+    } else {
+        // real "syn->flags = VB_IS_SYN | ...; syn->real = vb;" -- pure
+        // aliasing, no rule nodes of its own.
+        target->isSynonym = true;
+        target->synonymOf = vb->realName;
+    }
 }
 
 void ParserPackage::removeRules(const std::string& verb, const std::shared_ptr<LpcObject>& handler) {
-    auto& table = verbs();
-    auto it = table.find(verb);
-    if (it == table.end() || it->second.isSynonym) return;
-    auto& nodes = it->second.nodes;
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-                                [&](const VerbRuleNode& n) { return n.handler.lock() == handler; }),
-                nodes.end());
+    auto it = verbs().find(verb);
+    if (it == verbs().end()) return;
+    // real f_parse_remove()'s own bucket walk only ever does real work
+    // for entries where match_name==verb -- which, restricted to this
+    // name's own entries, means exactly the non-synonym one(s) (a
+    // synonym entry keyed by this name has match_name pointing at its
+    // *target* verb instead, and has no `node` list of its own to walk
+    // -- see this method's own header comment on real code's
+    // accidental UB there, deliberately not replicated).
+    for (auto& entry : it->second) {
+        if (entry.isSynonym) continue;
+        auto& nodes = entry.nodes;
+        nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                                    [&](const VerbRuleNode& n) { return n.handler.lock() == handler; }),
+                    nodes.end());
+    }
 }
 
 std::string ParserPackage::dump() {
     auto& table = verbs();
     std::vector<std::string> names;
     names.reserve(table.size());
-    for (const auto& [name, entry] : table) names.push_back(name);
+    for (const auto& [name, entries] : table) names.push_back(name);
     std::sort(names.begin(), names.end());
 
     std::string out;
     for (const auto& name : names) {
-        const VerbEntry& v = table.at(name);
-        if (v.realName == v.matchName) {
-            out += "Verb " + v.realName + ":\n";
-        } else {
-            out += "Verb " + v.realName + " (" + v.matchName + "):\n";
-        }
-        if (v.isSynonym) {
-            out += "  Synonym for: " + v.synonymOf + "\n";
-            continue;
-        }
-        for (const auto& node : v.nodes) {
-            auto handler = node.handler.lock();
-            // This driver's own destruct() does not drop every
-            // shared_ptr to a destructed object the moment it is
-            // destructed (see LpcObject::isDestructed()'s own comment:
-            // it keeps working as a plain C++ object until the last
-            // reference actually goes away) -- so a weak_ptr can still
-            // .lock() successfully here for an object that is, for
-            // every real-LPC-visible purpose, already gone. Treated the
-            // same as an expired weak_ptr, matching the same
-            // "destructed reads back as gone" convention this driver's
-            // own %O sprintf formatter already applies to any object
-            // value (EfunTable.cpp's own "if (!*ov ||
-            // (*ov)->isDestructed()) return \"0\";").
-            if (handler && handler->isDestructed()) handler.reset();
-            // real "(/%s)" (f_parse_dump(): "vn->handler->obname"), but
-            // this driver's own LpcObject::filename() already stores the
-            // full leading-slash path for a genuinely loaded/cloned
-            // object (confirmed against ObjectManager::compile()'s own
-            // "config_.mudlibRoot() + filename + \".c\"" concatenation,
-            // which requires filename to already start with '/') -- not
-            // the bare, slash-free obname real FluffOS keeps separately.
-            // Prepending another '/' here would double it up, so this
-            // uses filename() as-is.
-            std::string handlerText = handler ? handler->filename() : "destructed";
-            out += "  (" + handlerText + ") " + ruleString(node.tokens, cachedLiterals()) + "\n";
+        for (const VerbEntry& v : table.at(name)) {
+            if (v.realName == v.matchName) {
+                out += "Verb " + v.realName + ":\n";
+            } else {
+                out += "Verb " + v.realName + " (" + v.matchName + "):\n";
+            }
+            if (v.isSynonym) {
+                out += "  Synonym for: " + v.synonymOf + "\n";
+                continue;
+            }
+            for (const auto& node : v.nodes) {
+                auto handler = node.handler.lock();
+                // This driver's own destruct() does not drop every
+                // shared_ptr to a destructed object the moment it is
+                // destructed (see LpcObject::isDestructed()'s own
+                // comment: it keeps working as a plain C++ object until
+                // the last reference actually goes away) -- so a
+                // weak_ptr can still .lock() successfully here for an
+                // object that is, for every real-LPC-visible purpose,
+                // already gone. Treated the same as an expired
+                // weak_ptr, matching the same "destructed reads back as
+                // gone" convention this driver's own %O sprintf
+                // formatter already applies to any object value
+                // (EfunTable.cpp's own "if (!*ov ||
+                // (*ov)->isDestructed()) return \"0\";").
+                if (handler && handler->isDestructed()) handler.reset();
+                // real "(/%s)" (f_parse_dump(): "vn->handler->obname"),
+                // but this driver's own LpcObject::filename() already
+                // stores the full leading-slash path for a genuinely
+                // loaded/cloned object (confirmed against
+                // ObjectManager::compile()'s own "config_.mudlibRoot()
+                // + filename + \".c\"" concatenation, which requires
+                // filename to already start with '/') -- not the bare,
+                // slash-free obname real FluffOS keeps separately.
+                // Prepending another '/' here would double it up, so
+                // this uses filename() as-is.
+                std::string handlerText = handler ? handler->filename() : "destructed";
+                out += "  (" + handlerText + ") " + ruleString(node.tokens, cachedLiterals()) + "\n";
+            }
         }
     }
     return out;

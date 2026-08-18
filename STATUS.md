@@ -3,6 +3,86 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): crash-claim resolved (the driver process does
+not crash on an uncaught dispatch error, rigorously re-confirmed; stale
+notes in ROADMAP.md/STATUS.md fixed to match), then `parse_add_synonym()`
+implemented, `parse_*` (row 0.13a) slice two, both real forms (643 tests,
+up from 640).**
+
+Asked, before doing anything else, to resolve a contradiction: the prior
+session's own report cited "a real, pre-existing, unrelated bug where an
+uncaught runtime error during command dispatch drops both the connection
+and the driver process," but that exact claim had already been
+investigated and retracted two sessions before that one (see this file's
+own "ran down the crash flagged last session" entry, elsewhere below) --
+the real bug was narrower (`net_dead()` skipped on this one path, fixed),
+and the process-crash half never reproduced under rigorous testing, best
+explained by a `pkill` run in the same breath as a log check. Found the
+stale claim was still sitting, uncorrected, in `ROADMAP.md` row 1.9's own
+`m_indices`/`m_values` note (fixed this session, inline correction
+appended there) and had been repeated fresh into this same session's own
+prior `STATUS.md`/`ROADMAP.md` entries (fixed too, see that entry's own
+"Crash-claim correction" section for the full text).
+
+Then re-verified independently rather than trusting either the stale
+claim or the earlier retraction secondhand: booted a fresh scratch
+driver via this harness's own tracked `run_in_background`/`TaskStop`
+mechanism, connected a second, independent client that stayed connected
+throughout and polled `who` once a second, reproduced this exact
+session's own real trigger (`parse_add_rule()` before `parse_init()`)
+plus the classic `totally_undefined_efun_xyz()` one with a separate,
+disposable first client, then actively polled process health for 60+
+seconds after each trigger (never idle, never a `pkill` anywhere near a
+log check). **Confirmed, plainly: the driver process does not crash. Only
+the triggering connection drops; the process and every other connection
+stay completely healthy.** One genuine methodology wrinkle recorded along
+the way: an earlier attempt at this same re-verification, using a
+manually `nohup`-and-`disown`ed background shell job instead of this
+harness's own tracked mechanism, saw the driver process vanish with no
+shutdown message and no core file during a *tight active-polling* loop
+(not an idle gap) -- switching to `run_in_background`/`TaskStop` made
+that vanish stop reproducing entirely across a full retest, so future
+live-verification sessions should prefer the harness's own tracked
+backgrounding over manual shell job control for exactly this reason.
+
+With the crash claim settled, continued `parse_*` with the next slice its
+own prior recommendation named: `parse_add_synonym()`, both real forms
+(2-arg verb aliasing, 3-arg specific-rule-copy). Re-read the real
+`f_parse_add_synonym()` source directly before implementing rather than
+working from the prior session's own summary. Found and fixed one real
+gap in the prior slice's own registry shape before building on top of it:
+real `parse_sentence()`'s own verb-lookup loop does not stop at the first
+match, so a single verb name can carry *more than one* real `VerbEntry`
+at once (a plain rule-holding entry and a separate synonym-to-something-
+else entry, both sharing the same name) -- the prior slice's own registry
+had (harmlessly, since nothing exercised it yet) modeled one entry per
+name; corrected to a map from name to a *list* of entries before writing
+`addSynonym()`, rather than building the new feature on a shape the very
+next sentence-matching slice would only have had to fix later anyway.
+
+Implemented `ParserPackage::addSynonym()` and the `parse_add_synonym`
+efun registration, reusing the existing tokenizer/registry entirely as
+its own prior recommendation predicted. 3 new regression tests (the
+alias form's `parse_dump()` shape; the rule-copy form's exact-match
+behavior plus all three of its real rejection paths; the coexisting-
+entries-under-one-name scenario the registry refactor exists for,
+including confirming `parse_remove()` only ever touches the plain entry).
+643 tests passing, up from 640, zero regressions. **Verified live against
+the real running driver, real bundled `mudlib/`**, this time via the
+harness's own tracked backgrounding throughout: both real forms produced
+the exact expected `parse_dump()` output; all three rejection paths fired
+correctly; and, live and unprompted, a real, faithful (not a bug) quirk
+surfaced -- a *failed* 3-arg `parse_add_synonym()` still leaves an empty
+target `VerbEntry` behind, confirmed to match real code's own control
+flow (the entry-creation step runs before the rule lookup that can fail,
+and nothing rolls it back on error) rather than being a bug in this port.
+
+See ROADMAP.md row 0.13a for the full updated breakdown and this slice's
+own complete record; its next-slice recommendation now points at the
+sentence tokenizer and the noun-phrase resolution engine together, the
+two remaining real prerequisites for anything resembling actual
+`parse_sentence()` behavior.
+
 **2026-08-18 (continued): `parse_*` (row 0.13a) taken on as a real
 multi-session project, per its own explicit greenlight -- first real
 slice landed (`parse_init`/`parse_add_rule`/`parse_dump`/`parse_remove`,
@@ -95,16 +175,74 @@ parse_add_rule("give","OBJ LIV"); parse_dump()` returned the correct
 two-verb dump with the correct handler and rule-string text;
 `parse_remove("eat")` then removed only that verb's own rule node,
 confirmed via a second `parse_dump()` in the same call; `"OBJ OBJ OBJ"`
-was correctly rejected as a grammar error. Also hit, once, an already-
-known, pre-existing, unrelated bug while developing these verification
-steps (not caused by this slice, not fixed here): this driver has no
-guard against an *uncaught* runtime error during command dispatch, which
-drops both the connection and the driver process entirely -- the same
-issue already documented in an earlier session's own `m_indices`/
-`m_values` entry. Worked around for the rest of this session's own
-verification by wrapping every eval expression that could legitimately
-throw (the `parse_init()`-required guard, the grammar rejections) in a
-real LPC `catch()`, which the driver survives correctly.
+was correctly rejected as a grammar error. One connection dropped mid-
+session while developing these verification steps, immediately after an
+uncaught `parse_add_rule()` guard error -- **this is correct, already-
+fixed behavior, not a bug**: an uncaught dispatch error correctly closes
+only the triggering connection (`net_dead()` fires on it, same as
+ordinary link death), confirmed by this session's own re-verification
+below, not the stale "drops the connection and the driver process" claim
+an earlier `m_indices`/`m_values` entry made and a session between that
+one and this one already retracted (see "crash-claim correction" below).
+Worked around anyway for the rest of this session's own verification by
+wrapping every eval expression that could legitimately throw (the
+`parse_init()`-required guard, the grammar rejections) in a real LPC
+`catch()`, purely so one dropped connection didn't interrupt the flow of
+follow-up `eval` calls in the same client session -- not because the
+process was ever actually at risk.
+
+## Crash-claim correction (this session, before any further parser work)
+
+The report above, when first written, repeated a stale claim: that an
+uncaught dispatch error "drops both the connection and the driver
+process." That claim was already investigated and retracted **two
+sessions before this one** ("ran down the crash flagged last session",
+elsewhere in this file) -- the real bug was narrower (`net_dead()`
+skipped on this one path, fixed), and the "took the whole process down"
+half never reproduced under rigorous testing; it was traced to a `pkill`
+run in the same breath as a log check. `ROADMAP.md` row 1.9's own
+`m_indices`/`m_values` note still carried the same stale claim
+uncorrected until this session (fixed now, see its own inline
+correction).
+
+Re-verified independently this session, asked explicitly not to trust
+either the stale claim or the earlier retraction at face value: booted a
+fresh scratch driver via this harness's own tracked background-task
+mechanism (not a manually `nohup`-and-`disown`ed shell job -- see the
+methodology note below for why that distinction mattered), connected a
+second, independent client that stayed connected throughout and polled
+`who` once a second, then reproduced this exact session's own real
+trigger (`parse_add_rule()` before `parse_init()`) with a separate,
+disposable first client. Result: the triggering client's own connection
+closed immediately (confirmed via EOF); the second client kept receiving
+normal `who` responses on every single tick, unbroken, for 60+ seconds of
+active `ps`-polling afterward (never idle, never a `pkill` anywhere near
+a log check); the driver process's own elapsed time climbed normally the
+entire time. Repeated with the classic `totally_undefined_efun_xyz()`
+trigger too, same result. **Confirmed, plainly: the driver process does
+not crash. Only the triggering connection drops; the process and every
+other connection stay completely healthy.** This fully reconfirms the
+earlier retraction, from a fresh, skeptical re-test rather than by
+trusting it secondhand.
+
+One genuine methodology wrinkle surfaced along the way, worth recording
+rather than glossing over: an earlier attempt at this same re-verification,
+using a manually `nohup ... & disown`ed background shell job instead of
+this harness's own tracked background-task mechanism, saw the driver
+process vanish with no "amlp shutting down" log line and no core file,
+during a tight active-polling loop (5-second intervals, not an idle gap) --
+superficially similar to, but not the same shape as, the earlier
+retraction's own "disappeared during an idle stretch with no Bash calls"
+sandbox wrinkle, since this one happened during active polling. Switching
+to the harness's own `run_in_background`/`TaskStop` tracking for both the
+driver and the second client made the vanish stop reproducing entirely
+across a full retest. Recorded as a real, observed difference between the
+two backgrounding methods in this sandbox, not chased further since it
+is orthogonal to the actual question (whether the *driver itself* crashes
+on an uncaught dispatch error, which the harness-tracked run answered
+cleanly: no) -- future live-verification sessions should prefer
+`run_in_background`/`TaskStop` over manual `nohup`/`disown`/`pkill` shell
+juggling for exactly this reason.
 
 ROADMAP.md row 0.13a rewritten with the full 11-piece breakdown, this
 session's own slice marked done within it, and a next-slice

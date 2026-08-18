@@ -85,6 +85,42 @@ std::shared_ptr<LpcObject> resolveCommandGiver(VM& vm) {
     return nullptr;
 }
 
+// real interrogate_master()'s own literal-fetching third (packages/
+// parser.c): calls master()->parse_command_prepos_list(), which despite
+// the real APPLY_LITERALS macro's own name is NOT "literals" in any
+// generic sense -- confirmed directly against the real vendored
+// `applies` source file (not assumed from the macro name, which would
+// have been actively misleading here): "LITERALS:parse_command_prepos_list".
+// It is specifically the mudlib's own list of legal *preposition* words
+// usable as bare literals in a rule string (real usage: "give OBJ to
+// LIV", OBJ then the bare literal "to"). Real interrogate_master() also
+// caches this behind a master_state bit, invalidated only by
+// parse_refresh() on the master object -- not ported yet
+// (parse_refresh() itself is a later slice, ROADMAP.md row 0.13a), so
+// this always re-applies; harmless for now, since nothing calls it more
+// than a handful of times per rare, setup-time-only parse_add_rule()/
+// parse_add_synonym() call. Real interrogate_master() also fetches
+// parse_command_users() and populates the special-word table
+// (the/me/myself/all/of/ordinals) in the same pass -- neither is needed
+// until the sentence-matching slice (both are purely about resolving
+// player input against live objects, never touched by rule
+// registration), so neither is called here. Shared by parse_add_rule
+// and parse_add_synonym, both of which can tokenize a fresh rule string.
+std::vector<std::string> fetchParserLiterals(VM& vm) {
+    std::vector<std::string> literals;
+    if (vm.masterObject()) {
+        Value litResult = vm.applyMaster("parse_command_prepos_list", {});
+        if (auto* arr = std::get_if<std::shared_ptr<Array>>(&litResult.data)) {
+            if (*arr) {
+                for (const auto& v : (*arr)->items) {
+                    if (auto* s = std::get_if<std::string>(&v.data)) literals.push_back(*s);
+                }
+            }
+        }
+    }
+    return literals;
+}
+
 // sprintf()/printf()'s "%O" specifier -- LPC's generic value-dump format,
 // used for debugging arbitrary values. Confirmed directly against
 // fluffos-2.9-ds2.08/sprintf.c's own svalue_to_string() before writing
@@ -4706,42 +4742,36 @@ void registerCoreEfuns() {
                 "parse_add_rule: object is not known by the parser (call parse_init() first)");
         }
 
-        // real interrogate_master()'s own literal-fetching third
-        // (packages/parser.c): calls master()->parse_command_prepos_list(),
-        // which despite the real APPLY_LITERALS macro's own name is NOT
-        // "literals" in any generic sense -- confirmed directly against
-        // the real vendored `applies` source file (not assumed from the
-        // macro name, which would have been actively misleading here):
-        // "LITERALS:parse_command_prepos_list". It is specifically the
-        // mudlib's own list of legal *preposition* words usable as bare
-        // literals in a rule string (real usage: "give OBJ to LIV", OBJ
-        // then the bare literal "to"). Real interrogate_master() also
-        // caches this behind a master_state bit, invalidated only by
-        // parse_refresh() on the master object -- not ported yet
-        // (parse_refresh() itself is a later slice, ROADMAP.md row
-        // 0.13a), so this always re-applies; harmless for now, since
-        // nothing in this slice calls it more than once per
-        // parse_add_rule(), itself already a rare, setup-time-only
-        // call. Real interrogate_master() also fetches
-        // parse_command_users() and populates the special-word table
-        // (the/me/myself/all/of/ordinals) in the same pass -- neither is
-        // needed until the sentence-matching slice (both are purely
-        // about resolving player input against live objects, never
-        // touched by rule registration), so neither is called here.
-        std::vector<std::string> literals;
-        if (vm.masterObject()) {
-            Value litResult = vm.applyMaster("parse_command_prepos_list", {});
-            if (auto* arr = std::get_if<std::shared_ptr<Array>>(&litResult.data)) {
-                if (*arr) {
-                    for (const auto& v : (*arr)->items) {
-                        if (auto* s = std::get_if<std::string>(&v.data)) literals.push_back(*s);
-                    }
-                }
-            }
-        }
-
         ParserPackage::addRule(std::get<std::string>(args[0].data), std::get<std::string>(args[1].data), ob,
-                                literals);
+                                fetchParserLiterals(vm));
+        return Value{};
+    });
+
+    // void parse_add_synonym(string new_verb, string old_verb, void |
+    // string rule) -- real packages/parser.c's f_parse_add_synonym().
+    // Unlike parse_add_rule(), real code never checks or sets
+    // current_object->pinfo here at all (confirmed directly -- neither
+    // form touches it), so this does not gate on hasParseInfo() either;
+    // the only object-identity check that matters is the 3-arg form's
+    // own "rule owned by a different object" ownership guard inside
+    // ParserPackage::addSynonym() itself, against whichever object
+    // originally registered the rule being copied.
+    t.registerEfun("parse_add_synonym", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError(
+                "parse_add_synonym: expected (string new_verb, string old_verb, void|string rule) arguments");
+        }
+        std::string rule;
+        if (args.size() > 2) {
+            if (!std::holds_alternative<std::string>(args[2].data)) {
+                throw LpcRuntimeError("parse_add_synonym: rule argument, if given, must be a string");
+            }
+            rule = std::get<std::string>(args[2].data);
+        }
+        auto ob = vm.currentObject();
+        ParserPackage::addSynonym(std::get<std::string>(args[0].data), std::get<std::string>(args[1].data), rule,
+                                   ob, fetchParserLiterals(vm));
         return Value{};
     });
 

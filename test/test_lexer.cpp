@@ -18351,6 +18351,142 @@ static void testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists() {
     std::cout << "testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists OK\n";
 }
 
+// --- parse_add_synonym(): row 0.13a's second parse_* slice. Both real
+// forms (2-arg alias, 3-arg rule-copy), reusing the same tokenizer and
+// registry the first slice already built.
+
+static void testParseAddSynonymAliasFormMakesNewVerbResolveThroughToOldVerbsRules() {
+    std::string src =
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzsyneat\", \"OBJ\");\n"
+        "    parse_add_synonym(\"zzzsynconsume\", \"zzzsyneat\");\n"
+        "}\n"
+        "string probe() { return parse_dump(); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result = vm.callFunction(obj, "probe", {});
+    const std::string& dump = std::get<std::string>(result.data);
+
+    // The underlying verb keeps its own real_name==match_name shape.
+    assert(dump.find("Verb zzzsyneat:\n") != std::string::npos);
+    // real f_parse_dump()'s own "if (real_name==match_name) ... else
+    // ..." branch: a synonym entry's real_name (the alias) differs from
+    // its match_name (the target verb), so it prints with both names.
+    assert(dump.find("Verb zzzsynconsume (zzzsyneat):\n  Synonym for: zzzsyneat\n") != std::string::npos);
+
+    std::cout << "testParseAddSynonymAliasFormMakesNewVerbResolveThroughToOldVerbsRules OK\n";
+}
+
+static void testParseAddSynonymThreeArgFormCopiesOnlyTheMatchingRuleAndChecksOwnership() {
+    std::string src =
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzsyndine\", \"OBJ\");\n"
+        "    parse_add_rule(\"zzzsyndine\", \"OBJ LIV\");\n"
+        "}\n"
+        "void copyRule() { parse_add_synonym(\"zzzsyndevour\", \"zzzsyndine\", \"OBJ LIV\"); }\n"
+        "string probe() { return parse_dump(); }\n"
+        "int probeNoSuchRule() {\n"
+        "    if (!catch(parse_add_synonym(\"zzzsynnope\", \"zzzsyndine\", \"STR\"))) return 0;\n"
+        "    return 1;\n"
+        "}\n"
+        "int probeSelfSynonym() {\n"
+        "    if (!catch(parse_add_synonym(\"zzzsyndine\", \"zzzsyndine\"))) return 0;\n"
+        "    return 1;\n"
+        "}\n"
+        "int probeUnregisteredOldVerb() {\n"
+        "    if (!catch(parse_add_synonym(\"zzzsynx\", \"zzzneverregisteredverb\"))) return 0;\n"
+        "    return 1;\n"
+        "}\n";
+    auto objA = compileProgramObject(src);
+    auto objB = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(objA, "setup", {});
+
+    // objB never registered anything under zzzsyndine -- copying a rule
+    // it does not own must be rejected (real "Rule owned by different
+    // object.").
+    bool threwForWrongOwner = false;
+    try {
+        vm.callFunction(objB, "copyRule", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threwForWrongOwner = true;
+    }
+    assert(threwForWrongOwner);
+
+    // objA does own it -- the copy succeeds, and only the exact matching
+    // rule ("OBJ LIV") is copied, not the other one registered under the
+    // same verb ("OBJ").
+    vm.callFunction(objA, "copyRule", {});
+    amlp::Value result = vm.callFunction(objA, "probe", {});
+    const std::string& dump = std::get<std::string>(result.data);
+    assert(dump.find("Verb zzzsyndevour (zzzsyndine):\n  (program_object) OBJ LIV\n") != std::string::npos);
+    // The copy is not a synonym entry (real code never sets VB_IS_SYN in
+    // the 3-arg branch), so it must not carry a "Synonym for:" line.
+    assert(dump.find("Synonym for: zzzsyndine") == std::string::npos);
+
+    assert(std::get<int64_t>(vm.callFunction(objA, "probeNoSuchRule", {}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(objA, "probeSelfSynonym", {}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(objA, "probeUnregisteredOldVerb", {}).data) == 1);
+
+    std::cout << "testParseAddSynonymThreeArgFormCopiesOnlyTheMatchingRuleAndChecksOwnership OK\n";
+}
+
+static void testParseAddSynonymCoexistsWithAPlainVerbOfTheSameNameAndParseRemoveOnlyTouchesThePlainOne() {
+    // Real parser.c's own verb-lookup loop in parse_sentence() does not
+    // stop at the first match: a single name can carry both a plain
+    // rule-holding entry and, separately, a synonym-to-something-else
+    // entry at the same time -- confirmed directly from source, not
+    // assumed. This is the scenario that made ParserPackage's own
+    // registry a map-of-*lists* rather than one entry per name.
+    std::string src =
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"zzzsynpush\", \"OBJ\");\n"
+        "    parse_add_rule(\"zzzsyncarry\", \"OBJ LIV\");\n"
+        "    parse_add_synonym(\"zzzsynpush\", \"zzzsyncarry\");\n"
+        "}\n"
+        "void forgetPlainRule() { parse_remove(\"zzzsynpush\"); }\n"
+        "string probe() { return parse_dump(); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+
+    amlp::Value before = vm.callFunction(obj, "probe", {});
+    const std::string& beforeDump = std::get<std::string>(before.data);
+    assert(beforeDump.find("Verb zzzsynpush:\n  (program_object) OBJ\n") != std::string::npos);
+    assert(beforeDump.find("Verb zzzsynpush (zzzsyncarry):\n  Synonym for: zzzsyncarry\n") != std::string::npos);
+
+    vm.callFunction(obj, "forgetPlainRule", {});
+    amlp::Value after = vm.callFunction(obj, "probe", {});
+    const std::string& afterDump = std::get<std::string>(after.data);
+    // parse_remove() only ever touches non-synonym entries (see
+    // ParserPackage::removeRules()'s own comment) -- the plain entry's
+    // own rule node is gone now (its header line survives empty, real
+    // code never deletes the VerbEntry itself)...
+    assert(afterDump.find("Verb zzzsynpush:\n  (program_object) OBJ\n") == std::string::npos);
+    assert(afterDump.find("Verb zzzsynpush:\n") != std::string::npos);
+    // ...but the synonym entry sharing the identical name survives
+    // completely untouched.
+    assert(afterDump.find("Verb zzzsynpush (zzzsyncarry):\n  Synonym for: zzzsyncarry\n") != std::string::npos);
+
+    std::cout << "testParseAddSynonymCoexistsWithAPlainVerbOfTheSameNameAndParseRemoveOnlyTouchesThePlainOne OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -18998,6 +19134,9 @@ int main() {
     testParseAddRuleTokenizesModifiersAndLiteralsAgainstMasterPrepositionList();
     testParseRemoveDeletesOnlyTheCallingObjectsOwnRules();
     testParseDumpShowsDestructedForARuleWhoseHandlerNoLongerExists();
+    testParseAddSynonymAliasFormMakesNewVerbResolveThroughToOldVerbsRules();
+    testParseAddSynonymThreeArgFormCopiesOnlyTheMatchingRuleAndChecksOwnership();
+    testParseAddSynonymCoexistsWithAPlainVerbOfTheSameNameAndParseRemoveOnlyTouchesThePlainOne();
     std::cout << "all tests passed\n";
     return 0;
 }

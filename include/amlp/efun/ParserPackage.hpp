@@ -51,12 +51,17 @@ struct VerbRuleNode {
     std::weak_ptr<LpcObject> handler;
 };
 
-// real verb_t/verb_syn_t (packages/parser.h). isSynonym/synonymOf are
-// not reachable yet in this slice (only addRule() constructs entries,
-// always non-synonym) -- carried now so parse_dump()'s own "Synonym
-// for:" branch and this struct's shape need no rework once
-// parse_add_synonym() lands (see ROADMAP.md row 0.13a's next-slice
-// note).
+// real verb_t/verb_syn_t (packages/parser.h). A verb *name* can
+// genuinely map to more than one of these at once in real code -- e.g.
+// `parse_add_rule("push", "OBJ")` (a plain verb, real_name==match_name==
+// "push") and, separately, `parse_add_synonym("push", "carry")` (a
+// synonym entry, real_name=="push", match_name=="carry") can coexist
+// under the identical name "push"; real `parse_sentence()`'s own verb
+// lookup does not `break` after the first match, it tries every entry
+// sharing that real_name as an independent interpretation (confirmed
+// directly against parser.c's own verb-lookup loop). See ParserPackage's
+// own class comment for why the registry below is keyed by name but
+// holds a *list* of entries per name, not one.
 struct VerbEntry {
     std::string realName;
     std::string matchName;
@@ -67,12 +72,15 @@ struct VerbEntry {
 
 // The real parser package's rule-string tokenizer plus its verb/rule
 // registry (packages/parser.c's static verbs[VERB_HASH_SIZE] hash
-// table), reduced to a single map keyed by real_name -- real code's own
-// hash-bucket chaining is an implementation detail with no observable
-// LPC-visible contract (see .cpp comments for the specific real
-// behaviors that ARE ported faithfully, off-by-one quirks included).
-// Global, process-wide static state, the same shape this codebase's
-// other efun-package registries already use for exactly this reason
+// table). Real code's own hash-bucket chaining is an implementation
+// detail with no observable LPC-visible contract on its own (see .cpp
+// comments for the specific real behaviors that ARE ported faithfully,
+// off-by-one quirks included) -- but one real, observable consequence of
+// it is preserved here: a single verb name can carry more than one
+// VerbEntry at once (see VerbEntry's own comment), so this is a map from
+// name to a *list* of entries, not one entry per name. Global,
+// process-wide static state, the same shape this codebase's other
+// efun-package registries already use for exactly this reason
 // (object/LivingNameRegistry.hpp: real parser.c's own verbs[] is one
 // table shared by the whole game, not per-object or per-VM state).
 class ParserPackage {
@@ -107,6 +115,31 @@ public:
     static void addRule(const std::string& verb, const std::string& rule,
                          const std::shared_ptr<LpcObject>& handler, const std::vector<std::string>& literals);
 
+    // real f_parse_add_synonym() (packages/parser.c), both its real
+    // forms:
+    // - 2-arg (`rule` empty): pure verb aliasing. `newVerb` becomes
+    //   another name that resolves to `oldVerb`'s own already-registered
+    //   rule set (a fresh or reused VerbEntry with isSynonym=true,
+    //   synonymOf==oldVerb) -- no new rule nodes, nothing copied.
+    // - 3-arg (`rule` non-empty): copies ONE already-registered rule
+    //   node from `oldVerb` (matched by exact tokenized-rule equality)
+    //   onto a fresh or reused *non*-synonym VerbEntry named `newVerb`.
+    //   Requires that the matched node's own handler is exactly
+    //   `caller` (real "Rule owned by different object." check) --
+    //   `caller` must be the same object identity `addRule()` was
+    //   originally called with for that exact rule, not merely any
+    //   caller with `hasParseInfo()` set.
+    // Both forms require `oldVerb` to already name a real, non-synonym
+    // verb (real "%s is not a verb!" -- see .cpp for why this driver
+    // has no equivalent of real code's own separate, shared-string-
+    // interning-specific null check for an unregistered name, only the
+    // one real lookup-failure check that actually matters here) and
+    // reject `newVerb == oldVerb` (real "Verb cannot be a synonym for
+    // itself."). Throws LpcRuntimeError on any of these, or on a
+    // malformed `rule` (propagated from tokenizeRule()).
+    static void addSynonym(const std::string& newVerb, const std::string& oldVerb, const std::string& rule,
+                            const std::shared_ptr<LpcObject>& caller, const std::vector<std::string>& literals);
+
     // real f_parse_remove() (packages/parser.c): unlinks every rule
     // node under verb whose handler is exactly `handler` (real
     // "(*vn)->handler == current_object"). Does not touch synonym
@@ -135,7 +168,7 @@ public:
     static std::string dump();
 
 private:
-    static std::unordered_map<std::string, VerbEntry>& verbs();
+    static std::unordered_map<std::string, std::vector<VerbEntry>>& verbs();
 };
 
 } // namespace amlp
