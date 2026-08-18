@@ -22,6 +22,13 @@ struct FloatLiteral : AstNode {
     double value = 0.0;
 };
 
+// DGD "nil" literal (ROADMAP.md row 1.2/1.3's own greenlit slice). Real
+// DGD (temp/dgd/src/comp/parser.y's own "NIL { $$ = Node::createNil();
+// }") -- a stateless marker, no payload, matching the real AST node's
+// own shape (Node::createNil() carries only a type tag, no value field
+// beyond a constant 0 placeholder).
+struct NilLiteral : AstNode {};
+
 struct VarRefExpr : AstNode {
     std::string name;
 };

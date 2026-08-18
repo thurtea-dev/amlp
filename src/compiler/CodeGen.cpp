@@ -294,6 +294,12 @@ void CodeGen::emitExpr(const AstNode& expr) {
         out_->code.push_back(Instruction{OpCode::PushFloat, idx, 0});
         return;
     }
+    if (dynamic_cast<const NilLiteral*>(&expr)) {
+        // DGD's nil (ROADMAP.md row 1.2/1.3's greenlit slice). No
+        // operand -- see Bytecode.hpp's own PushNil comment.
+        out_->code.push_back(Instruction{OpCode::PushNil, 0, 0});
+        return;
+    }
     if (auto* ref = dynamic_cast<const VarRefExpr*>(&expr)) {
         ResolvedVar var = resolveVariable(ref->name);
         OpCode op = (var.kind == VarKind::Local) ? OpCode::PushLocal : OpCode::PushObjectVar;

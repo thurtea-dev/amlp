@@ -13,8 +13,27 @@ struct Array;
 struct Mapping;
 struct Closure;
 
+// DGD's real "nil" literal (ROADMAP.md row 1.2/1.3's greenlit slice,
+// row 1.10's own minimal real piece). A stateless marker, no payload --
+// real DGD's own runtime representation (data.h's "Value nil = { T_NIL,
+// TRUE };") carries no data beyond its type tag either. Deliberately
+// distinct from std::monostate (this driver's own pre-existing "void"/
+// uninitialized/missing-mapping-key encoding, which coerces to a real 0
+// in arithmetic and string concatenation -- see VM.cpp's own
+// asArithmeticOperand()/formatNumberForConcat() comments): real DGD's
+// own "nil.type = (stricttc) ? T_NIL : T_INT;" (data.cpp) shows nil
+// only has a genuinely distinct runtime type under strict-typechecking
+// mode -- the mode this implementation targets, since that is the only
+// mode where nil means anything at all rather than literally being
+// integer 0. Only ever constructed when `LpcDialect::DGD` is the active
+// dialect (see Lexer::lexIdentOrKeyword()'s own dialect gate on the
+// "nil" keyword) -- under FluffOS/LDMud this variant alternative simply
+// never gets used.
+struct Nil {};
+
 using ValueVariant = std::variant<
     std::monostate,
+    Nil,
     int64_t,
     double,
     std::string,

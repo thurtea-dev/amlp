@@ -85,15 +85,22 @@ Token Lexer::lexIdentOrKeyword() {
     // row 1.2's scoping note; confirmed against temp/dgd/src/comp/
     // parser.y's own "ATOMIC { $$ = C_ATOMIC; }", the same
     // non_private modifier-list production as STATIC/NOMASK/VARARGS).
-    // Deliberately kept out of the shared kKeywords set below and gated
-    // here instead: reserving it under FluffOS/LDMud too would risk
-    // breaking real code using "atomic" as a plain identifier, the same
-    // hazard this file's own "array" comment documents, and neither
-    // FluffOS nor LDMud reserve the word at all. Only the first
-    // dialect-gated keyword so far -- future ones (nil, etc, see the
-    // same scoping note) follow this same pattern, not a growing
-    // if-chain.
-    bool isDialectKeyword = dialect_ == LpcDialect::DGD && text == "atomic";
+    // "nil" -- DGD's real nil literal (same scoping note; confirmed
+    // against parser.y's own "NIL { $$ = Node::createNil(); }" and
+    // data.h's own "T_NIL" value tag -- a genuinely distinct runtime
+    // value under DGD's strict-typechecking mode, the mode this
+    // implementation targets, since that is the only mode where nil
+    // means anything at all: temp/dgd/src/data.cpp's own "nil.type =
+    // (stricttc) ? T_NIL : T_INT;" shows non-strict DGD collapses nil
+    // into plain integer 0 with no distinct representation, which would
+    // give this row nothing worth tracking). Both deliberately kept out
+    // of the shared kKeywords set below and gated here instead:
+    // reserving either under FluffOS/LDMud too would risk breaking real
+    // code using them as plain identifiers, the same hazard this file's
+    // own "array" comment documents, and neither word is reserved by
+    // either real dialect.
+    static const std::unordered_set<std::string> kDgdOnlyKeywords = {"atomic", "nil"};
+    bool isDialectKeyword = dialect_ == LpcDialect::DGD && kDgdOnlyKeywords.count(text);
     TokenType type = (kKeywords.count(text) || isDialectKeyword) ? TokenType::Keyword : TokenType::Ident;
     return Token{type, text, startLine};
 }

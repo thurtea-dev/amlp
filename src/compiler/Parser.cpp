@@ -70,13 +70,21 @@ bool Parser::isTypeKeyword(const Token& tok) const {
         "foreach", "in", "switch", "case", "default",
         "static", "private", "public", "protected", "nomask", "varargs",
         // "atomic" -- DGD's own function-declaration modifier (see
-        // isModifierKeyword() below), never a type. Excluded
-        // unconditionally: under FluffOS/LDMud it is never lexed as a
-        // Keyword at all (Lexer::lexIdentOrKeyword()'s own dialect
-        // gate), so this only matters, and only needs to matter, under
-        // DGD -- listing it here always is harmless and avoids a
-        // dialect check this function has no other reason to carry.
-        "atomic"
+        // isModifierKeyword() below), never a type. "nil" -- DGD's own
+        // literal (see parsePrimary()'s own "nil" handling), also never
+        // a declarable type: real temp/dgd/src/comp/parser.y's own
+        // type_specifier production (INT/FLOAT/STRING/OBJECT/...) has
+        // no NIL case at all -- "nil" only ever appears in expression
+        // position, never as a declared variable's type, despite also
+        // appearing in data.h's own TYPENAMES table (used only for
+        // error-message type-name printing there, not real declaration
+        // grammar). Both excluded unconditionally: under FluffOS/LDMud
+        // neither is ever lexed as a Keyword at all
+        // (Lexer::lexIdentOrKeyword()'s own dialect gate), so this only
+        // matters, and only needs to matter, under DGD -- listing them
+        // here always is harmless and avoids a dialect check this
+        // function has no other reason to carry.
+        "atomic", "nil"
     };
     for (const auto& kw : nonTypeKeywords) {
         if (tok.text == kw) return false;
@@ -152,6 +160,21 @@ AstPtr Parser::parsePrimary() {
         auto lit = std::make_unique<IntLiteral>();
         lit->value = std::stoll(advance().text);
         return lit;
+    }
+
+    // DGD "nil" literal (ROADMAP.md row 1.2/1.3's greenlit slice; real
+    // temp/dgd/src/comp/parser.y: "NIL { $$ = Node::createNil(); }", an
+    // ordinary primary-expression literal). Double-gated on dialect_
+    // here too, not just at the Lexer -- same belt-and-suspenders
+    // discipline as isModifierKeyword()'s own "atomic" check just above
+    // it in this file: Lexer::lexIdentOrKeyword() already only ever
+    // tokenizes "nil" as a Keyword under DGD, so this branch could not
+    // be reached under FluffOS/LDMud in practice, but this is the one
+    // place that actually decides "is this a real literal", and it
+    // should not silently trust the Lexer's gate to hold forever.
+    if (check(TokenType::Keyword) && peek().text == "nil" && dialect_ == LpcDialect::DGD) {
+        advance();
+        return std::make_unique<NilLiteral>();
     }
 
     if (checkText("(") && peekAt(1).text == "[") {

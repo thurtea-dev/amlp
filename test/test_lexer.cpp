@@ -17078,6 +17078,103 @@ static void testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect() {
     std::cout << "testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect OK\n";
 }
 
+// ROADMAP.md row 1.2/1.3's own next greenlit slice, same gated-per-dialect
+// pattern as "atomic" just above: DGD's real "nil" literal (confirmed
+// against temp/dgd/src/comp/parser.y's own "NIL { $$ = Node::createNil();
+// }", temp/dgd/src/data.h's own "T_NIL"/VAL_TRUE/VAL_NIL macros, and
+// temp/dgd/src/data.cpp's own "nil.type = (stricttc) ? T_NIL : T_INT;" --
+// this implementation targets strict-typechecking DGD's own behavior,
+// the only mode where nil is a real distinct value rather than plain
+// int 0).
+static void testLexerNilKeywordOnlyRecognizedUnderDgdDialect() {
+    {
+        amlp::Lexer lexer("nil");
+        auto tokens = lexer.tokenize();
+        assert(tokens[0].type == amlp::TokenType::Ident); // default == FluffOS
+    }
+    {
+        amlp::Lexer lexer("nil", amlp::LpcDialect::FluffOS);
+        auto tokens = lexer.tokenize();
+        assert(tokens[0].type == amlp::TokenType::Ident);
+    }
+    {
+        amlp::Lexer lexer("nil", amlp::LpcDialect::LdMud);
+        auto tokens = lexer.tokenize();
+        assert(tokens[0].type == amlp::TokenType::Ident);
+    }
+    {
+        amlp::Lexer lexer("nil", amlp::LpcDialect::DGD);
+        auto tokens = lexer.tokenize();
+        assert(tokens[0].type == amlp::TokenType::Keyword);
+        assert(tokens[0].text == "nil");
+    }
+
+    std::cout << "testLexerNilKeywordOnlyRecognizedUnderDgdDialect OK\n";
+}
+
+static void testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly() {
+    // Under FluffOS/LDMud, "nil" lexes as a plain Ident (confirmed
+    // above), so parsePrimary() never reaches the dialect-gated literal
+    // branch; "return nil;" parses as an ordinary bare-identifier
+    // VarRefExpr instead (syntactically valid -- unlike "atomic", this
+    // is not a parse error), which then fails at CodeGen time instead:
+    // CodeGen::resolveVariable() throws "codegen: undeclared variable
+    // \"nil\"" since no local or object variable named "nil" exists --
+    // still a genuine compile failure, caught by the same
+    // ObjectManager::compile() try/catch, just from a different stage
+    // than atomic's parse-time failure. Exactly the "gets misread as an
+    // identifier" alternative this slice's own task description called
+    // out as equally real and acceptable.
+    const char* src =
+        "mixed getNil() { return nil; }\n"
+        "mixed nilIsFalsy() { return nil ? 1 : 0; }\n"
+        "mixed nilEqualsNil() { return nil == nil; }\n"
+        "mixed nilEqualsZero() { return nil == 0; }\n";
+
+    {
+        ObjectVarHarness harness; // defaults to "fluffos", row 1.1
+        harness.writeFile("/nil_fluffos.c", src);
+        auto ob = harness.objects.cloneObject("/nil_fluffos");
+        assert(ob == nullptr);
+    }
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/nil_ldmud.c", src);
+        auto ob = harness.objects.cloneObject("/nil_ldmud");
+        assert(ob == nullptr);
+    }
+    {
+        ObjectVarHarness harness("dialect: dgd\n");
+        harness.writeFile("/nil_dgd.c", src);
+        auto ob = harness.objects.cloneObject("/nil_dgd");
+        assert(ob != nullptr);
+
+        // A real nil literal compiles and evaluates: PushNil pushes a
+        // genuine amlp::Nil-holding Value, not int64_t 0 or monostate.
+        amlp::Value got = harness.vm.callFunction(ob, "getNil", {});
+        assert(std::holds_alternative<amlp::Nil>(got.data));
+
+        // isTruthy(nil) == false, real VAL_TRUE(v) semantics.
+        amlp::Value truthy = harness.vm.callFunction(ob, "nilIsFalsy", {});
+        assert(std::holds_alternative<int64_t>(truthy.data));
+        assert(std::get<int64_t>(truthy.data) == 0);
+
+        // nil == nil is true (real VAL_NIL(v), always true for a value
+        // already known to be nil-typed).
+        amlp::Value eqNil = harness.vm.callFunction(ob, "nilEqualsNil", {});
+        assert(std::holds_alternative<int64_t>(eqNil.data));
+        assert(std::get<int64_t>(eqNil.data) == 1);
+
+        // nil == 0 is false -- real strict-typechecking DGD's own
+        // distinct T_NIL vs T_INT type tags, not the same value.
+        amlp::Value eqZero = harness.vm.callFunction(ob, "nilEqualsZero", {});
+        assert(std::holds_alternative<int64_t>(eqZero.data));
+        assert(std::get<int64_t>(eqZero.data) == 0);
+    }
+
+    std::cout << "testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly OK\n";
+}
+
 static void testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence() {
     amlp::Config config;
     amlp::FluffOsBootApi fluffApi(config);
@@ -17868,6 +17965,8 @@ int main() {
     testLpcDialectNameAndFromStringRoundTripAllThreeDialects();
     testLexerAtomicKeywordOnlyRecognizedUnderDgdDialect();
     testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect();
+    testLexerNilKeywordOnlyRecognizedUnderDgdDialect();
+    testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly();
     testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence();
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
     testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime();

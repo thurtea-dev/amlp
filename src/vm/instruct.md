@@ -112,6 +112,28 @@ using ValueVariant = std::variant<
 - Only active when `LpcDialect::DGD` is set; in FluffOS/LDMud modes `nil`
   does not exist and the `Nil` variant is never constructed.
 
+**Implemented 2026-08-18 (ROADMAP.md row 1.10, greenlit as row
+1.2/1.3's next slice after `atomic`):** this plan turned out accurate on
+every semantic rule above once checked against the real DGD source
+(`temp/dgd/src/data.h`'s own `VAL_TRUE`/`VAL_NIL` macros,
+`temp/dgd/src/comp/compile.cpp`'s `matchType()`) -- confirmed and
+implemented exactly as written, plus one real nuance not previously on
+record here: DGD's own `nil` is only genuinely distinct under **strict
+typechecking** (`temp/dgd/src/data.cpp`'s own `"nil.type = (stricttc) ?
+T_NIL : T_INT;"`, a global driver config level, not a per-file pragma);
+this implementation targets that mode, since it is the only one where
+`nil` means anything. `nil == 0` needed no special-case code at all --
+`Value.cpp`'s own `valuesEqual()` already rejects mismatched
+`ValueVariant` alternatives before any type-specific check runs, so
+adding `Nil` as a new alternative made this true for free. Arithmetic/
+comparison throwing a type error likewise needed zero new code in
+`VM.cpp`: `asArithmeticOperand()` already only recognized `int64_t`/
+`double`/`std::monostate`, so every `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Lt`/
+`Lte`/`Gt`/`Gte` opcode's own pre-existing generic fallback already
+covers `Nil` correctly. See ROADMAP.md row 1.10 and `src/compiler/
+instruct.md` for the full citation trail and the Lexer/Parser/CodeGen
+half of this work.
+
 ### 1.11 - DGD `rlimits` statement
 
 New opcodes in `Bytecode.hpp`:

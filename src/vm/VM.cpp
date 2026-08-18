@@ -1176,6 +1176,12 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                 break;
             }
 
+            case OpCode::PushNil: {
+                localStack.emplace_back(Value(Nil{}));
+                ++ip;
+                break;
+            }
+
             case OpCode::PushLocal: {
                 if (instr.operand < 0 || static_cast<size_t>(instr.operand) >= locals.size()) {
                     throw LpcRuntimeError("PushLocal: bad local slot index");

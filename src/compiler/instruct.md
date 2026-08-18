@@ -140,6 +140,32 @@ regression tests (`test_lexer.cpp`) cover the Lexer-level token
 classification directly and a full end-to-end compile of the same
 source under all three dialects.
 
+**`nil` implemented 2026-08-18 (continued), the next greenlit slice,
+same gated-per-dialect pattern:** read `temp/dgd/src/comp/parser.y`'s
+own `"NIL { $$ = Node::createNil(); }"`, `temp/dgd/src/comp/node.cpp`'s
+`Node::createNil()`, and `temp/dgd/src/data.h`'s own `T_NIL`/
+`VAL_TRUE`/`VAL_NIL` macros directly before writing anything -- see
+ROADMAP.md row 1.10 for the full citation trail, including the real
+strict-typechecking nuance (`temp/dgd/src/data.cpp`'s own `"nil.type =
+(stricttc) ? T_NIL : T_INT;"`) this implementation targets. `nil` is
+now a real, distinct `Value` (`Nil`, a stateless struct in
+`ValueVariant`), lexed as `TokenType::Keyword` only under
+`LpcDialect::DGD` (same `Lexer::lexIdentOrKeyword()` gate as `atomic`),
+parsed as a new `NilLiteral` AST node in `parsePrimary()` (independently
+dialect-gated there too, not solely trusting the Lexer), and compiled
+via a new `OpCode::PushNil` (no operand). Stayed genuinely minimal, not
+bigger than expected: `isTruthy()`/`valuesEqual()` needed one explicit
+case each; every arithmetic/comparison opcode already threw a clear
+type error for `Nil` with zero further changes, since
+`asArithmeticOperand()` never special-cased anything but
+`int64_t`/`double`/`std::monostate` to begin with. 4 new regression
+tests confirm end to end (compiles and evaluates correctly under
+`dialect: dgd`; fails to compile under `fluffos`/`ldmud`, this time via
+`CodeGen::resolveVariable()`'s "undeclared variable" error rather than a
+parse error, since a bare `nil` identifier is syntactically valid there
+unlike `atomic`). `#'`, `'name`, mapping width, and `rlimits` remain
+untouched.
+
 ### 2. Make the Parser dialect-aware
 
 `Parser` already takes a `Lexer`; add a `LpcDialect` parameter (see the

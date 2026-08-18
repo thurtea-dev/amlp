@@ -16,6 +16,14 @@ enum class OpCode : uint8_t {
     // CompiledProgram::floatPool instead, mirroring PushConst/stringPool
     // exactly.
     PushFloat,
+    // DGD's "nil" literal (ROADMAP.md row 1.2/1.3's greenlit slice, row
+    // 1.10's minimal real piece -- see Ast.hpp's NilLiteral and
+    // Value.hpp's Nil). No operand -- unlike PushConst/PushFloat, nil
+    // carries no payload to index into any pool, real DGD's own
+    // runtime nil value (data.cpp's "Value nil = { T_NIL, TRUE };")
+    // being a stateless singleton too. Only ever emitted under
+    // LpcDialect::DGD (see CodeGen::generate()'s own NilLiteral case).
+    PushNil,
     PushLocal,
     StoreLocal,
     PushObjectVar,
