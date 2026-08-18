@@ -3,6 +3,87 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): row 1.7's `bind_lambda()` decision confirmed
+already on record (no change needed); Phase 1 scanned end to end for
+the next smallest actionable item -- none found, nothing implemented
+(623 tests, unchanged, no code touched).**
+
+Asked to record a decision on row 1.7's `bind_lambda()` options ((c),
+leave deferred, no partial stand-in) -- checked the row first rather than
+assuming it needed writing. It already carried exactly this decision,
+dated 2026-08-17 from a prior session, same rationale, same "stays
+deferred alongside `parse_*` (row 0.13a) and the connect/disconnect
+design question (row 1.4/1.16)" phrasing. Left it untouched rather than
+duplicating or re-dating an already-correct entry.
+
+Then scanned every remaining `[ ]` Phase 1 row for the next smallest
+actionable dialect divergence, excluding `parse_*` (0.13a), the
+connect/disconnect design question, and row 1.7's own `bind_lambda`/
+closure-kind work. Four rows had no prior investigation recorded at
+all -- 1.12 (`atomic` checkpoint/rollback), 1.13 (`parse_string`), 1.14
+(lightweight objects), 1.15 (DGD driver+auto boot path) -- each read
+against the real vendored `temp/dgd` source directly rather than trusted
+from `instruct.md`'s own existing (and in 1.12/1.13's case, materially
+wrong) plans:
+
+- **1.12 `atomic`:** `src/vm/instruct.md`'s own plan (snapshot on-stack
+  object variables into a `vector`, restore on error) does not match real
+  DGD at all. Real rollback (`temp/dgd/src/interpret.cpp:2390-2462`) runs
+  through DGD's own global "planes" data-versioning subsystem
+  (`Object::newPlane()`/`Dataplane::commit()`), copy-on-write-versioning
+  the entire reachable object graph, not just the current call's locals --
+  the same mechanism row 1.11's own prior investigation already found
+  underneath `rlimits`' `level`-scaled tick accounting. Confirmed
+  genuinely bigger, same prerequisite as `rlimits`, not implemented.
+- **1.13 `parse_string`:** `src/compiler/instruct.md`'s own note ("handled
+  as an efun, no lexer change needed") is wrong -- real DGD backs it with
+  a dedicated 5,143-line DFA-lexer-generator + LALR grammar/parser-
+  generator subsystem (`temp/dgd/src/parser/`: `dfa.cpp`, `grammar.cpp`,
+  `srp.cpp`, `parse.cpp`), plus its own per-object persistent state slot
+  (`temp/dgd/src/data.h:193`). Same category as the already-excluded
+  `parse_*` package, confirmed by directly measuring the real source, not
+  implemented.
+- **1.14 lightweight objects:** not just a new `Value` alternative the way
+  `nil` was -- real DGD's `T_LWOBJECT` (`temp/dgd/src/data.h:64`) is a
+  third call-dispatch kind with its own `Frame::funcall()`/`call()`
+  parameter (`temp/dgd/src/interpret.h:256-257`) and its own ref-counted
+  lifecycle, plus a real object-upgrade conversion path
+  (`Object::upgradeLWO()`, `data.h:165`). This driver's `LpcObject` model
+  is `shared_ptr`-identity-based throughout with no parallel value-
+  semantics kind anywhere -- same cross-cutting-rework shape mapping
+  width was already ruled out for. Confirmed genuinely bigger, not
+  implemented.
+- **1.15 DGD driver+auto boot path:** not independently investigated as
+  new -- confirmed already on record as the same connect/disconnect
+  design question `src/dialect/instruct.md`'s own `DgdBootApi` section
+  already covers (real DGD's three-way `telnet_connect`/`binary_connect`/
+  `datagram_connect` port-type fork, no single `connect`/`disconnect`
+  apply at all), explicitly cross-referenced there against rows 1.4/1.15
+  already.
+
+Also re-checked the existing `'name` symbol-literal note (part of rows
+1.2/1.3's own prior scoping) against the real `temp/ldmud/src/lex.c`
+source in full rather than stopping at its existing citation: the same
+lexer production that recognizes a bare `'name` symbol
+(`L_SYMBOL`) also produces `L_QUOTED_AGGREGATE` for `'({ ... })` --
+the literal "quoted code" shape `lambda()`'s own body argument is built
+out of. Sharpens rather than contradicts the existing classification:
+`'name` is not an independent literal type sitting next to the closure
+work, it is part of the same quoted-code family, reinforcing row 1.7's
+own "closure-kind work" exclusion rather than being a smaller item
+outside it.
+
+Every other still-open Phase 1 row was already fully accounted for by an
+existing note (1.9 mapping width, 1.11 `rlimits`, both previously
+confirmed genuinely bigger) or is one of the three excluded categories
+(1.4's own connect/disconnect remainder, 1.7, 1.8's `#'symbol`, 1.16's
+three items, already exhaustively investigated 2026-08-18 and each
+individually blocked). Nothing in Phase 1 turned out small and
+unambiguous this pass. Stopped and reported rather than forcing a pick,
+per this project's own established discipline. ROADMAP.md updated with a
+capstone note plus individual per-row citations for 1.12/1.13/1.14/1.15
+and the `'name` addendum; no source code touched, 623 tests unchanged.
+
 **2026-08-18: ROADMAP row 0.15 fixed -- `ObjectManager::compile()`'s
 `programCache_` now invalidates a cache hit whose source has genuinely
 changed, instead of returning a same-filename compile unconditionally
