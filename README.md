@@ -14,4 +14,4 @@ ctest --test-dir build --output-on-failure
 ./build/amlp etc/driver.cfg
 ```
 
-boots the driver's own bundled mudlib under `mudlib/` ("library", a stripped-down rebuild of Lil with one starting room and the wand of creation, see `mudlib/LIBRARY_MUDLIB_PLAN.md`).
+boots the driver's own bundled mudlib under `mudlib/`.
