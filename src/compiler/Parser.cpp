@@ -3,7 +3,8 @@
 
 namespace amlp {
 
-Parser::Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {}
+Parser::Parser(std::vector<Token> tokens, LpcDialect dialect)
+    : tokens_(std::move(tokens)), dialect_(dialect) {}
 
 bool Parser::atEnd() const {
     return pos_ >= tokens_.size() || tokens_[pos_].type == TokenType::End;
@@ -67,7 +68,15 @@ bool Parser::isTypeKeyword(const Token& tok) const {
     static const std::vector<std::string> nonTypeKeywords = {
         "return", "if", "else", "while", "for", "do", "inherit", "break", "continue",
         "foreach", "in", "switch", "case", "default",
-        "static", "private", "public", "protected", "nomask", "varargs"
+        "static", "private", "public", "protected", "nomask", "varargs",
+        // "atomic" -- DGD's own function-declaration modifier (see
+        // isModifierKeyword() below), never a type. Excluded
+        // unconditionally: under FluffOS/LDMud it is never lexed as a
+        // Keyword at all (Lexer::lexIdentOrKeyword()'s own dialect
+        // gate), so this only matters, and only needs to matter, under
+        // DGD -- listing it here always is harmless and avoids a
+        // dialect check this function has no other reason to carry.
+        "atomic"
     };
     for (const auto& kw : nonTypeKeywords) {
         if (tok.text == kw) return false;
@@ -83,6 +92,20 @@ bool Parser::isModifierKeyword(const Token& tok) const {
     for (const auto& kw : modifierKeywords) {
         if (tok.text == kw) return true;
     }
+    // DGD's "atomic" (ROADMAP.md row 1.2/1.3 scoping note; confirmed
+    // against temp/dgd/src/comp/parser.y's own "ATOMIC { $$ =
+    // C_ATOMIC; }", the same modifier-list production as
+    // static/nomask/varargs above). Dialect-gated here too, not just at
+    // the Lexer -- belt and suspenders: Lexer::lexIdentOrKeyword()
+    // already only ever tokenizes "atomic" as a Keyword under DGD, so
+    // this token could not reach here as anything but DGD's own in
+    // practice, but this function owning its own real check, not just
+    // trusting the Lexer's gate to hold forever, is the more defensible
+    // shape for the one place that actually decides "is this a
+    // function modifier". What "atomic" *means* once accepted (VM-level
+    // checkpoint/rollback) is row 1.12's own, separate, still-unstarted
+    // concern -- accepting the keyword here only lets it parse.
+    if (dialect_ == LpcDialect::DGD && tok.text == "atomic") return true;
     return false;
 }
 

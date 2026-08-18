@@ -123,6 +123,23 @@ Concretely, once the plumbing above lands: extend `kKeywords` (Lexer) and
 (`#'`, `'name`) or new grammar inside an existing literal parse path
 (mapping width, `rlimits`), not a one-line keyword-set addition.
 
+**Implemented 2026-08-18 (greenlit first slice, ROADMAP.md rows
+1.2/1.3):** the plumbing plus `atomic` alone, exactly as proposed above,
+nothing else. `Lexer`/`Parser` both now take an `LpcDialect dialect`
+constructor parameter (`LpcDialect::FluffOS` default, confirmed zero
+behavior change for every pre-existing call site). `atomic` is
+recognized as `TokenType::Keyword` only when `dialect_ ==
+LpcDialect::DGD` (`Lexer::lexIdentOrKeyword()`), and accepted as a real
+function-declaration modifier only under the same condition
+(`Parser::isModifierKeyword()`, reusing `parseDeclPrefix()`'s existing
+generic modifier-consumption loop unchanged, plus excluded from
+`isTypeKeyword()`'s default-true classification so it can never be
+misread as a type). `nil`, `#'`, `'name`, mapping width, and `rlimits`
+all remain exactly as scoped above -- none of them touched. 2 new
+regression tests (`test_lexer.cpp`) cover the Lexer-level token
+classification directly and a full end-to-end compile of the same
+source under all three dialects.
+
 ### 2. Make the Parser dialect-aware
 
 `Parser` already takes a `Lexer`; add a `LpcDialect` parameter (see the

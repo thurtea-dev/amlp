@@ -16999,6 +16999,85 @@ static void testLpcDialectNameAndFromStringRoundTripAllThreeDialects() {
     std::cout << "testLpcDialectNameAndFromStringRoundTripAllThreeDialects OK\n";
 }
 
+// ROADMAP.md rows 1.2/1.3, greenlit first slice: dialect plumbing through
+// Lexer/Parser constructors (default LpcDialect::FluffOS, zero behavior
+// change for any pre-existing call site -- exercised implicitly by every
+// other test in this file still constructing Lexer/Parser with no dialect
+// argument at all) plus DGD's real "atomic" function-declaration modifier
+// as the first real per-dialect token (confirmed against
+// temp/dgd/src/comp/parser.y's own "ATOMIC { $$ = C_ATOMIC; }", the same
+// modifier-list production as static/nomask/varargs).
+static void testLexerAtomicKeywordOnlyRecognizedUnderDgdDialect() {
+    // Default-constructed Lexer (no dialect argument) must behave exactly
+    // like explicit FluffOS -- the "byte-identical to before this change"
+    // requirement, checked directly rather than just assumed.
+    {
+        amlp::Lexer lexer("atomic");
+        auto tokens = lexer.tokenize();
+        assert(tokens.size() == 2); // "atomic", End
+        assert(tokens[0].type == amlp::TokenType::Ident);
+        assert(tokens[0].text == "atomic");
+    }
+    {
+        amlp::Lexer lexer("atomic", amlp::LpcDialect::FluffOS);
+        auto tokens = lexer.tokenize();
+        assert(tokens[0].type == amlp::TokenType::Ident);
+    }
+    {
+        amlp::Lexer lexer("atomic", amlp::LpcDialect::LdMud);
+        auto tokens = lexer.tokenize();
+        assert(tokens[0].type == amlp::TokenType::Ident);
+    }
+    {
+        amlp::Lexer lexer("atomic", amlp::LpcDialect::DGD);
+        auto tokens = lexer.tokenize();
+        assert(tokens[0].type == amlp::TokenType::Keyword);
+        assert(tokens[0].text == "atomic");
+    }
+
+    std::cout << "testLexerAtomicKeywordOnlyRecognizedUnderDgdDialect OK\n";
+}
+
+static void testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect() {
+    // A function declaration using "atomic" as a leading modifier, real
+    // DGD shape (temp/dgd/src/comp/parser.y's own non_private production).
+    // Under FluffOS/LDMud, "atomic" lexes as a plain Ident (confirmed
+    // above), so parseDeclPrefix()'s modifier loop never consumes it;
+    // falling through to the "type omitted" branch instead misreads
+    // "atomic" itself as the declaration's own name, then chokes on the
+    // real return-type keyword "void" immediately after -- a genuine
+    // parse error, not a silent misparse, caught by
+    // ObjectManager::compile()'s own try/catch and surfaced as a null
+    // program exactly like any other real compile failure.
+    const char* src = "atomic void go() { return; }\n";
+
+    {
+        ObjectVarHarness harness; // defaults to "fluffos", row 1.1
+        harness.writeFile("/atomic_fluffos.c", src);
+        auto ob = harness.objects.cloneObject("/atomic_fluffos");
+        assert(ob == nullptr);
+    }
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/atomic_ldmud.c", src);
+        auto ob = harness.objects.cloneObject("/atomic_ldmud");
+        assert(ob == nullptr);
+    }
+    {
+        ObjectVarHarness harness("dialect: dgd\n");
+        harness.writeFile("/atomic_dgd.c", src);
+        auto ob = harness.objects.cloneObject("/atomic_dgd");
+        assert(ob != nullptr);
+        // Confirms this is a genuine, working function, not just a
+        // program object that happened not to be null: "atomic" was
+        // consumed purely as a modifier, "go" is the real function name,
+        // callable and returning normally.
+        harness.vm.callFunction(ob, "go", {});
+    }
+
+    std::cout << "testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect OK\n";
+}
+
 static void testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence() {
     amlp::Config config;
     amlp::FluffOsBootApi fluffApi(config);
@@ -17787,6 +17866,8 @@ int main() {
     testSocketReleaseAndAcquireHandOffOwnershipAndCallbacks();
     testSocketReleaseRevertsWhenNeverAcquiredAndRejectsTheWrongCaller();
     testLpcDialectNameAndFromStringRoundTripAllThreeDialects();
+    testLexerAtomicKeywordOnlyRecognizedUnderDgdDialect();
+    testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect();
     testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence();
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
     testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime();

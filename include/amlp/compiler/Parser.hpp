@@ -8,7 +8,12 @@ namespace amlp {
 
 class Parser {
 public:
-    explicit Parser(std::vector<Token> tokens);
+    // dialect defaults to FluffOS, same reasoning as Lexer's own default
+    // -- every pre-existing "Parser parser(tokens)" call site (this
+    // driver's own ~80 direct test constructions) keeps its exact prior
+    // behavior unchanged. Only ObjectManager::compile() passes a real,
+    // config-derived dialect explicitly.
+    explicit Parser(std::vector<Token> tokens, LpcDialect dialect = LpcDialect::FluffOS);
     std::unique_ptr<Program> parseProgram();
 
 private:
@@ -89,6 +94,7 @@ private:
 
     std::vector<Token> tokens_;
     size_t pos_ = 0;
+    LpcDialect dialect_;
 
     // One entry per "(: ... :)" general-lambda body currently being
     // parsed (nested lambdas push their own), each tracking the highest

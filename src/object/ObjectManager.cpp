@@ -6,6 +6,7 @@
 #include "amlp/compiler/Lexer.hpp"
 #include "amlp/compiler/Parser.hpp"
 #include "amlp/compiler/CodeGen.hpp"
+#include "amlp/dialect/LpcDialect.hpp"
 #include "amlp/vm/VM.hpp"
 #include <fstream>
 #include <sstream>
@@ -461,9 +462,20 @@ std::shared_ptr<CompiledProgram> ObjectManager::compile(const std::string& rawFi
     }
 
     try {
-        Lexer lexer(preprocessed.output);
+        // ROADMAP.md row 1.2/1.3's own "zero behavior change" plumbing
+        // slice: Config::dialect() (row 1.1) already defaults to
+        // "fluffos" for any config that never sets the key, and
+        // dialectFromString() throws on an unrecognized string (already
+        // used identically in DialectSelect.cpp's own
+        // makeBootApiForConfig()) -- so this is the one real call site
+        // where the dialect actually reaches the Lexer/Parser, every
+        // other construction (this driver's own test suite included)
+        // still defaults to LpcDialect::FluffOS via the constructors'
+        // own default argument.
+        LpcDialect dialect = dialectFromString(config_.dialect());
+        Lexer lexer(preprocessed.output, dialect);
         auto tokens = lexer.tokenize();
-        Parser parser(std::move(tokens));
+        Parser parser(std::move(tokens), dialect);
         auto ast = parser.parseProgram();
 
         // Resolve "inherit \"path\";" targets by recursively compiling each

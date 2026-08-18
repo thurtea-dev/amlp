@@ -34,7 +34,8 @@ const std::unordered_set<std::string> kKeywords = {
 };
 }
 
-Lexer::Lexer(std::string source) : src_(std::move(source)) {}
+Lexer::Lexer(std::string source, LpcDialect dialect)
+    : src_(std::move(source)), dialect_(dialect) {}
 
 bool Lexer::atEnd() const { return pos_ >= src_.size(); }
 
@@ -80,7 +81,20 @@ Token Lexer::lexIdentOrKeyword() {
     while (!atEnd() && (std::isalnum(static_cast<unsigned char>(peek())) || peek() == '_')) {
         text += advance();
     }
-    TokenType type = kKeywords.count(text) ? TokenType::Keyword : TokenType::Ident;
+    // "atomic" -- DGD's real function-declaration modifier (ROADMAP.md
+    // row 1.2's scoping note; confirmed against temp/dgd/src/comp/
+    // parser.y's own "ATOMIC { $$ = C_ATOMIC; }", the same
+    // non_private modifier-list production as STATIC/NOMASK/VARARGS).
+    // Deliberately kept out of the shared kKeywords set below and gated
+    // here instead: reserving it under FluffOS/LDMud too would risk
+    // breaking real code using "atomic" as a plain identifier, the same
+    // hazard this file's own "array" comment documents, and neither
+    // FluffOS nor LDMud reserve the word at all. Only the first
+    // dialect-gated keyword so far -- future ones (nil, etc, see the
+    // same scoping note) follow this same pattern, not a growing
+    // if-chain.
+    bool isDialectKeyword = dialect_ == LpcDialect::DGD && text == "atomic";
+    TokenType type = (kKeywords.count(text) || isDialectKeyword) ? TokenType::Keyword : TokenType::Ident;
     return Token{type, text, startLine};
 }
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "amlp/dialect/LpcDialect.hpp"
 #include <string>
 #include <vector>
 
@@ -14,7 +15,13 @@ struct Token {
 
 class Lexer {
 public:
-    explicit Lexer(std::string source);
+    // dialect defaults to FluffOS so every pre-existing call site (this
+    // driver's own ~100 direct "Lexer lexer(source)" test constructions,
+    // plus any future one that doesn't care) keeps its exact prior
+    // behavior with no change at all -- ROADMAP.md row 1.2's own "zero
+    // behavior change" plumbing slice. Only ObjectManager::compile()
+    // passes a real, config-derived dialect explicitly.
+    explicit Lexer(std::string source, LpcDialect dialect = LpcDialect::FluffOS);
     std::vector<Token> tokenize();
 
 private:
@@ -34,6 +41,7 @@ private:
     std::string src_;
     size_t pos_ = 0;
     int line_ = 1;
+    LpcDialect dialect_;
 };
 
 } // namespace amlp
