@@ -201,10 +201,19 @@ one real call site today, `ObjectManager::compile()`).
   check: "Inconsistent number of values in mapping literal"). A second,
   simpler literal exists for an empty mapping of given width:
   `([: width_expr ])` (`F_M_ALLOCATE`), not previously documented here at
-  all. Moderate: self-contained inside the existing mapping-literal parse
-  path, no new AST node kind beyond a width field. Row 1.9 owns the
-  `m_allocate`/`m_indices`/`m_values` runtime side; this row owns both
-  literal syntaxes.
+  all. ~~Moderate: self-contained inside the existing mapping-literal
+  parse path, no new AST node kind beyond a width field.~~ **Corrected
+  2026-08-18, investigated as a candidate slice after `atomic`/`nil`:
+  genuinely bigger, not moderate.** The literal grammar alone is exactly
+  this small, but real LDMud mappings are N-columns-wide at the *value*
+  level too (`m_allocate`/`m_values`/`m_entry`/`m_reallocate`/`m_add`/
+  `m_contains`, none implemented), and this driver's own `Mapping`
+  (`std::vector<std::pair<Value, Value>>`) has no width dimension at
+  all -- load-bearing throughout `MakeMapping`/`Index`/`IndexAssign`/
+  `sizeof`/`map_delete`/mapping `+`/save-restore. A parser-only slice
+  that silently discarded extra values would not "work end to end". See
+  ROADMAP.md row 1.9 for the full finding -- it now owns both literal
+  syntaxes, not split from the runtime side across two rows.
 
 **DGD additions**
 - Parse `atomic` as a function-declaration modifier (analogous to
@@ -231,11 +240,12 @@ one real call site today, `ObjectManager::compile()`).
 - `atomic` modifier → mark `FunctionEntry::isAtomic = true` (see
   `src/vm`, row 1.12's own separate VM-level concern -- landing the
   keyword alone is inert until then)
-- `NilLiteral` → `PushNil` opcode (or whatever placeholder row 1.10
-  settles on)
-- Mapping width literals (`([ k: v1; v2 ])`, `([: N ])`) → extend the
-  existing mapping-literal CodeGen path with the corrected grammar above,
-  no new AST node kind
+- `NilLiteral` → `PushNil` opcode -- **implemented 2026-08-18, real, not
+  a placeholder** (see the row 1.10 note below)
+- Mapping width literals (`([ k: v1; v2 ])`, `([: N ])`) -- **investigated
+  2026-08-18, not implemented, bigger than expected** (see the row 1.9
+  note above, under "Mapping width" -- CodeGen work here is inseparable
+  from the `Mapping`-structure rework row 1.9 owns)
 
 Explicitly **removed** from this section, not real: `LambdaExpr`/
 `UnboundLambdaExpr` → `MakeClosure` (`lambda()`/`unbound_lambda()` are
