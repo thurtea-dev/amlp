@@ -17175,6 +17175,189 @@ static void testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectl
     std::cout << "testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly OK\n";
 }
 
+// --- Wand of Creation (mudlib/clone/wand_of_creation.c) -------------------
+// Reads the real, shipped file from disk rather than duplicating its
+// source here, so these tests exercise exactly what the live driver
+// loads, not a copy that could silently drift out of sync. Live-verified
+// separately over a real telnet-negotiating connection (see the session
+// notes) -- these are the C++-level regression-suite counterpart,
+// covering the same held()/clone/purge/create logic through this same
+// EfunTable the live driver uses, driven through VM::dispatchCommand()
+// exactly like Server.cpp's own real call site.
+namespace {
+std::string readMudlibFile(const std::string& relPath) {
+    for (const char* base : {"../mudlib", "mudlib", "./mudlib"}) {
+        std::ifstream f(std::string(base) + relPath);
+        if (f) {
+            std::ostringstream buf;
+            buf << f.rdbuf();
+            return buf.str();
+        }
+    }
+    return std::string();
+}
+}  // namespace
+
+static void testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld() {
+    std::string wandSrc = readMudlibFile("/clone/wand_of_creation.c");
+    assert(!wandSrc.empty());  // if this fails, the mudlib file moved/was renamed
+
+    ObjectVarHarness harness;
+    harness.writeFile("/wand_of_creation.c", wandSrc);
+    harness.writeFile("/room.c", "void create() {}\n");
+    harness.writeFile("/player.c", "void create() { enable_commands(); }\n");
+
+    auto room = harness.objects.cloneObject("/room");
+    auto player = harness.objects.cloneObject("/player");
+    auto wand = harness.objects.cloneObject("/wand_of_creation");
+    assert(room != nullptr && player != nullptr && wand != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(player);
+    amlp::OutputContext::set(&conn);
+
+    // Player into the room first, then the wand -- the live-verified
+    // path that actually fires the wand's own init() (leg 2 of
+    // VM::moveObject(): the room's existing occupant, the player, has
+    // commandsEnabled() true).
+    harness.vm.moveObject(player, room);
+    harness.vm.moveObject(wand, room);
+
+    // Not held (same room, not inventory): every command must refuse,
+    // not silently do nothing and not crash.
+    bool claimed = harness.vm.dispatchCommand(player, "clone /clone/wand_of_creation");
+    assert(claimed);
+    std::string out = readAvailable(fds[1]);
+    assert(out.find("You are not holding the wand of creation.") != std::string::npos);
+
+    amlp::OutputContext::set(nullptr);
+    ::close(fds[1]);
+    std::cout << "testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld OK\n";
+}
+
+static void testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld() {
+    std::string wandSrc = readMudlibFile("/clone/wand_of_creation.c");
+    assert(!wandSrc.empty());
+
+    ObjectVarHarness harness;
+    harness.writeFile("/wand_of_creation.c", wandSrc);
+    harness.writeFile("/room.c", "void create() {}\n");
+    harness.writeFile("/player.c", "void create() { enable_commands(); }\n");
+    // A real move() wrapper (see wand_of_creation.c's own comment on why
+    // this is required at all: "->" call_other never falls back to the
+    // move_object() efun), matching how /clone/user is placed live.
+    harness.writeFile("/trinket.c",
+        "void create() {}\n"
+        "int id(string a) { return a == \"trinket\"; }\n"
+        "int move(mixed dest) { return move_object(dest); }\n");
+    harness.writeFile("/probe.c",
+        "mixed check(string name, object where) { return present(name, where); }\n");
+
+    auto room = harness.objects.cloneObject("/room");
+    auto player = harness.objects.cloneObject("/player");
+    auto wand = harness.objects.cloneObject("/wand_of_creation");
+    auto probe = harness.objects.cloneObject("/probe");
+    assert(room != nullptr && player != nullptr && wand != nullptr && probe != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(player);
+    amlp::OutputContext::set(&conn);
+
+    harness.vm.moveObject(player, room);
+    harness.vm.moveObject(wand, room);   // fires init(), registers add_action
+    harness.vm.moveObject(wand, player); // now genuinely held
+    assert(wand->environment().lock() == player);
+    readAvailable(fds[1]);  // drain anything queued so far
+
+    bool claimed = harness.vm.dispatchCommand(player, "clone /trinket");
+    assert(claimed);
+    std::string out = readAvailable(fds[1]);
+    assert(out.find("Cloned into your inventory: /trinket") != std::string::npos);
+
+    // Confirm it really is in the player's own inventory (cmd_clone's
+    // own "prefer inventory" placement, matching the real reference
+    // tool's cmd_clone_ob() exactly), then move it to the room --
+    // cmd_purge only ever searches the room (also matching the
+    // original's own cmd_purge_ob() exactly, confirmed live), so a
+    // trinket left in inventory would never be a valid purge target.
+    amlp::Value found = harness.vm.callFunction(probe, "check",
+        {amlp::Value(std::string("trinket")), amlp::Value(player)});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(found.data));
+    auto trinket = std::get<std::shared_ptr<amlp::LpcObject>>(found.data);
+    assert(trinket != nullptr);
+    harness.vm.moveObject(trinket, room);
+
+    claimed = harness.vm.dispatchCommand(player, "purge trinket");
+    assert(claimed);
+    out = readAvailable(fds[1]);
+    assert(out.find("Purged: trinket") != std::string::npos);
+    assert(trinket->isDestructed());
+
+    amlp::OutputContext::set(nullptr);
+    ::close(fds[1]);
+    std::cout << "testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld OK\n";
+}
+
+static void testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject() {
+    std::string wandSrc = readMudlibFile("/clone/wand_of_creation.c");
+    assert(!wandSrc.empty());
+
+    ObjectVarHarness harness;
+    harness.writeFile("/wand_of_creation.c", wandSrc);
+    harness.writeFile("/room.c", "void create() {}\n");
+    harness.writeFile("/player.c", "void create() { enable_commands(); }\n");
+    // cmd_create()'s own write_file() target, /data/created/<name>.c,
+    // needs its parent directory to genuinely exist on disk first --
+    // write_file() (EfunTable.cpp) opens a plain std::ofstream, which
+    // does not create missing directories, exactly like the real
+    // mudlib/data/created/ directory this same file ships with.
+    ::mkdir((harness.tempDir + "/data").c_str(), 0755);
+    ::mkdir((harness.tempDir + "/data/created").c_str(), 0755);
+
+    auto room = harness.objects.cloneObject("/room");
+    auto player = harness.objects.cloneObject("/player");
+    auto wand = harness.objects.cloneObject("/wand_of_creation");
+    assert(room != nullptr && player != nullptr && wand != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(player);
+    amlp::OutputContext::set(&conn);
+
+    harness.vm.moveObject(player, room);
+    harness.vm.moveObject(wand, room);
+    harness.vm.moveObject(wand, player);
+    readAvailable(fds[1]);
+
+    bool claimed = harness.vm.dispatchCommand(player, "create gizmo");
+    assert(claimed);
+    std::string out = readAvailable(fds[1]);
+    assert(out.find("Created and placed here: gizmo") != std::string::npos);
+
+    // The generated file genuinely compiled and is a real, separate
+    // object sitting in the room (not just a text-file side effect) --
+    // present() finds it by its own generated id(), matching the exact
+    // name passed to "create".
+    harness.writeFile("/probe.c",
+        "mixed check(string name, object where) { return present(name, where); }\n");
+    auto probe = harness.objects.cloneObject("/probe");
+    assert(probe != nullptr);
+    amlp::Value presentResult = harness.vm.callFunction(probe, "check",
+        {amlp::Value(std::string("gizmo")), amlp::Value(room)});
+    assert(std::holds_alternative<std::shared_ptr<amlp::LpcObject>>(presentResult.data));
+    auto gizmo = std::get<std::shared_ptr<amlp::LpcObject>>(presentResult.data);
+    assert(gizmo != nullptr && !gizmo->isDestructed());
+
+    amlp::OutputContext::set(nullptr);
+    ::close(fds[1]);
+    std::cout << "testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject OK\n";
+}
+
 static void testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence() {
     amlp::Config config;
     amlp::FluffOsBootApi fluffApi(config);
@@ -17967,6 +18150,9 @@ int main() {
     testCompileAtomicFunctionModifierAcceptedOnlyUnderDgdDialect();
     testLexerNilKeywordOnlyRecognizedUnderDgdDialect();
     testCompileNilLiteralAcceptedOnlyUnderDgdDialectAndEvaluatesCorrectly();
+    testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld();
+    testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld();
+    testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject();
     testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence();
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
     testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime();
