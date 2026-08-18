@@ -7,9 +7,10 @@ inherit "/inherit/master/valid";
 
 void flag(string str) {
     switch (str) {
-    case "test":
-	"/command/tests"->main();
-	break;
+    // "test" case dropped along with command/tests.c and the rest of
+    // stock Lil's own self-test suite it drove -- see
+    // LIBRARY_MUDLIB_PLAN.md. Still available unmodified at
+    // temp/lil/single/master.c if that suite is ever needed again.
     case "sprintf":
 	{
 	    string foo = "This is a test.\n";
@@ -199,7 +200,7 @@ destruct_environment_of(object ob)
 		return;
 	}
 	tell_object(ob, "The object containing you was dested.\n");
-	ob->move(VOID_OB);
+	ob->move(START_LOC);
 }
 
 // make_path_absolute: This is called by the driver to resolve path names in ed.

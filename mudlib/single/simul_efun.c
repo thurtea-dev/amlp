@@ -1,4 +1,4 @@
-// mudlib: Lil
+// mudlib: library
 // file:   /single/simul_efun.c
 
 #pragma show_error_context

@@ -1,4 +1,4 @@
-// mudlib:  Lil
+// mudlib:  library
 // file:    /clone/wand_of_creation.c
 // purpose: Wand of Creation -- a single held item bundling the
 //          real-efun-only subset of temp/wiz_tools/staff_of_creation.c's

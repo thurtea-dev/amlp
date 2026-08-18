@@ -1,4 +1,3 @@
-
 int
 clean_up(int inh)
 {

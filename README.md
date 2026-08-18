@@ -22,4 +22,4 @@ boots against `test/mudlib_stub/`, a minimal mudlib used only to exercise the dr
 ./build/amlp etc/driver_lil.cfg
 ```
 
-boots the driver's own bundled mudlib under `mudlib/` (currently Lil, a real third-party starter mudlib, not a game mudlib).
+boots the driver's own bundled mudlib under `mudlib/` ("library", a stripped-down rebuild of Lil with one starting room and the wand of creation, see `mudlib/LIBRARY_MUDLIB_PLAN.md`).

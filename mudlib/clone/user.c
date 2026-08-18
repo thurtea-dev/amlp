@@ -1,4 +1,4 @@
-// mudlib:   Lil 
+// mudlib:   library
 // file:     user.c
 // purpose:  is the representation of an interactive (user) in the MUD
 
@@ -22,12 +22,18 @@ query_cwd()
 	return "";
 }
 
-// logon: move this to /single/login.c when login.c gets written.
+// logon: dead code in the real login flow -- clone/login.c's own
+// logon() is what the driver actually applies (master.c's connect()
+// creates a /clone/login instance, not a /clone/user instance
+// directly), and login.c destructs itself after cloning and setting up
+// the real /clone/user object, so this function only exists as a
+// leftover from before login.c was written. Left in place, banner text
+// updated for consistency, matching login.c's own real banner.
 
 void
 logon()
 {
-	write("Welcome to Lil.\n> ");
+	write("Welcome to Library.\n> ");
 }
 
 // query_name: called by various objects needing to know this user's name.

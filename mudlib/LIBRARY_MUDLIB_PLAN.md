@@ -1,9 +1,24 @@
 # library mudlib -- rename/rebuild plan (2026-08-18)
 
-Scoping and planning pass only. Nothing has been moved, renamed, or
-deleted. Written per an explicit request to report a concrete
-before/after file plan before touching anything -- timing is "after
-current ROADMAP work settles", not this session.
+**Executed 2026-08-18 (continued).** Everything below is the plan as
+originally scoped, kept as the historical record of what was decided
+and why -- not rewritten to describe the after-state. See STATUS.md for
+the full account of what actually happened, including two real gaps
+this plan's own "drop" analysis got wrong, only caught by actually
+booting the rebuilt driver rather than trusting the static grep this
+plan relied on: `log/` (dropped here as unread by anything kept, but
+`single/master.c`'s own `log_error()` genuinely writes to `LOG_DIR`) and
+`inherit/clean_up.c` (not listed in either table here at all --
+`include/command.h`, a kept file, does `inherit CLEAN_UP;`, needed by
+every command file that includes it). Both restored during execution.
+The "Undecided" section's own dest.c/rm.c/update.c/codefor.c question
+resolved to drop, matching this document's own stated default of
+"minimal... nothing else unless explicitly kept".
+
+Originally: scoping and planning pass only. Nothing has been moved,
+renamed, or deleted. Written per an explicit request to report a
+concrete before/after file plan before touching anything -- timing is
+"after current ROADMAP work settles", not that session.
 
 ## Why this needs a plan rather than a straight rename
 

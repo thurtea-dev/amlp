@@ -3,6 +3,128 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): ROADMAP.md scope clarification -- DGD is now
+recorded as a comparison-only reference dialect, not a required Phase 1
+target, no code touched (623 tests, unchanged).**
+
+Updated the master goal statement at the top of ROADMAP.md (previously
+"meeting or exceeding FluffOS, LDMud, and DGD... on their own terms") and
+Phase 1's own header (previously "one binary, three dialects") to state
+the real goal plainly: a FluffOS/LDMud-level driver, done better than
+either, not three-way parity with DGD. Re-annotated every DGD-only row
+(1.11 `rlimits`, 1.12 `atomic`, 1.13 `parse_string`, 1.14 lightweight
+objects, 1.15 driver+auto boot path) with an explicit "comparison-only,
+not a Phase 1 blocker" marker ahead of each row's own existing research,
+and corrected last session's own "Phase 1 scan pass" capstone note, which
+had listed DGD-only items (`rlimits`+`atomic`'s shared planes
+prerequisite, `parse_string`) alongside genuine LDMud gaps (`#'`/`'name`/
+closures, mapping width) as four equally-weighted blockers -- the actual
+remaining Phase 1 blockers after this correction are three, not four:
+`#'`/`'name`/closures, mapping width, and the connect/disconnect design
+question, none of which are DGD-specific.
+
+None of the real research already recorded in any of these rows was
+touched or deleted -- DGD's own source (`temp/dgd/`) stays genuinely
+useful as a comparison reference (its `nil`/planes/LWO model already
+informed several rows' own findings this session), just no longer
+carrying the same priority weight as an actual FluffOS/LDMud gap. Row
+1.10 (DGD `nil`, already `[x]`) untouched -- already done, nothing to
+reprioritize. No source code touched this pass.
+
+**2026-08-18 (continued): executed `mudlib/LIBRARY_MUDLIB_PLAN.md` --
+`mudlib/` is now "library", a stripped-down rebuild bundled with the
+already-built wand of creation, verified live end to end (623 tests,
+unchanged, no source touched).**
+
+Step 1: the entire prior `mudlib/` tree (222 files) copied to `temp/lil/`
+and verified byte-identical (`diff -rq`) before anything else moved --
+matches the existing vendored-corpus convention (`temp/core-lib/`,
+`temp/dead-souls/`, etc.), gitignored, preserves stock Lil untouched for
+the efun-conformance-diffing work that has used it across many prior
+sessions.
+
+Step 2: `mudlib/` rebuilt in place from the plan's own keep/new/drop
+table -- boot plumbing (`single/master.c`, `inherit/master/valid.c`,
+`single/simul_efun.c`, `clone/login.c`, `clone/user.c`, `inherit/base.c`,
+`include/*.h`, `etc/motd`), the wand (`clone/wand_of_creation.c`,
+already built and live-verified in an earlier session), `data/created/`
+(the wand's own write target), and a new `single/start_room.c` -- stock
+Lil had no room concept at all, confirmed directly in the plan
+(`VOID_OB` was a bare `void dummy() {}` placeholder), so this is new
+content, not carried over. Dropped: the entire `single/tests/`
+conformance suite (203 files) plus its own support code
+(`command/tests.c`, `inherit/tests.c`, `single/inh.c`, `test_control.c`,
+`etc/config.test`), `single/void.c` (superseded by the real room), every
+per-directory `readme` (replaced with a fresh top-level one describing
+the new identity). The plan's own "Undecided" list resolved to: keep
+`quit.c`/`say.c`/`who.c`/`shutdown.c`/`eval.c` (matching the plan's own
+recommendations -- `eval.c` specifically because it is this project's
+own live-verification tool, not just Lil example content), drop
+`dest.c`/`rm.c`/`update.c`/`codefor.c`/`speed.c`/`ed.c`, matching the
+plan's own stated default ("minimal... nothing else unless explicitly
+kept") for the ones it left genuinely undecided.
+
+**Two real gaps in the plan's own static "drop" analysis, both caught
+only by actually booting the rebuilt driver, not by grep alone:**
+`log/` was dropped as unread by anything kept -- wrong, `single/
+master.c`'s own `log_error()` genuinely writes to `LOG_DIR + "/compile"`
+(a real master apply, compile-error logging), confirmed live: the driver
+failed to boot at all ("compile error in mudlib/single/master.c:
+undeclared variable LOG_DIR") until both `LOG_DIR` and a real `log/`
+directory were restored. `inherit/clean_up.c` was not listed in either
+the plan's Keep or Drop table at all -- also wrong to have dropped:
+`include/command.h`, itself a kept file, does `inherit CLEAN_UP;`, so
+every command depending on it (`who.c`, `say.c`, `quit.c`, `shutdown.c`)
+failed to compile until both `CLEAN_UP` and the file it points to were
+restored. Both corrected in place; `LIBRARY_MUDLIB_PLAN.md`'s own
+"executed" note updated with the honest account rather than claiming a
+clean first pass.
+
+A third, more subtle issue found only through the live session itself,
+not a compile error: the room's own `init()` originally moved a freshly
+cloned wand directly into the arriving player's inventory in one step.
+That silently left the wand's own `add_action` calls unregistered --
+confirmed live, `create`/`purge`/`clone` all fell through to
+`commandHook()` and failed with "source file not found" for a literal
+`command/clone.c` etc. Root cause, documented directly in
+`wand_of_creation.c`'s own comment on `held()`/`init()`: this driver's
+`VM::moveObject()` only calls `init()` on the *moved* object (where the
+wand's own `add_action` calls live) when the destination's existing
+occupants already have `commandsEnabled()` true -- true of the room the
+player is already standing in, not true of the player's own empty
+inventory. Fixed by matching the two-step sequence the original wand
+regression tests already used (`moveObject(wand, room)` then
+`moveObject(wand, player)`): the room's `init()` now moves the wand into
+itself first (the player is already a genuine occupant by that point,
+firing the wand's own `init()`), then into the player.
+
+**Other real references updated, per the plan's own list:** `etc/
+driver_lil.cfg`'s `mud_name: Lil` -> `Library` (filename kept as-is,
+only the value changed); `clone/login.c`/`clone/user.c`'s banner text
+("Welcome to Lil" -> "Welcome to Library"); the `// mudlib: Lil` header
+line specifically (not the rest of each file's own historical prose
+describing real upstream Lil's actual properties, left untouched as
+accurate history) in `clone/wand_of_creation.c`, `single/simul_efun.c`,
+`inherit/master/valid.c`; `README.md`'s own mudlib description line.
+`WAND_OF_CREATION_SCOPING.md` carried forward unedited, its own "Lil"
+references are dated technical prose about upstream Lil's real
+properties at the time it was written, not this mudlib's current
+identity.
+
+**Verified live end to end with a real telnet-negotiating client** (raw
+socket, matching the original wand verification's own method), against
+the actual rebuilt `mudlib/` via `etc/driver_lil.cfg`: real login shows
+"Welcome to Library!", the entrance hall's own description prints
+automatically on arrival (no `look` command exists in this mudlib,
+matching a real gap already on record in `WAND_OF_CREATION_SCOPING.md`
+-- `init()` writes it directly instead), a wand of creation is already
+held on arrival, and `create rusty gear` / `purge rusty gear` / `clone
+/clone/wand_of_creation` all worked exactly as the original wand
+verification confirmed them working in the old mudlib. The one scratch
+artifact this produced (`data/created/rusty_gear.c`) was removed as
+scratch output afterward, same as the last two times this exact
+live-test byproduct came up.
+
 **2026-08-18 (continued): inventory only -- 11 new reference archives added
 under `temp/`, listed without extracting, nothing implemented off of
 them.** Not extracted or processed per instruction; this is a record of

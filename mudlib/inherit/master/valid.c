@@ -1,5 +1,5 @@
 // file:   /inherit/master/valid.c
-// mudlib: Lil
+// mudlib: library
 
 // separated out from master.c to reduce the complexity a bit.
 
