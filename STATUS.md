@@ -3,6 +3,107 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (continued further, fresh session): `parse_*` (row 0.13a)
+sixth real slice -- item 8 piece 5, `parse_obj()` itself (the real
+noun-phrase word-matching engine), wired into `parseSentence()` for the
+first time, plus the single-object slice of item 9's own can_/direct_/
+indirect_/do_ disambiguation family needed to turn a match into an
+actually-resolved object and a real `do_*` call. OBJ/LIV/OBS/LVS rules
+now resolve real objects end to end for any rule with at most one
+object-family token (670 tests, up from 661).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules), `ROADMAP.md` row 0.13a's own
+full history, and this file's own most recent entry (the immediately
+preceding session, which built `loadObjects()` in full and left
+`parse_obj()` itself as the next, already-scoped slice with a concrete
+insertion point already marked in `ParserPackage.cpp`).
+
+Read the real `parse_obj()` source directly (packages/parser.c:
+1325-1543) rather than trusting the prior session's own summary of it:
+confirmed the real matching order (articles, then a `switch` on the
+current word's own special-word kind, then the shared noun/plural/
+adjective hash lookup every word falls through to regardless) and
+precedence rules (singular and plural checks are independent `if`s, not
+mutually exclusive; the trailing adjective check unconditionally decides
+whether the word-consuming loop continues, regardless of whether the
+noun/plural checks fired). One genuine surprise caught only while
+writing this session's own regression tests, not assumed from the
+prior session's summary: real `SW_ALL` ("all") without a following "of"
+builds its match immediately from whatever the *current, unnarrowed*
+candidate set already is -- it does not fall through to read a
+following noun word the way "all of X" does. "get all swords" (no
+"of") is not the same construct as "get all of the swords" in real
+grammar; the plural regression test uses the latter deliberately, with
+a comment explaining why.
+
+Wiring this in also required the single-object slice of item 9 (the
+real can_/direct_/indirect_/do_ disambiguation family that turns a
+`parse_obj()` bitvec match into one resolved object) -- confirmed by
+tracing `we_are_finished()`'s own real object-token loop that
+`singular_check_functions()`/`plural_check_functions()` only need
+`parallel_check_functions()` underneath them, and that the real
+TWO-object family (`dependent_check_functions()`/
+`check_object_relations()`, deciding which direct/indirect object PAIR
+is jointly valid for a rule like "give OBJ to LIV") is only reached
+when `state.numObjs == 2` -- confirmed unreachable given a new
+`VerbRuleNode::objectTokenCount` field lets `parseRulesFor()` skip any
+node needing two object tokens outright, the same honest "not yet
+supported" stance already used elsewhere in this row. This matches the
+immediately preceding session's own prediction almost exactly ("the
+natural follow-on after item 8 lands, not before it") -- confirmed
+correct rather than assumed, and reported here as scope genuinely not
+attempted this session, not silently dropped.
+
+One real naming-formula bug caught and fixed before it ever reached a
+committed test: an initial reading of `make_function()`'s own
+`omatch+1 >= which` OBS/LVS-naming condition used `omatch`'s
+*post*-increment value, which would have made the final `do_` call on a
+plural match always spell "obj" instead of "obs". Re-derived directly
+against source with the real pre-increment ordering once a dedicated
+regression test for the plural do_-call naming specifically caught it
+failing.
+
+9 new regression tests (`test/test_lexer.cpp`), each building a real
+room/player/item environment tree via real `move_object()` calls: a
+single `OBJ` rule resolving end to end through the generic `can_`,
+per-candidate `direct_`, and final `do_` calls with the REAL object
+identity confirmed at each stage; a single candidate rejected by
+`direct_get_obj()` falling back to the real generic error message via
+`master()->parser_error_message()`; two indistinguishable candidates
+producing a real `ERR_AMBIG` with the real descending-index array
+order; an adjective chain narrowing correctly; an ordinal resolving to
+the true Nth candidate; `LIV_MODIFIER` excluding a non-living object
+sharing the same noun as a living one; "all of" (plural) resolving to
+an array of accepted candidates only, with the real "obs" do_-call
+naming confirmed; the fixed "my" adjective resolving to the player's
+own carried item over an identically-named item in the room; and a
+two-object-token rule confirmed genuinely skipped rather than silently
+mismatched. 670 tests passing (up from 661), zero regressions.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on a spare port; a real Python-scripted
+TCP client this time rather than manual telnet, chosen specifically
+because the live scenario needed multi-statement LPC source embedded in
+a single `eval` command line, which needed precise control over
+escaping): dynamically built a real room and sword via `write_file()`/
+`clone_object()`, registered a real `"get" "OBJ"` rule, and confirmed
+`parse_sentence("get the sword")` returned the real success value `1`
+with `do_get_obj()` genuinely receiving the real sword object (checked
+against the clone's own `file_name()`, not merely a truthy return);
+separately confirmed `LIV_MODIFIER` live too, with a statue and a guard
+sharing the same noun -- `do_eye_liv()` received the real guard, not the
+statue (a single-word verb "eye" used deliberately here, since real
+`make_function()`'s own simple naming only produces a legal identifier
+for a single-word verb -- caught by first trying a two-word verb, which
+correctly failed to match anything, and re-deriving the real naming
+rule from source). Driver process confirmed to stay healthy afterward
+via a second, independent connection running ordinary gameplay
+(`eval return 6*7;` -> 42, `who`).
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (fresh session): `parse_*` (row 0.13a) fifth real slice --
 item 8's own recommended first sub-slice (pieces 1+2+3+4: the real
 per-object noun/adjective/plural cache, the rest of

@@ -251,6 +251,15 @@ bool computeHasObjectToken(const std::vector<int>& tokens) {
     }
     return false;
 }
+
+// See VerbRuleNode::objectTokenCount's own comment.
+int computeObjectTokenCount(const std::vector<int>& tokens) {
+    int count = 0;
+    for (int t : tokens) {
+        if (t >= ParserToken::ObjA) count++;
+    }
+    return count;
+}
 } // namespace
 
 void ParserPackage::addRule(const std::string& verb, const std::string& rule,
@@ -275,6 +284,7 @@ void ParserPackage::addRule(const std::string& verb, const std::string& rule,
     node.weight = weight;
     node.handler = handler;
     node.hasObjectToken = computeHasObjectToken(tokens);
+    node.objectTokenCount = computeObjectTokenCount(tokens);
     fillLitFromTokens(node);
 
     // real "verb_node->next = verb_entry->node; verb_entry->node =
@@ -932,6 +942,7 @@ LoadedObjectSet ParserPackage::loadObjects(VM& vm, const std::shared_ptr<LpcObje
             if (result.objects.size() >= kMaxNumObjects) break;
             result.inReach.push_back(true); // real "object_flags[num_objects + num_people] = 1;"
             result.objects.push_back(ob);
+            result.numPeople++; // real "num_people++" (see LoadedObjectSet::numPeople's own comment)
         }
     }
 
@@ -958,18 +969,19 @@ LoadedObjectSet ParserPackage::loadObjects(VM& vm, const std::shared_ptr<LpcObje
 // indirect_/do_ callback machinery, also item 9), and
 // make_error_message()/get_the_error() (error reporting, item 10)).
 //
-// Restricted to STR/WRD/literal-only rules -- no OBJ/LIV/OBS/LVS support
-// yet. Confirmed directly from source before writing any of this that
-// this really is a separable, real, complete slice: interrogate_object()
-// (the function that actually populates a live object's noun/adjective/
-// plural id cache) has exactly one real call site, load_objects(),
-// itself only reachable from parse_obj(), itself only reached by
-// parse_rule()'s own OBJ-family token case -- a rule using only STR/WRD/
-// literal tokens never touches any of that machinery at all, real code
-// included, so this is a genuine subset of real behavior, not a
-// simplification of it. VerbRuleNode::hasObjectToken marks the rules
-// this slice cannot yet attempt; parseRulesFor() below skips them
-// entirely rather than attempting and silently mismatching them.
+// OBJ/LIV/OBS/LVS tokens now resolve real objects for any rule with at
+// most one object-family token (parse_obj() itself, packages/parser.c:
+// 1325-1543, plus the single-object slice of the can_/direct_/indirect_/
+// do_ disambiguation family -- singular_check_functions()/
+// plural_check_functions(), packages/parser.c:2029-2157 -- that turns a
+// parse_obj() bitvec of candidates into one resolved object). A rule
+// needing TWO object tokens (VerbRuleNode::objectTokenCount's own
+// comment -- the real dependent_check_functions()/
+// check_object_relations() ambiguity family, packages/parser.c:
+// 2184-2493, deciding which direct/indirect object PAIR is jointly
+// valid) is a separate, larger piece of real code, not attempted here;
+// parseRulesFor() below skips any node with objectTokenCount >= 2
+// entirely, rather than attempting and silently mismatching it.
 // ============================================================================
 
 namespace {
@@ -987,21 +999,109 @@ struct SentenceWord {
     size_t rawEnd = 0;
 };
 
-// real match_t (packages/parser.h). The object-token payload (val.obs/
-// val.number/ordinal) is not included -- nothing in this slice ever
-// produces an OBJ/LIV/OBS/LVS match (VerbRuleNode::hasObjectToken's own
-// comment). Extend, don't replace, when object matching lands.
+// real bitvec_t (packages/parser.h): a set of candidate object indices
+// into the current parse's own LoadedObjectSet::objects. Represented as
+// a plain std::vector<bool> rather than real code's own fixed-size
+// MAX_NUM_OBJECTS-bit C array -- the same hash-bucket-chaining-to-map
+// simplification already used elsewhere in this file (HashEntry's own
+// nounObjs/pluralObjs/adjObjs, which this type is interchangeable
+// with).
+using ObjBitset = std::vector<bool>;
+
+// real intersect(): bv1 &= bv2 in place, truncating bv1 down to
+// min(bv1.size(), bv2.size()) first -- real bitvec_t's own ".last"
+// truncation, faithfully reproduced (not just a defensive size guard):
+// it is what makes the fixed "my" adjective entry (LoadedObjectSet's
+// own header comment -- built from `my_objects`, sized BEFORE
+// loadObjects()'s final "num_people" loop appends more objects) never
+// match a person only reachable through that fallback loop, in real
+// FluffOS included, not a porting artifact. Returns whether any bit
+// survived the intersection.
+bool bitsetIntersect(ObjBitset& a, const ObjBitset& b) {
+    size_t n = std::min(a.size(), b.size());
+    a.resize(n);
+    bool found = false;
+    for (size_t i = 0; i < n; i++) {
+        bool v = static_cast<bool>(a[i]) && static_cast<bool>(b[i]);
+        a[i] = v;
+        if (v) found = true;
+    }
+    return found;
+}
+
+// real bitvec_count().
+size_t bitsetCount(const ObjBitset& a) {
+    size_t n = 0;
+    for (bool b : a) {
+        if (b) n++;
+    }
+    return n;
+}
+
+// real get_single(): the one set index, or -1 if none or more than one.
+int bitsetSingle(const ObjBitset& a) {
+    int found = -1;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i]) {
+            if (found != -1) return -1;
+            found = static_cast<int>(i);
+        }
+    }
+    return found;
+}
+
+// real match_t (packages/parser.h): `obs`/`number` are real
+// match_t::val.obs/val.number (the candidate bitvec parse_obj() builds,
+// and the single object it eventually resolves to -- see
+// singularCheckFunctions()'s own comment for why these are two separate
+// fields, not a union, matching real code exactly), `ordinal` is real
+// match_t::ordinal (nonzero only for an explicit "the Nth X" match).
 struct SentenceMatch {
     int token = 0;
     int first = 0;
     int last = 0;
+    int ordinal = 0;
+    ObjBitset obs;
+    int number = -1;
 };
 
-// real parser_error_t, reduced to the one payload shape (a plain
-// string) this slice's own reachable error kind (Allocated) carries.
+// real parser_error_t (a tagged union in real code, parser_error_u):
+// every reachable payload shape collapsed into one flat struct, only
+// the fields matching `errorType` are ever populated/read. `nounName`/
+// `nounIsPlural` back IsNot/NotLiving/NotAccessible (real err.noun,
+// reduced to the two derived values get_the_error() actually reads off
+// it -- err.noun->name and get_single(&err.noun->pv.noun)==-1 -- rather
+// than storing a live HashEntry* the way real code does, since nothing
+// else about the noun is ever consulted). `ambigObs` backs Ambig (real
+// err.obs). `ordError` backs Ordinal (real err.ord_error).
+// `thereIsNoText` backs ThereIsNo (real err.str_problem, resolved to its
+// own text eagerly here rather than as raw word indices resolved later
+// -- a legitimate simplification, same category as nounName/
+// nounIsPlural above: nothing distinguishes the two once computed).
+// `allocatedMessage` backs Allocated (real err.str). BadMultiple carries
+// no payload at all, matching real code exactly.
 struct ParserErrorInfo {
     int errorType = ParserErrorType::None;
     std::string allocatedMessage;
+    std::string nounName;
+    bool nounIsPlural = false;
+    ObjBitset ambigObs;
+    int ordError = 0;
+    std::string thereIsNoText;
+};
+
+// real saved_error_t (packages/parser.c): one rejected plural-match
+// candidate's own error, remembered by save_last_parallel_error() so a
+// later do_-call array (push_bitvec_as_array(), errors_too=1) can report
+// it alongside the accepted objects. `obj` is the candidate's own index
+// into LoadedObjectSet::objects (real saved_error_t::obj), or -1 (real
+// get_the_error()'s own "push_undefined()" case is never reached through
+// this path, since save_last_parallel_error() always records a real
+// object index -- listed as -1 only for parity with getTheError()'s own
+// top-level -1 convention, ParserPackage.hpp's own comment).
+struct SavedError {
+    ParserErrorInfo err;
+    int obj = -1;
 };
 
 // real parse_result_t -- one already-resolved winning match, cached by
@@ -1031,6 +1131,7 @@ struct MatchState {
     int wordIndex = 0;
     int numMatches = 0;
     int numErrors = 0;
+    int numObjs = 0; // real num_objs: how many object-family matches this branch has committed to so far
 };
 
 // real parser.c's own single shared set of "current parse in progress"
@@ -1067,6 +1168,27 @@ struct SentenceSession {
     ParserErrorInfo bestError;    // real best_error_info
 
     std::optional<SentenceMatchResult> bestResult; // real best_result
+
+    // real objects_loaded/loaded_objects[]/hash_table[]/etc -- the whole
+    // noun-phrase-to-object universe this session's own ParserPackage::
+    // loadObjects() call built (item 8), populated lazily the first time
+    // a matched verb has any rule with an object-family token (real "if
+    // (!objects_loaded && (parse_verb_entry->flags & VB_HAS_OBJ))
+    // load_objects();", ParserPackage::parseSentence()'s own comment).
+    LoadedObjectSet loaded;
+    bool objectsLoaded = false;
+
+    // real parallel_error_info/second_parallel_error_info/
+    // parallel_errors -- scratch state for the per-candidate can_/
+    // direct_/indirect_/do_ disambiguation family (singularCheckFunctions()/
+    // pluralCheckFunctions()/parallelCheckFunctions(), all below).
+    // parallelErrors is real code's own singly-linked list, represented
+    // here as a vector with saveLastParallelError() inserting at the
+    // front to match real code's own prepend order exactly (read by
+    // pushBitvecAsArray() in that same head-first order).
+    ParserErrorInfo parallelError;
+    ParserErrorInfo secondParallelError;
+    std::vector<SavedError> parallelErrors;
 };
 
 // real isignore(x) = (!uisprint(x) || x == '\'').
@@ -1168,15 +1290,23 @@ int tokenAt(const VerbRuleNode& node, int index) {
 // state.numMatches, the same shared-array-reused-across-sibling-
 // branches technique real code's own fixed `matches[]` array uses, via
 // a vector instead. Real code's own "if (token == ERROR_TOKEN)
-// state->num_errors++;" is folded in here too.
-void addMatch(SentenceSession& session, MatchState& state, int token, int first, int last) {
+// state->num_errors++;" is folded in here too. Returns a reference to
+// the new match so callers needing to fill in its own obs/ordinal
+// (parseObj(), below) can do so directly, matching real code's own
+// "mp = add_match(...); mp->val.obs = ...;" idiom.
+SentenceMatch& addMatch(SentenceSession& session, MatchState& state, int token, int first, int last) {
+    SentenceMatch fresh{token, first, last};
+    SentenceMatch* slot;
     if (state.numMatches < static_cast<int>(session.matches.size())) {
-        session.matches[state.numMatches] = SentenceMatch{token, first, last};
+        session.matches[state.numMatches] = std::move(fresh);
+        slot = &session.matches[state.numMatches];
     } else {
-        session.matches.push_back(SentenceMatch{token, first, last});
+        session.matches.push_back(std::move(fresh));
+        slot = &session.matches.back();
     }
     if (token == ParserToken::Error) state.numErrors++;
     state.numMatches++;
+    return *slot;
 }
 
 // real check_literal() (packages/parser.c): real parse_rules()'s own
@@ -1195,15 +1325,225 @@ int checkLiteral(const SentenceSession& session, int litIndex, int start) {
 }
 
 void weAreFinished(VM& vm, SentenceSession& session, MatchState& state);
+void parseObj(VM& vm, SentenceSession& session, MatchState& state, int tok, int ordinal);
+void parseRule(VM& vm, SentenceSession& session, MatchState& state);
 
-// real parse_rule() (packages/parser.c), restricted to the token kinds
-// this slice actually supports -- STR_TOKEN, WRD_TOKEN, literal words,
-// and the rule terminator. real code's own OBJ/LIV/OBS/LVS case is not
-// reached: parseRulesFor() below never attempts a node with
-// hasObjectToken set, so `session.currentNode->tokens` never actually
-// contains one here. Kept as an explicit, documented dead branch rather
-// than silently absent, so the noun-phrase-resolution slice has an
-// obvious, exact insertion point.
+// real all_objects() (packages/parser.c): the full candidate universe
+// parse_obj() starts from -- every loaded object, EXCEPT the trailing
+// LoadedObjectSet::numPeople entries (real load_objects()'s own final
+// "num_people" fallback loop) unless the currently-attempted rule's own
+// registering object has PI_REMOTE_LIVINGS set.
+ObjBitset allObjectsBitset(const SentenceSession& session) {
+    size_t total = session.loaded.objects.size();
+    bool remote = false;
+    if (auto handler = session.currentNode->handler.lock()) {
+        remote = (handler->parseInfoFlags() & ParserInfoFlag::RemoteLivings) != 0;
+    }
+    size_t visible = remote ? total : (total >= session.loaded.numPeople ? total - session.loaded.numPeople : 0);
+    ObjBitset bv(total, false);
+    for (size_t i = 0; i < visible; i++) bv[i] = true;
+    return bv;
+}
+
+// real query_the_short() (packages/parser.c): an object's own "the_short"
+// apply -- a mudlib convention, not a documented efun/apply -- falling
+// back to "the thing" when destructed, undefined, or non-string.
+std::string queryTheShort(VM& vm, const std::shared_ptr<LpcObject>& ob) {
+    if (!ob || ob->isDestructed() || !vm.functionExists(ob, "the_short")) return "the thing";
+    Value ret = vm.callFunction(ob, "the_short", {});
+    if (auto* s = std::get_if<std::string>(&ret.data)) return *s;
+    return "the thing";
+}
+
+// real parse_obj() (packages/parser.c:1325-1543), ROADMAP.md row 0.13a
+// item 8 piece 5 -- the real noun-phrase word-matching engine: articles
+// ("the"), "all"/"all of", possessive "my", ordinals ("the second
+// sword", numeric "3rd"), nicknames (expand_node() -- a documented no-op
+// today, see below), adjective chains ("big red sword" -- each adjective
+// narrows `objects` before the noun itself is read), singular-vs-plural
+// noun matching (OBJ vs OBS), and the LIV_MODIFIER/VIS_ONLY_MODIFIER
+// filters, all via bitvector intersection against LoadedObjectSet's own
+// hash table. `state` is mutated in place as words are consumed, exactly
+// matching real code's own "parse_state_t *state" pointer aliasing --
+// each individual candidate interpretation gets its own `localState`
+// copy to recurse into parseRule() with, leaving `state` itself free to
+// keep advancing through an adjective chain.
+//
+// real expand_node() (a nickname's lazy noun-id resolution) is not
+// ported: it is only ever reached through an HV_NICKNAME hash entry, and
+// nothing populates HashEntry::isNickname yet (real add_nicknames(),
+// LoadedObjectSet::hashTable's own comment) -- this driver's own
+// parseSentence() has no `nicks` parameter at all yet for anything to
+// mark one with. Genuinely vacuous today, not silently skipped.
+//
+// real code's own `err_obs`/`multiple_adj` locals are write-only dead
+// code (confirmed directly: neither is ever read anywhere in
+// packages/parser.c) and are not ported at all.
+void parseObj(VM& vm, SentenceSession& session, MatchState& state, int tok, int ordinal) {
+    int start = state.wordIndex;
+    ObjBitset objects = allObjectsBitset(session);
+    bool ordLegal = (ordinal == 0);
+    bool singularLegal = true;
+    const int numWords = static_cast<int>(session.words.size());
+
+    while (true) {
+        if (state.wordIndex == numWords) return;
+        std::string str = session.words[state.wordIndex++].text;
+
+        SpecialWordResult special = ParserPackage::checkSpecialWord(str);
+        switch (special.kind) {
+            case SpecialWordKind::Article:
+                continue; // real "case SW_ARTICLE: continue;"
+            case SpecialWordKind::All: {
+                singularLegal = false;
+                if (state.wordIndex < numWords &&
+                    ParserPackage::checkSpecialWord(session.words[state.wordIndex].text).kind ==
+                        SpecialWordKind::Of) {
+                    state.wordIndex++;
+                    continue;
+                }
+                MatchState localState = state;
+                if (tok & ParserToken::PluralModifier) {
+                    localState.numObjs++;
+                    SentenceMatch& m = addMatch(session, localState, tok, start, state.wordIndex - 1);
+                    m.obs = objects;
+                    m.ordinal = 0;
+                } else {
+                    session.currentError = ParserErrorInfo{};
+                    session.currentError.errorType = ParserErrorType::BadMultiple;
+                    addMatch(session, localState, ParserToken::Error, start, state.wordIndex - 1);
+                }
+                parseRule(vm, session, localState);
+                break;
+            }
+            case SpecialWordKind::Self:
+                if (session.loaded.meObject != -1) {
+                    MatchState localState = state;
+                    localState.numObjs++;
+                    SentenceMatch& m = addMatch(session, localState, tok, start, state.wordIndex - 1);
+                    m.obs.assign(session.loaded.objects.size(), false);
+                    m.obs[static_cast<size_t>(session.loaded.meObject)] = true;
+                    m.ordinal = 0;
+                    parseRule(vm, session, localState);
+                }
+                break;
+            case SpecialWordKind::Ordinal:
+                if (ordLegal) {
+                    MatchState localState = state;
+                    parseObj(vm, session, localState, tok, static_cast<int>(special.arg));
+                }
+                break;
+            default:
+                break;
+        }
+
+        // real "if (str != my_string) ord_legal = 0;" -- a documented
+        // hack allowing "my first sword"/"my 1st red sword" (the
+        // possessive itself never disqualifies a following ordinal).
+        if (str != "my") ordLegal = false;
+
+        auto hnodeIt = session.loaded.hashTable.find(str);
+        if (hnodeIt == session.loaded.hashTable.end()) return; // real "if (!hnode) break;"
+        HashEntry& hnode = hnodeIt->second;
+
+        if (singularLegal && hnode.isNoun) {
+            bool exploreErrors = (session.bestMatchWeight == 0) && (state.numErrors < session.bestNumErrors);
+            MatchState localState = state;
+            ObjBitset saveObs = objects;
+            int errorType = ParserErrorType::None;
+            bool skip = false;
+
+            if (!bitsetIntersect(objects, hnode.nounObjs)) {
+                if (!exploreErrors) skip = true;
+                else errorType = ParserErrorType::IsNot;
+            } else if ((tok & ParserToken::LivModifier) && !bitsetIntersect(objects, session.loaded.isLiving)) {
+                if (!exploreErrors) skip = true;
+                else errorType = ParserErrorType::NotLiving;
+            } else if (!(tok & ParserToken::VisOnlyModifier) &&
+                       !bitsetIntersect(objects, session.loaded.isAccessible)) {
+                if (!exploreErrors) skip = true;
+                else errorType = ParserErrorType::NotAccessible;
+            }
+
+            if (!skip) {
+                if (errorType != ParserErrorType::None) {
+                    session.currentError = ParserErrorInfo{};
+                    session.currentError.errorType = errorType;
+                    session.currentError.nounName = str;
+                    session.currentError.nounIsPlural = (bitsetSingle(hnode.nounObjs) == -1);
+                    addMatch(session, localState, ParserToken::Error, start, state.wordIndex - 1);
+                } else {
+                    SentenceMatch& m =
+                        addMatch(session, localState, tok & ~ParserToken::PluralModifier, start, state.wordIndex - 1);
+                    m.obs = objects;
+                    m.ordinal = ordinal;
+                    localState.numObjs++;
+                }
+                parseRule(vm, session, localState);
+            }
+            objects = saveObs;
+        }
+
+        if (ordinal == 0 && hnode.isPlural) {
+            bool exploreErrors = (session.bestMatchWeight == 0) && (state.numErrors < session.bestNumErrors);
+            MatchState localState = state;
+            ObjBitset saveObs = objects;
+            int errorType = ParserErrorType::None;
+            bool skip = false;
+            bool isBadMultiple = false;
+
+            if (!(tok & ParserToken::PluralModifier)) {
+                if (!exploreErrors) skip = true;
+                else {
+                    errorType = ParserErrorType::BadMultiple;
+                    isBadMultiple = true;
+                }
+            } else if (!bitsetIntersect(objects, hnode.pluralObjs)) {
+                if (!exploreErrors) skip = true;
+                else errorType = ParserErrorType::IsNot;
+            } else if ((tok & ParserToken::LivModifier) && !bitsetIntersect(objects, session.loaded.isLiving)) {
+                if (!exploreErrors) skip = true;
+                else errorType = ParserErrorType::NotLiving;
+            } else if (!(tok & ParserToken::VisOnlyModifier) &&
+                       !bitsetIntersect(objects, session.loaded.isAccessible)) {
+                if (!exploreErrors) skip = true;
+                else errorType = ParserErrorType::NotAccessible;
+            }
+
+            if (!skip) {
+                if (errorType != ParserErrorType::None) {
+                    session.currentError = ParserErrorInfo{};
+                    session.currentError.errorType = errorType;
+                    if (!isBadMultiple) {
+                        session.currentError.nounName = str;
+                        session.currentError.nounIsPlural = (bitsetSingle(hnode.pluralObjs) == -1);
+                    }
+                    addMatch(session, localState, ParserToken::Error, start, state.wordIndex - 1);
+                } else {
+                    SentenceMatch& m = addMatch(session, localState, tok, start, state.wordIndex - 1);
+                    m.obs = objects;
+                    m.ordinal = ordinal;
+                    localState.numObjs++;
+                }
+                parseRule(vm, session, localState);
+            }
+            objects = saveObs;
+        }
+
+        if (hnode.isAdj) {
+            bitsetIntersect(objects, hnode.adjObjs);
+        } else {
+            return; // real "DEBUG_DEC; return;" -- not an adjective either, nothing left to chain onto
+        }
+    }
+}
+
+// real parse_rule() (packages/parser.c). STR_TOKEN/WRD_TOKEN/literal
+// words and the rule terminator are restricted to what this slice's own
+// tests exercise (real code all along); the OBJ/LIV/OBS/LVS case (real
+// parse_obj(), below) and its own literal-mismatch recovery are now
+// real and reachable for any rule with at most one object-family token
+// (VerbRuleNode::objectTokenCount's own comment).
 void parseRule(VM& vm, SentenceSession& session, MatchState& state) {
     const VerbRuleNode& node = *session.currentNode;
     const int numWords = static_cast<int>(session.words.size());
@@ -1221,7 +1561,24 @@ void parseRule(VM& vm, SentenceSession& session, MatchState& state) {
         }
 
         if (masked >= ParserToken::ObjA) {
-            // Unreachable -- see this function's own header comment.
+            // real "case OBJ_TOKEN: ...: local_state = *state;
+            // parse_obj(tok, &local_state, 0); if (!best_match &&
+            // !best_error_match) { ...forward-search 'there is no X'
+            // fallback...} return;"
+            MatchState localState = state;
+            parseObj(vm, session, localState, tok, 0);
+            if (session.bestMatchWeight == 0 && session.bestErrorWeight == 0) {
+                int start = state.wordIndex++;
+                while (state.wordIndex <= numWords) {
+                    MatchState local2 = state;
+                    addMatch(session, local2, ParserToken::Error, start, state.wordIndex - 1);
+                    session.currentError = ParserErrorInfo{};
+                    session.currentError.errorType = ParserErrorType::ThereIsNo;
+                    session.currentError.thereIsNoText = extractWordRange(session, start, state.wordIndex - 1);
+                    parseRule(vm, session, local2);
+                    state.wordIndex++;
+                }
+            }
             return;
         }
 
@@ -1260,29 +1617,79 @@ void parseRule(VM& vm, SentenceSession& session, MatchState& state) {
             state.wordIndex++;
             continue;
         }
-        // Mismatch. Real code's own recovery (a forward search that
-        // marks the *previous* match as an error) only ever fires when
-        // the immediately preceding token was itself an object-family
-        // one -- unreachable here for the same reason the OBJ branch
-        // above is. A preceding STR token, a preceding WRD/literal
+        // Mismatch: real code's own recovery (a forward search that
+        // marks the *previous* match as an error, spanning through
+        // wherever the literal is eventually found) only fires when the
+        // immediately preceding token was itself an object-family one
+        // -- reachable now for a rule shaped "OBJ <literal>" (e.g. "give
+        // OBJ away"). A preceding STR token, a preceding WRD/literal
         // token, or this being the rule's very first token (real
-        // "state->tok_index == 1") all just return without recording
-        // an error either way in real code, which is exactly what
-        // falling out of this loop here does.
-        return;
+        // "state->tok_index == 1") all just return without recording an
+        // error either way, matching real code exactly.
+        if (state.tokIndex == 1) return;
+        // real code's own recovery switch reads the previous token's RAW
+        // value here, unmasked -- unlike the top-of-loop switch above,
+        // it does NOT strip CHOOSE_MODIFIER first, so a rule using
+        // "OBJ:c" immediately before a literal genuinely falls through
+        // to the real "default: return;" case instead of recovering (a
+        // real, confirmed-faithful quirk, not a porting gap).
+        int prevTokRaw = tokenAt(node, state.tokIndex - 2);
+        bool prevWasObjectFamily =
+            prevTokRaw == ParserToken::Obj || prevTokRaw == ParserToken::ObjA || prevTokRaw == ParserToken::Liv ||
+            prevTokRaw == ParserToken::LivA || prevTokRaw == ParserToken::Obs ||
+            prevTokRaw == (ParserToken::Obs | ParserToken::VisOnlyModifier) || prevTokRaw == ParserToken::Lvs ||
+            prevTokRaw == (ParserToken::Lvs | ParserToken::VisOnlyModifier);
+        if (!prevWasObjectFamily) return;
+
+        bool found = false;
+        while (state.wordIndex < numWords) {
+            bool eq = (litIndex >= 0 && static_cast<size_t>(litIndex) < literals.size() &&
+                       session.words[state.wordIndex].text == literals[litIndex]);
+            state.wordIndex++;
+            if (eq) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return;
+
+        SentenceMatch& last = session.matches[state.numMatches - 1];
+        last.token = ParserToken::Error;
+        last.last = state.wordIndex - 1;
+        if (state.numErrors++ == 0) {
+            session.currentError = ParserErrorInfo{};
+            session.currentError.errorType = ParserErrorType::ThereIsNo;
+            session.currentError.thereIsNoText = extractWordRange(session, last.first, state.wordIndex - 1);
+        }
+        // real "break;" out of the recovery switch -- falls to the top
+        // of the outer while(1) loop, continuing at the token right
+        // after the literal that was just recovered.
+        continue;
     }
 }
 
-// real make_error_message() (packages/parser.c), restricted to the
-// STR/WRD/literal branches this slice reaches -- the object-token
-// branch (`query_the_short()`) is unreachable, same reasoning as
-// parseRule()'s own OBJ case.
-void makeErrorMessage(SentenceSession& session, int which, ParserErrorInfo& err) {
+// real make_error_message() (packages/parser.c): the generic "You
+// can't <verb> <words...>." message built when a can_/direct_/
+// indirect_/do_ callback rejects a match with no explicit string of its
+// own (a falsy int or no explicit `return`, ParserErrorType::Allocated's
+// own comment). `which` names the 1-based position of the match that
+// actually failed (0 for the generic can_-check failure, matching real
+// code's own literal `0` at that one call site) -- an object-family
+// match AT that position renders as "that " (real code never tries to
+// describe the very thing that just failed); an object-family match
+// BEFORE it renders via query_the_short() (a two-object rule's own
+// first, already-resolved object -- unreachable today since
+// objectTokenCount is always <= 1, kept faithfully anyway since it
+// falls out of the same real formula, not a separate case); every
+// object-family match from the (`which`+1)-th real "object slot"
+// onward, or one that is itself a plural match, also renders as "that ".
+void makeErrorMessage(VM& vm, SentenceSession& session, int which, ParserErrorInfo& err) {
     std::string buf = "You can't ";
     buf += session.words[0].text;
     buf += ' ';
 
     int cnt = 0;
+    int ocnt = 0;
     int match = 0;
     for (int tok : session.currentNode->tokens) {
         if (tok == ParserToken::Str || tok == ParserToken::Wrd) {
@@ -1300,9 +1707,32 @@ void makeErrorMessage(SentenceSession& session, int which, ParserErrorInfo& err)
             int litIndex = -(tok + 1);
             if (litIndex >= 0 && static_cast<size_t>(litIndex) < literals.size()) buf += literals[litIndex];
             buf += ' ';
+        } else {
+            // object-family (real make_error_message()'s own default
+            // branch for a tok > 0 that isn't STR/WRD). Real code's own
+            // "cnt == which - 1 || ++ocnt >= which || (PLURAL_MODIFIER)"
+            // short-circuits -- ocnt is only touched when the first
+            // check didn't already decide "that ", faithfully preserved
+            // here rather than flattened, since a future two-object rule
+            // would observe the difference.
+            bool useThat = (cnt == which - 1);
+            if (!useThat) {
+                ++ocnt;
+                useThat = (ocnt >= which) || (session.matches[match].token & ParserToken::PluralModifier);
+            }
+            if (useThat) {
+                buf += "that ";
+            } else {
+                int num = session.matches[match].number;
+                auto ob = (num >= 0 && static_cast<size_t>(num) < session.loaded.objects.size())
+                              ? session.loaded.objects[static_cast<size_t>(num)]
+                              : nullptr;
+                buf += queryTheShort(vm, ob);
+                buf += ' ';
+            }
+            cnt++;
+            match++;
         }
-        // tok >= ObjA (object-family): unreachable, see this
-        // function's own header comment.
     }
     if (!buf.empty()) buf.pop_back(); // real "p--;" -- nuke the trailing space
     buf += ".\n";
@@ -1321,7 +1751,8 @@ void makeErrorMessage(SentenceSession& session, int which, ParserErrorInfo& err)
 // Returns: 1 accept, 0 undefined/wrong-type (try next), -2 generated
 // error (an explicit falsy int), -1 generated error (an explicit
 // string), -3 abort (already have an equally good candidate).
-int processAnswer(SentenceSession& session, MatchState& state, bool wasDefined, const Value& result, int which) {
+int processAnswer(VM& vm, SentenceSession& session, MatchState& state, bool wasDefined, const Value& result,
+                   int which) {
     if (!wasDefined) return 0;
     if (auto* s = std::get_if<std::string>(&result.data)) {
         if (state.numErrors == session.bestNumErrors) return -3;
@@ -1348,16 +1779,85 @@ int processAnswer(SentenceSession& session, MatchState& state, bool wasDefined, 
     // return 0;" exactly.
     if (std::holds_alternative<std::monostate>(result.data)) {
         if (state.numErrors == session.bestNumErrors) return -3;
-        if (state.numErrors++ == 0) makeErrorMessage(session, which, session.currentError);
+        if (state.numErrors++ == 0) makeErrorMessage(vm, session, which, session.currentError);
         return -2;
     }
     if (auto* n = std::get_if<int64_t>(&result.data)) {
         if (*n != 0) return 1;
         if (state.numErrors == session.bestNumErrors) return -3;
-        if (state.numErrors++ == 0) makeErrorMessage(session, which, session.currentError);
+        if (state.numErrors++ == 0) makeErrorMessage(vm, session, which, session.currentError);
         return -2;
     }
     return 0;
+}
+
+// real parallel_process_answer() (packages/parser.c): the per-candidate
+// counterpart to processAnswer() above, used by parallelCheckFunctions()
+// while probing ONE specific candidate object's own direct_/indirect_/
+// do_-twice applies. Genuinely different rules from processAnswer():
+// a plain (non-'#') string return is treated as ACCEPTANCE (not
+// rejection) -- real code's own way of letting a direct_/indirect_
+// callback attach a message to a *successful* match; an error is only
+// signaled by a falsy int/no-explicit-return, or a string prefixed with
+// '#' (the '#' itself stripped from the stored message). Returns: 1
+// accepted, -1 rejected (an error was recorded), 0 undefined (try the
+// next naming strategy). Does not touch state.numErrors at all, unlike
+// processAnswer() -- real code's own "if (state->num_errors == 0)"
+// gate below only asks whether the OUTER match already carries its own
+// error (e.g. from parse_obj() itself), never increments it here.
+int parallelProcessAnswer(VM& vm, SentenceSession& session, MatchState& state, bool wasDefined, const Value& result,
+                           int which) {
+    if (!wasDefined) return 0;
+    if (auto* n = std::get_if<int64_t>(&result.data)) {
+        if (*n != 0) return 1;
+        if (state.numErrors == 0) makeErrorMessage(vm, session, which, session.parallelError);
+        return -1;
+    }
+    // real code's own T_NUMBER branch never sees a "no explicit return"
+    // case (svalue_t has no such state); this driver's own monostate
+    // does, folded into the same falsy path as processAnswer() does,
+    // for the same driver-wide representation reason (that function's
+    // own comment).
+    if (std::holds_alternative<std::monostate>(result.data)) {
+        if (state.numErrors == 0) makeErrorMessage(vm, session, which, session.parallelError);
+        return -1;
+    }
+    if (auto* s = std::get_if<std::string>(&result.data)) {
+        session.parallelError = ParserErrorInfo{};
+        if (!s->empty() && (*s)[0] == '#') {
+            session.parallelError.errorType = ParserErrorType::Allocated;
+            session.parallelError.allocatedMessage = s->substr(1);
+            return -1;
+        }
+        session.parallelError.errorType = ParserErrorType::Allocated;
+        session.parallelError.allocatedMessage = *s;
+        return 1;
+    }
+    return 0;
+}
+
+// real use_last_parallel_error() (packages/parser.c): promotes
+// session.parallelError into session.currentError, the first time any
+// candidate for this match produced one.
+bool useLastParallelError(SentenceSession& session, MatchState& state) {
+    if (session.parallelError.errorType == ParserErrorType::None) return false;
+    if (state.numErrors++ == 0) {
+        session.currentError = session.parallelError;
+        session.parallelError = ParserErrorInfo{};
+    }
+    return true;
+}
+
+// real save_last_parallel_error() (packages/parser.c): remembers a
+// rejected plural-match candidate's own error for later (a do_-call's
+// own push_bitvec_as_array(), errors_too=1) -- prepended, matching real
+// code's own singly-linked-list insertion order exactly (see
+// SavedError's own comment).
+bool saveLastParallelError(SentenceSession& session, int obj) {
+    if (session.parallelError.errorType == ParserErrorType::None) return false;
+    session.parallelErrors.insert(session.parallelErrors.begin(), SavedError{session.parallelError, obj});
+    session.parallelError = ParserErrorInfo{};
+    return true;
 }
 
 // real prefixes[] (packages/parser.c).
@@ -1368,15 +1868,131 @@ struct BuiltFunction {
     std::vector<Value> args;
 };
 
-// real make_function() (packages/parser.c), restricted to the STR/WRD/
-// literal branches this slice reaches -- the OBJ-family branch
-// (push_object()/push_bitvec_as_array()/direct_object/indirect_object)
-// is unreachable, same reasoning as parseRule()'s own OBJ case. Real
-// code's own `state`/`target` parameters are unused inside the real
-// function body itself (confirmed by inspection, not an oversight
-// here) except for `target`'s one real OBJ-branch use, so neither is
-// threaded through this port at all.
-BuiltFunction makeFunction(SentenceSession& session, int which, int tryIdx) {
+// real push_bitvec_as_array()'s own object-fill loop, factored out so
+// errorInfoToValue()'s own ERR_AMBIG case (below) and pushBitvecAsArray()
+// itself (further below, which also needs the error prefix) share it:
+// real code's own loop assigns objects into the array from the END
+// backward as it scans candidates in ascending index order, which
+// observably leaves the result in DESCENDING index order -- confirmed
+// directly from source, not a porting slip, and NOT conditional on
+// whether an error prefix is involved (get_the_error()'s own ERR_AMBIG
+// call passes errors_too=0 and still exhibits it).
+std::vector<Value> objectsDescendingIndexOrder(const SentenceSession& session, const ObjBitset& bv) {
+    std::vector<Value> objs;
+    for (size_t i = 0; i < bv.size(); i++) {
+        if (!bv[i]) continue;
+        auto ob = session.loaded.objects[i];
+        objs.push_back((!ob || ob->isDestructed()) ? Value(static_cast<int64_t>(0)) : Value(ob));
+    }
+    std::reverse(objs.begin(), objs.end());
+    return objs;
+}
+
+// real get_the_error() (packages/parser.c), generalized to any
+// (err, objIndex) pair -- real code's own single hardcoded `obj == -1`
+// call site (ParserPackage.hpp's own comment on getTheError() below)
+// plus push_bitvec_as_array()'s own per-rejected-candidate calls with a
+// real object index, both real call sites of the same real function.
+// `objIndex` of -1 (or an already-destructed/out-of-range object) is
+// real push_undefined() -- confirmed real "const0u", i.e. a plain int 0
+// (see this file's own getTheError() comment). error_type None (real
+// code's own `default:` case, "no error at all") returns the real
+// "-found_level" "how close did we get" signal instead of consulting
+// master at all.
+Value errorInfoToValue(VM& vm, SentenceSession& session, const ParserErrorInfo& err, int objIndex) {
+    if (err.errorType == ParserErrorType::None) {
+        return Value(static_cast<int64_t>(-session.foundLevel));
+    }
+    if (!vm.masterObject()) return Value(static_cast<int64_t>(0));
+
+    bool objOk = objIndex >= 0 && static_cast<size_t>(objIndex) < session.loaded.objects.size() &&
+                 session.loaded.objects[static_cast<size_t>(objIndex)] &&
+                 !session.loaded.objects[static_cast<size_t>(objIndex)]->isDestructed();
+    Value objArg = objOk ? Value(session.loaded.objects[static_cast<size_t>(objIndex)])
+                          : Value(static_cast<int64_t>(0));
+
+    std::vector<Value> args = {Value(static_cast<int64_t>(err.errorType)), objArg};
+    switch (err.errorType) {
+        case ParserErrorType::IsNot:
+        case ParserErrorType::NotLiving:
+        case ParserErrorType::NotAccessible:
+            args.push_back(Value(err.nounName));
+            args.push_back(Value(static_cast<int64_t>(err.nounIsPlural ? 1 : 0)));
+            break;
+        case ParserErrorType::Ambig: {
+            auto arr = std::make_shared<Array>();
+            arr->items = objectsDescendingIndexOrder(session, err.ambigObs);
+            args.push_back(Value(arr));
+            break;
+        }
+        case ParserErrorType::Ordinal:
+            args.push_back(Value(static_cast<int64_t>(err.ordError)));
+            break;
+        case ParserErrorType::ThereIsNo:
+            args.push_back(Value(err.thereIsNoText));
+            break;
+        case ParserErrorType::Allocated:
+            args.push_back(Value(err.allocatedMessage));
+            break;
+        case ParserErrorType::BadMultiple:
+        default:
+            // BadMultiple: real code's own 2-arg call, nothing more to
+            // push. ManyPaths: unreachable (two-object rules only, see
+            // this file's own header comment on that family) -- never
+            // actually produced by anything in this slice.
+            break;
+    }
+    Value ret = vm.applyMaster("parser_error_message", std::move(args));
+    if (std::holds_alternative<std::monostate>(ret.data)) return Value(static_cast<int64_t>(0));
+    return ret;
+}
+
+// real push_bitvec_as_array() (packages/parser.c): the accepted
+// candidates surviving a plural (OBS/LVS) match's own
+// pluralCheckFunctions() pass, as an array -- optionally prefixed (real
+// errors_too, true only for a do_-call's own final argument build) with
+// one already-resolved error Value per rejected candidate, in the exact
+// same head-first order saveLastParallelError() recorded them (real
+// code's own singly-linked-list traversal order). Real code's own fill
+// loop assigns objects into the array from the END backward as it scans
+// candidates in ascending index order, which observably leaves the
+// object portion in DESCENDING index order after the error prefix --
+// confirmed directly from source, not a porting slip -- reproduced here
+// by collecting ascending and reversing.
+Value pushBitvecAsArray(VM& vm, SentenceSession& session, const ObjBitset& bv, bool errorsToo) {
+    auto arr = std::make_shared<Array>();
+    if (errorsToo) {
+        for (const SavedError& se : session.parallelErrors) {
+            arr->items.push_back(errorInfoToValue(vm, session, se.err, se.obj));
+        }
+    }
+    std::vector<Value> objs = objectsDescendingIndexOrder(session, bv);
+    arr->items.insert(arr->items.end(), objs.begin(), objs.end());
+    return Value(arr);
+}
+
+// real make_function() (packages/parser.c). The OBJ-family branch is
+// reduced to the single-object-per-rule case this slice supports
+// (VerbRuleNode::objectTokenCount's own comment keeps a two-object node
+// from ever reaching sentence matching at all) -- confirmed directly
+// from source that real code's own "omatch"/"which" position-matching
+// bookkeeping collapses cleanly under that constraint: omatch is always
+// exactly 1 at the rule's one object-family token (there is only ever
+// one), so "omatch+1 >= which" (deciding the "obj"/"liv" vs "obs"/"lvs"
+// name suffix) is always true -- the plural name spellings only apply
+// to a rule's *second* object slot -- and the value-push decision only
+// ever sees `which` in {0, 1, 3} (checkFunctions()'s generic can_
+// probe, parallelCheckFunctions()'s per-candidate probe, and the final
+// do_ call respectively); the "omatch > which"/"which >= 4" branches
+// (both exclusively about a genuine *second* object slot) are
+// accordingly unreachable here. `target` is the specific candidate
+// object parallelCheckFunctions() is currently probing (which == 1
+// only) -- unused for which == 0 (no candidate chosen yet, real code's
+// own "push_number(0)") and which == 3 (the do_ call reads the
+// already-resolved SentenceMatch::number instead, real code's own
+// literal `target=0` at that one call site).
+BuiltFunction makeFunction(VM& vm, SentenceSession& session, int which, int tryIdx,
+                            const std::shared_ptr<LpcObject>& target = nullptr) {
     BuiltFunction result;
     std::string name = kPrefixes[which];
 
@@ -1408,7 +2024,49 @@ BuiltFunction makeFunction(SentenceSession& session, int which, int tryIdx) {
 
         int masked = tok & ~ParserToken::ChooseModifier;
         if (masked >= ParserToken::ObjA) {
-            // Unreachable -- see this function's own header comment.
+            SentenceMatch& m = session.matches[match];
+            bool isLiving = (masked & ParserToken::LivModifier) != 0;
+            // real "if (omatch+1 >= which || !(matches[match].token &
+            // PLURAL_MODIFIER) || which >= 4) buf += obj/liv; else buf
+            // += obs/lvs;" -- `omatch` here is its PRE-increment value
+            // (the OBS/LVS case's own check runs before the shared
+            // `omatch++` at real code's own "put_obj_value:" label), 0
+            // for the one object-family token a single-object rule can
+            // have, so "omatch+1 >= which" is 1 >= which: true for
+            // which in {0, 1} (this slice's only reachable can_/direct_
+            // probes), always giving "obj"/"liv" there regardless of
+            // plurality -- but FALSE for which == 3 (the do_ call), so
+            // a genuinely plural match there falls through to the
+            // "obs"/"lvs" spelling instead. Confirmed directly from
+            // source -- easy to mis-derive using omatch's post-
+            // increment value instead, which does not match real code.
+            bool useShortPluralSpelling = (which == 3) && (m.token & ParserToken::PluralModifier);
+            if (!nameTruncated) {
+                if (isLiving) {
+                    name += useShortPluralSpelling ? "lvs" : "liv";
+                } else {
+                    name += useShortPluralSpelling ? "obs" : "obj";
+                }
+            }
+
+            if (which == 0) {
+                result.args.push_back(Value(static_cast<int64_t>(0)));
+            } else if (which == 3) {
+                if (m.token == ParserToken::Error) {
+                    result.args.push_back(Value(static_cast<int64_t>(0)));
+                } else if (m.token & ParserToken::PluralModifier) {
+                    result.args.push_back(pushBitvecAsArray(vm, session, m.obs, which == 3));
+                } else if (m.number < 0) {
+                    result.args.push_back(Value(static_cast<int64_t>(0)));
+                } else {
+                    auto ob = session.loaded.objects[static_cast<size_t>(m.number)];
+                    result.args.push_back((!ob || ob->isDestructed()) ? Value(static_cast<int64_t>(0)) : Value(ob));
+                }
+            } else {
+                // which == 1: parallelCheckFunctions()'s own per-
+                // candidate probe -- push the specific candidate.
+                result.args.push_back(target ? Value(target) : Value(static_cast<int64_t>(0)));
+            }
             match++;
             continue;
         }
@@ -1472,29 +2130,180 @@ bool checkFunctions(VM& vm, SentenceSession& session, MatchState& state, const s
             ob = session.currentNode->handler.lock();
             if (!ob || ob->isDestructed()) return false;
         }
-        BuiltFunction built = makeFunction(session, 0, tryIdx % 4);
+        BuiltFunction built = makeFunction(vm, session, 0, tryIdx % 4);
         std::vector<Value> extra = pushRealNames(session, tryIdx % 4);
         built.args.insert(built.args.end(), extra.begin(), extra.end());
 
         bool exists = vm.functionExists(ob, built.functionName);
         Value result = exists ? vm.callFunction(ob, built.functionName, built.args) : Value{};
-        ret = processAnswer(session, state, exists, result, 0);
+        ret = processAnswer(vm, session, state, exists, result, 0);
         if (ob->isDestructed()) return false;
         if (ret == -3) return false;
     }
     if (!ret) {
         if (state.numErrors == session.bestNumErrors) return false;
-        if (state.numErrors++ == 0) makeErrorMessage(session, 0, session.currentError);
+        if (state.numErrors++ == 0) makeErrorMessage(vm, session, 0, session.currentError);
     }
     return true;
 }
 
-// real we_are_finished() (packages/parser.c), minus the per-match
-// object-token loop and check_object_relations() -- both real no-ops
-// for this slice, since no match here ever carries an OBJ-family token
-// and state.numObjs (real parse_state_t::num_objs) accordingly never
-// leaves 0. Not modeled as a field on MatchState at all, since nothing
-// in this slice could ever set it to anything else.
+// real parallel_check_functions() (packages/parser.c): probes
+// direct_/indirect_ (real `which`, 1 or 2 -- always 1 in this slice,
+// since a rule has at most one object-family token) under all four real
+// naming strategies against ONE specific candidate object, first
+// against `candidate` itself (real code's own confusingly-named `obj`
+// parameter, always the candidate here -- see makeFunction()'s own
+// comment for why `which` doubles as both the prefix-selector index
+// AND the object-position index), then against the rule's own
+// registering object if the first four attempts found nothing.
+int parallelCheckFunctions(VM& vm, SentenceSession& session, MatchState& state,
+                            const std::shared_ptr<LpcObject>& candidate, int which) {
+    session.parallelError = ParserErrorInfo{};
+    std::shared_ptr<LpcObject> ob = candidate;
+    if (!ob || ob->isDestructed()) return 0;
+
+    int ret = 0;
+    for (int tryIdx = 0; !ret && tryIdx < 8; tryIdx++) {
+        if (tryIdx == 4) {
+            ob = session.currentNode->handler.lock();
+            if (!ob || ob->isDestructed()) return 0;
+        }
+        BuiltFunction built = makeFunction(vm, session, which, tryIdx % 4, candidate);
+        std::vector<Value> extra = pushRealNames(session, tryIdx % 4);
+        built.args.insert(built.args.end(), extra.begin(), extra.end());
+
+        bool exists = vm.functionExists(ob, built.functionName);
+        Value result = exists ? vm.callFunction(ob, built.functionName, built.args) : Value{};
+        ret = parallelProcessAnswer(vm, session, state, exists, result, which);
+        if (ob->isDestructed()) return 0;
+    }
+    if (!ret) {
+        if (state.numErrors == 0) makeErrorMessage(vm, session, 0, session.parallelError);
+        return 0;
+    }
+    return ret == 1;
+}
+
+// real singular_check_functions() (packages/parser.c): resolves a
+// non-plural object-family match's own candidate bitvec down to exactly
+// one accepted object (m.number), or records the right error
+// (Ambig/Ordinal/whatever the last rejecting candidate's own callback
+// produced) when that isn't possible. Ordinal-scoped (m.ordinal != 0,
+// "the second sword") and plain ("a sword") cases share the same
+// candidate scan but diverge sharply in how they interpret the result,
+// exactly matching real code's own two-branch tail.
+void singularCheckFunctions(VM& vm, SentenceSession& session, MatchState& state, int which, SentenceMatch& m) {
+    int ordinal = m.ordinal;
+    int ord2 = m.ordinal;
+    bool hasOrdinal = (m.ordinal != 0);
+    bool wasError = false;
+    int ambig = 0;
+    int match = -1;
+
+    for (size_t i = 0; i < m.obs.size(); i++) {
+        if (!m.obs[i]) continue;
+        int ret = parallelCheckFunctions(vm, session, state, session.loaded.objects[i], which);
+        if (ret) {
+            if (hasOrdinal) {
+                ord2--;
+                if (ordinal < 0 || --ordinal == 0) {
+                    if (ordinal == -2) state.numErrors--;
+                    if (useLastParallelError(session, state)) {
+                        m.token = ParserToken::Error;
+                        if (ordinal != -1) return;
+                        ordinal = -2;
+                    } else {
+                        m.number = static_cast<int>(i);
+                        return;
+                    }
+                }
+            } else {
+                if (ambig++ == 0) {
+                    if (useLastParallelError(session, state)) {
+                        wasError = true;
+                        m.token = ParserToken::Error;
+                    } else {
+                        wasError = false;
+                        match = static_cast<int>(i);
+                    }
+                    if (m.token & ParserToken::ChooseModifier) {
+                        if (match >= 0) m.number = match;
+                        return;
+                    }
+                } else {
+                    match = -1;
+                }
+            }
+        } else {
+            if (hasOrdinal && (ordinal == -1 || --ord2 == 0)) {
+                session.secondParallelError = session.parallelError;
+                session.parallelError = ParserErrorInfo{};
+            }
+            m.obs[i] = false;
+        }
+    }
+
+    if (!hasOrdinal) {
+        if (ambig == 1) {
+            m.number = match;
+            return;
+        }
+        if (wasError) state.numErrors--;
+        m.token = ParserToken::Error;
+        if (ambig == 0 && useLastParallelError(session, state)) return;
+        if (state.numErrors++ == 0) {
+            session.currentError = ParserErrorInfo{};
+            session.currentError.errorType = ParserErrorType::Ambig;
+            session.currentError.ambigObs = m.obs;
+        }
+    } else {
+        if (ordinal == -2) return;
+        m.token = ParserToken::Error;
+        if (state.numErrors++ == 0) {
+            if (ord2 <= 0) {
+                session.currentError = session.secondParallelError;
+                session.secondParallelError = ParserErrorInfo{};
+            } else {
+                session.currentError = ParserErrorInfo{};
+                session.currentError.errorType = ParserErrorType::Ordinal;
+                session.currentError.ordError = static_cast<int>(bitsetCount(m.obs));
+            }
+        }
+    }
+}
+
+// real plural_check_functions() (packages/parser.c): tests every
+// candidate independently, keeping whichever accept (no attempt at
+// resolving to one specific object -- a plural match's own SentenceMatch
+// ::number is never set at all, only its obs bitvec is narrowed down to
+// the survivors); a rejected candidate's own error is saved (not
+// discarded) so a later do_-call array can report it (pushBitvecAsArray()
+// ::errorsToo).
+void pluralCheckFunctions(VM& vm, SentenceSession& session, MatchState& state, int which, SentenceMatch& m) {
+    bool foundOne = false;
+    for (size_t i = 0; i < m.obs.size(); i++) {
+        if (!m.obs[i]) continue;
+        int ret = parallelCheckFunctions(vm, session, state, session.loaded.objects[i], which);
+        if (!ret || saveLastParallelError(session, static_cast<int>(i))) {
+            m.obs[i] = false;
+        } else {
+            foundOne = true;
+        }
+    }
+    if (!foundOne && useLastParallelError(session, state)) {
+        m.token = ParserToken::Error;
+    }
+}
+
+// real we_are_finished() (packages/parser.c): once the generic can_
+// check passes, resolves every object-family match in turn
+// (singularCheckFunctions()/pluralCheckFunctions() -- the
+// dependent_check_functions()/check_object_relations() two-object
+// branch is unreachable, since a node needing two objects never reaches
+// sentence matching at all, VerbRuleNode::objectTokenCount's own
+// comment), then either records the best error seen so far or commits
+// this node as the new best match and pre-builds all four real do_
+// naming variants.
 void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
     if (session.foundLevel < 2) session.foundLevel = 2;
     if (session.bestMatchWeight >= session.currentNode->weight) return;
@@ -1505,10 +2314,38 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
 
     if (!checkFunctions(vm, session, state, session.caller)) return;
 
+    session.parallelErrors.clear(); // real clear_parallel_errors(&parallel_errors)
+
+    for (int which = 1, mtch = 0; which < 3 && mtch < state.numMatches; mtch++) {
+        int tok = session.matches[mtch].token;
+        if (tok == ParserToken::Error) {
+            which++;
+            continue;
+        }
+        if (!(tok & ParserToken::ObjA)) continue;
+
+        SentenceMatch& m = session.matches[mtch];
+        if (tok & ParserToken::PluralModifier) {
+            pluralCheckFunctions(vm, session, state, which, m);
+        } else if (state.numObjs == 2) {
+            // dependent_check_functions(): unreachable, see this
+            // function's own header comment.
+        } else {
+            singularCheckFunctions(vm, session, state, which, m);
+        }
+        which++;
+    }
+    // state.numObjs == 2 -> check_object_relations(): same reasoning,
+    // unreachable here.
+
     if (state.numErrors) {
         int weight = session.currentNode->weight;
-        // real ERR_THERE_IS_NO reweighting is unreachable here (that
-        // error kind is exclusively produced by object-token matching).
+        if (session.currentError.errorType == ParserErrorType::ThereIsNo) {
+            // real "ERR_THERE_IS_NO is basically a STR in place of an
+            // OBJ, so is weighted far too highly. Give it approximately
+            // the same weight as a STR."
+            weight = 1;
+        }
         if (state.numErrors == session.bestNumErrors && weight <= session.bestErrorWeight) return;
         session.bestError = session.currentError;
         session.currentError = ParserErrorInfo{};
@@ -1524,7 +2361,7 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
     SentenceMatchResult result;
     result.handler = handler;
     for (int tryIdx = 0; tryIdx < 4; tryIdx++) {
-        BuiltFunction built = makeFunction(session, 3, tryIdx);
+        BuiltFunction built = makeFunction(vm, session, 3, tryIdx);
         std::vector<Value> extra = pushRealNames(session, tryIdx);
         built.args.insert(built.args.end(), extra.begin(), extra.end());
         result.res[tryIdx].functionName = built.functionName;
@@ -1534,13 +2371,13 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
 }
 
 // real parse_rules() (packages/parser.c): tries every rule node
-// registered under the matched verb, skipping any node this slice
-// cannot attempt (hasObjectToken -- see VerbRuleNode's own comment),
-// any node whose weight cannot beat the current best match, and any
-// node whose own lit[0]/lit[1] prefilter fails.
+// registered under the matched verb, skipping any node needing two
+// object tokens (VerbRuleNode::objectTokenCount's own comment -- not
+// yet supported), any node whose weight cannot beat the current best
+// match, and any node whose own lit[0]/lit[1] prefilter fails.
 void parseRulesFor(VM& vm, SentenceSession& session) {
     for (const VerbRuleNode& node : session.matchedVerb->nodes) {
-        if (node.hasObjectToken) continue;
+        if (node.objectTokenCount >= 2) continue;
         if (session.bestMatchWeight > node.weight) continue;
 
         int pos = 0;
@@ -1580,22 +2417,11 @@ void doTheCall(VM& vm, SentenceSession& session) {
 
 // real get_the_error() (packages/parser.c), with `obj` fixed at real
 // code's own -1 -- confirmed directly that every real call site
-// (f_parse_sentence(), f_parse_my_rules()) passes -1, making the
-// "push_object(loaded_objects[obj])" branch genuinely dead code in real
-// usage; only the "push_undefined()" (real const0u, a plain int 0)
-// branch is ever reached, so this driver only implements that one.
-Value getTheError(VM& vm, SentenceSession& session) {
-    if (session.bestError.errorType == ParserErrorType::Allocated) {
-        if (!vm.masterObject()) return Value(static_cast<int64_t>(0));
-        std::vector<Value> args = {Value(static_cast<int64_t>(ParserErrorType::Allocated)),
-                                    Value(static_cast<int64_t>(0)), Value(session.bestError.allocatedMessage)};
-        Value ret = vm.applyMaster("parser_error_message", std::move(args));
-        if (std::holds_alternative<std::monostate>(ret.data)) return Value(static_cast<int64_t>(0));
-        return ret;
-    }
-    // real "default: ...; hack.u.number = -found_level; return &hack;"
-    return Value(static_cast<int64_t>(-session.foundLevel));
-}
+// (f_parse_sentence(), f_parse_my_rules()) passes -1 here (the OTHER
+// real call site, push_bitvec_as_array()'s own per-rejected-candidate
+// use with a real object index, is errorInfoToValue()'s own direct
+// caller instead, above).
+Value getTheError(VM& vm, SentenceSession& session) { return errorInfoToValue(vm, session, session.bestError, -1); }
 
 } // namespace
 
@@ -1646,6 +2472,22 @@ Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& cal
             }
 
             if (session.foundLevel < 1) session.foundLevel = 1;
+
+            // real "if (!objects_loaded && (parse_verb_entry->flags &
+            // VB_HAS_OBJ)) load_objects();" -- lazy, once per whole
+            // parseSentence() call, the first time a matched verb has
+            // any rule with an object-family token. Always called with
+            // parseUser's own environment (real parse_env is never set
+            // by anything reaching this driver's own parse_sentence()
+            // efun -- ParserPackage::loadObjects()'s own comment).
+            if (!session.objectsLoaded) {
+                bool verbHasObj = std::any_of(target->nodes.begin(), target->nodes.end(),
+                                               [](const VerbRuleNode& n) { return n.hasObjectToken; });
+                if (verbHasObj) {
+                    session.loaded = ParserPackage::loadObjects(vm, caller);
+                    session.objectsLoaded = true;
+                }
+            }
 
             session.words.clear();
             SentenceWord verbWord;
