@@ -3,6 +3,138 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (a further fresh session, same day): `parse_*` (row 0.13a)
+ninth real slice -- item 9's plural side (`"give OBS to LIV"` and the
+mirror `"give LIV OBS"` shape), landed with zero new production logic
+beyond removing an earlier session's own conservative gate; row 0.13a's
+checkbox flipped to done (partial: `add_nicknames()`/explicit
+`env` override still unconsulted) (677 tests, up from 676).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules). Per this session's own explicit
+instruction, re-read the real plural-side logic in
+`check_object_relations()`/`check_one_relation()`/
+`dependent_check_functions()` directly (`packages/parser.c:2184-2493`)
+before building anything, specifically to confirm how much of the
+already-built both-singular machinery was reusable versus how much
+genuinely needed new plural-matching logic.
+
+**Real finding: none of it needed new logic.** `check_object_relations()`
+has exactly one plurality-dependent decision anywhere in its own body --
+`direct_unique`/`indirect_unique`, computed straight from each match's
+own real `PLURAL_MODIFIER` bit, gating whether an ambiguity check applies
+at all and whether the final resolved value is a single index or the
+whole accumulated set -- and the prior session had already ported the
+*entire* real function faithfully (not a hand-simplified singular-only
+version), including both of those gates, since restricting to the
+both-singular case was done entirely at the `ParserPackage::
+parseRulesFor()` call-site level (a `VerbRuleNode::hasPluralObjectToken`
+skip), not inside the algorithm itself. `dependent_check_functions()`/
+`check_one_relation()` have no plurality-dependent logic at all in real
+source -- confirmed by reading both in full a second time. `we_are_finished()`'s
+own real dispatch (`if (tok & PLURAL_MODIFIER) plural_check_functions(...)
+else if (num_objs==2) dependent_check_functions(...) else
+singular_check_functions(...)`) already matched this driver's existing
+`weAreFinished()` dispatch exactly, meaning a plural slot inside a
+two-object rule was *already* routed to the real, already-tested
+`pluralCheckFunctions()` (built in an earlier single-object slice) rather
+than needing any new narrowing logic of its own.
+
+Given this, the real remaining work was: remove `parseRulesFor()`'s own
+`hasPluralObjectToken` gate, remove the now-purposeless field itself and
+its computation helper, update every comment that referenced the old
+restriction, and -- the substantive part -- write real regression tests
+proving this actually works end to end rather than trusting the
+re-derivation alone, per this project's own standing "confirm it works,
+don't just reason about it" discipline.
+
+Two real dead-souls.net Dead Souls `give.c` shapes chosen as the real
+regression targets: `"OBS LIV"` (plural direct/multiple items, singular
+indirect/one recipient -- "give coins guard") and its mirror `"LIV OBS"`
+(singular direct, plural indirect -- "give guard coins"), both real rules
+already confirmed present in that same file's own `SetRules()` call from
+the prior session's own corpus survey. Building these surfaced a real,
+subtle naming derivation that needed care: real `make_function()`'s own
+"obs"/"lvs" vs. "obj"/"liv" spelling decision (`omatch+1 >= which ||
+!plural || which>=4`) means the plural spelling is reachable *only* for
+the `do_` call (`which==3`) or when a *later* probe's own `which` exceeds
+an *earlier* token's own position -- never for a probe of a token's own
+narrowing pass, nor for either relational probe (`which>=4` always forces
+the short spelling). Worked through by hand, position by position, for
+both rule shapes, and independently cross-checked against real
+`give.c`'s own actual function names, which never define a single
+`can_`/`direct_`/`indirect_` variant with an "obs"/"lvs" segment anywhere
+-- only its three `do_` variants do, exactly matching the derivation.
+One consequence confirmed concretely: for `"OBS LIV"`, the indirect
+candidate (the guard) genuinely needs *two different* `indirect_` names
+defined -- one for its own narrowing pass (`which==2`, "obs" spelling)
+and a different one for the relational pairing pass (`which==5`, "obj"
+spelling, since `which>=4` forces it) -- while for `"LIV OBS"` those two
+`which` values happen to coincide on one name, a real, position-dependent
+asymmetry between the two mirror shapes.
+
+One genuine test-authoring mistake caught and fixed before trusting the
+result, not a driver bug: an initial version of the plural-direct test
+used the *singular* noun ("coin") in its own sentence, which real
+`parse_obj()`'s own singular-noun match path (`ParserPackage.cpp`)
+correctly strips `PLURAL_MODIFIER` from, even for an OBS-token rule slot
+-- OBS means "this slot accepts either one object or several," not
+"always plural"; which one happens is decided by what the player typed,
+not by the rule's own declared token kind. The test's own two equally
+valid, unconditionally-accepting coins then produced a real, correctly-
+computed `ERR_AMBIG` (confirmed by adding a temporary master
+`parser_error_message()` probe to inspect the real error type directly
+rather than guessing from the bare return value) instead of the intended
+plural success path -- fixed by using the real plural noun ("coins",
+`parse_command_plural_id_list()`), not by changing any production code.
+
+Also fixed along the way, matching this project's own "an accidentally-
+still-green assertion is a bug in the test, not a pass" standard from the
+prior session's own singular-case fix: the OLD "plural side still
+skipped" regression test kept passing after the gate was removed, but
+for an entirely different, accidental reason -- its own fixture never
+defined any `direct_`/`indirect_` function on its candidates at all, so
+the relational check now genuinely runs and genuinely fails to find any
+callable function, rather than the rule being skipped outright. Replaced
+with the two real positive tests described above.
+
+3 new regression tests total (`test/test_lexer.cpp`; one new test net,
+since the old stale one was replaced by two): plural-direct/singular-
+indirect ("OBS LIV") resolving to the real filtered array (three
+same-named coins, one rejected by its own `direct_give_obj_liv()`,
+confirmed excluded in the real descending-index order the single-object
+plural slice already established) alongside the real singular indirect
+target; and the mirror singular-direct/plural-indirect ("LIV OBS") shape,
+same filtering proof on the other side. 677 tests passing (up from 676:
+net +1, one old test replaced by two new ones), zero regressions.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on a spare port, a real telnet-negotiating
+Python client, real `eval` calls): built a real room/three-coins/guard
+scene via `write_file()`/`clone_object()`, registered a real
+`parse_add_rule("give", "OBS LIV")` with the exact real per-`which`
+naming derived above, and confirmed live that `parse_sentence("give
+coins guard")` resolved to the real filtered array (`{coin2, coin1}`,
+coin3 correctly excluded, real descending-index order) and the real
+guard, invoking `do_give_obs_liv` with exactly those values -- the same
+behavior the new regression test proves, reproduced against the real
+running driver end to end. Driver process confirmed to stay healthy
+afterward (`eval return 6*7;` -> 42, `who`), and every live test artifact
+(`/zzzp_*` files) removed before stopping the scratch process, leaving
+the real bundled mudlib tree exactly as found (`git status` clean under
+`mudlib/`).
+
+With both the both-singular and plural sides of item 9 now real, row
+0.13a's own checkbox is flipped to done in `ROADMAP.md` -- marked
+partial, since `parse_sentence()`'s own `env`/`nicks` arguments (an
+explicit environment-object-array override and a caller-supplied
+nickname mapping) are still accepted for real signature compatibility
+but never consulted, matching `load_objects()`'s own long-standing,
+already-documented scope note.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (a further fresh session, evidence-based re-rank): `parse_*`
 (row 0.13a) eighth real slice -- item 9's own two-object rule family,
 `dependent_check_functions()`/`check_one_relation()`/

@@ -261,16 +261,6 @@ int computeObjectTokenCount(const std::vector<int>& tokens) {
     return count;
 }
 
-// See VerbRuleNode::hasPluralObjectToken's own comment.
-bool computeHasPluralObjectToken(const std::vector<int>& tokens) {
-    for (int t : tokens) {
-        if ((t & ~ParserToken::ChooseModifier) >= ParserToken::ObjA &&
-            (t & ParserToken::PluralModifier)) {
-            return true;
-        }
-    }
-    return false;
-}
 } // namespace
 
 void ParserPackage::addRule(const std::string& verb, const std::string& rule,
@@ -296,7 +286,6 @@ void ParserPackage::addRule(const std::string& verb, const std::string& rule,
     node.handler = handler;
     node.hasObjectToken = computeHasObjectToken(tokens);
     node.objectTokenCount = computeObjectTokenCount(tokens);
-    node.hasPluralObjectToken = computeHasPluralObjectToken(tokens);
     fillLitFromTokens(node);
 
     // real "verb_node->next = verb_entry->node; verb_entry->node =
@@ -2481,17 +2470,23 @@ int checkOneRelation(VM& vm, SentenceSession& session, MatchState& state, bool d
 // scoping pass had stopped at) before writing this port; two genuine,
 // confirmed real bugs found are ported faithfully and flagged inline
 // below rather than silently fixed or silently reproduced without a
-// note, per this session's own explicit instruction. Restricted, for
-// this first real sub-slice, to the case neither object-family token is
-// plural (VerbRuleNode::hasPluralObjectToken's own comment --
-// parseRulesFor() below never attempts this function at all for a node
-// with a plural object slot) -- real-corpus-confirmed the large
-// majority shape (59 of 77 real two-object rules found across every
-// FluffOS-family corpus vendored in `temp/`, dead-souls.net's own Dead
-// Souls `lib/verbs/` alone), not an arbitrary restriction. A genuinely
-// plural two-object rule ("give OBS to LIV") stays deferred to a future
-// slice, the exact same honest "not yet supported, not silently wrong"
-// stance this row has used throughout.
+// note, per this session's own explicit instruction.
+//
+// **Update, 2026-08-19 (a further session): real, handles a plural
+// object-family slot on either side too, not just the both-singular
+// case a still-earlier session deliberately shipped first.** A fresh
+// re-read of the whole function, specifically hunting for a separate
+// plural-only code path, found none: `direct_unique`/`indirect_unique`
+// (below, straight from each match's own real PLURAL_MODIFIER bit) are
+// the ONLY plurality-dependent decisions in this entire function --
+// whether an ambiguity check applies at all (a genuinely plural side is
+// allowed to accumulate more than one accepted candidate without
+// erroring, matching real "give all the coins to the guard"), and
+// whether the final resolved value is a single object index or the
+// whole accumulated set. `dependentCheckFunctions()`/`checkOneRelation()`
+// have no plurality-dependent logic anywhere in real source either.
+// `parseRulesFor()` below no longer gates a plural-involving two-object
+// node out at all.
 void checkObjectRelations(VM& vm, SentenceSession& session, MatchState& state) {
     int direct = -1, indirect = -1;
     for (int i = 0; i < state.numMatches; i++) {
@@ -2696,12 +2691,12 @@ void checkObjectRelations(VM& vm, SentenceSession& session, MatchState& state) {
 // real we_are_finished() (packages/parser.c): once the generic can_
 // check passes, resolves every object-family match in turn
 // (singularCheckFunctions()/pluralCheckFunctions() for a one-object
-// node; dependentCheckFunctions()+checkObjectRelations() below for a
-// real two-object, both-singular node -- VerbRuleNode::objectTokenCount/
-// hasPluralObjectToken's own comments on exactly which two-object shape
-// reaches this point at all), then either records the best error seen so
-// far or commits this node as the new best match and pre-builds all four
-// real do_ naming variants.
+// node; pluralCheckFunctions()/dependentCheckFunctions() (whichever
+// applies per match) plus checkObjectRelations() below for a real
+// two-object node, singular or plural on either side alike --
+// checkObjectRelations()'s own header comment), then either records the
+// best error seen so far or commits this node as the new best match and
+// pre-builds all four real do_ naming variants.
 void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
     if (session.foundLevel < 2) session.foundLevel = 2;
     if (session.bestMatchWeight >= session.currentNode->weight) return;
@@ -2774,13 +2769,13 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
 }
 
 // real parse_rules() (packages/parser.c): tries every rule node
-// registered under the matched verb, skipping any node needing two
-// object tokens where at least one is plural (VerbRuleNode::
-// objectTokenCount/hasPluralObjectToken's own comments -- a plural-
-// involving two-object rule, e.g. "give OBS to LIV", is not yet
-// supported; both-singular, e.g. "give OBJ to LIV", is real as of
-// 2026-08-19), any node whose weight cannot beat the current best match,
-// and any node whose own lit[0]/lit[1] prefilter fails.
+// registered under the matched verb, skipping any node whose weight
+// cannot beat the current best match, and any node whose own
+// lit[0]/lit[1] prefilter fails. **Update, 2026-08-19 (a further
+// session): a two-object node is no longer skipped regardless of
+// plurality on either side** (VerbRuleNode::objectTokenCount's own
+// comment) -- both-singular and plural-involving two-object rules
+// (e.g. "give OBS to LIV") are both real as of this session.
 // `restrictedHandler` is real parse_restricted (set only by
 // parse_my_rules(), always null for parse_sentence() itself) -- real
 // "(!parse_restricted || parse_vn->handler == parse_restricted)",
@@ -2789,7 +2784,6 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
 // object.
 void parseRulesFor(VM& vm, SentenceSession& session, const std::shared_ptr<LpcObject>& restrictedHandler) {
     for (const VerbRuleNode& node : session.matchedVerb->nodes) {
-        if (node.objectTokenCount >= 2 && node.hasPluralObjectToken) continue;
         if (restrictedHandler && node.handler.lock() != restrictedHandler) continue;
         if (session.bestMatchWeight > node.weight) continue;
 

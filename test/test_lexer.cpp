@@ -19765,69 +19765,239 @@ static void testParseObjTwoSingularObjectTokenRuleResolvesTheRealPairEndToEnd() 
     std::cout << "testParseObjTwoSingularObjectTokenRuleResolvesTheRealPairEndToEnd OK\n";
 }
 
-// A two-object rule where the SECOND (indirect) object token is plural
-// stays deferred (VerbRuleNode::hasPluralObjectToken's own comment) --
-// the same honest "not yet supported" behavior the old, now-renamed test
-// above originally (if accidentally) demonstrated, kept here as its own
-// real, correctly-targeted regression instead of losing that coverage
-// when the singular case became real.
-static void testParseObjTwoObjectTokenRuleWithAPluralSideStillSkippedNotSilentlyMismatched() {
+// This test originally proved a two-object rule with a plural side
+// stayed deferred (`ParserPackage::parseRulesFor()`'s own now-removed
+// `hasPluralObjectToken` gate). **Updated 2026-08-19 (a further session):
+// a fresh, second full re-read of real check_object_relations()/
+// check_one_relation()/dependent_check_functions() found neither
+// function has any separate plural-only code path at all --
+// direct_unique/indirect_unique (derived straight from each match's own
+// PLURAL_MODIFIER bit) are the only plurality-dependent decisions in the
+// whole real algorithm, and both were already ported faithfully in the
+// session that built the both-singular case. The gate was a
+// deliberately conservative first-sub-slice choice, not something the
+// underlying machinery actually needed -- removing it and testing
+// exposed no new production bugs.** The OLD fixture here never defined
+// any `direct_`/`indirect_` function on its own candidates, so it kept
+// passing after the gate was removed for an entirely different,
+// accidental reason (every relational probe legitimately found no
+// function to call, not because the rule was still skipped) -- fixed to
+// real, positive, end-to-end tests instead, matching this project's own
+// "an accidentally-still-green assertion is a bug in the test, not a
+// pass" standard from the prior session's own singular-case fix.
+
+// Real dead-souls.net Dead Souls shape (lib/verbs/items/give.c's own
+// "OBS LIV" rule -- do_give_obs_to_liv(mixed *items, object target)):
+// a plural DIRECT slot (multiple items) paired with a singular INDIRECT
+// slot (one recipient). Three same-named candidates, one of which fails
+// its own per-candidate direct_ check -- proves the plural side's own
+// per-candidate filtering survives the two-object relational pairing,
+// not just "all candidates pass through untouched."
+static void testParseObjTwoObjectTokenRulePluralDirectSingularIndirectResolvesTheFilteredArray() {
     ObjectVarHarness harness;
-    harness.writeFile("/po9b_room.c",
+    harness.writeFile("/po9d_room.c",
         "void setup() { parse_init(); }\n"
         "mixed *parse_command_id_list() { return ({\"room\"}); }\n"
         "int is_living() { return 0; }\n"
         "int inventory_accessible() { return 1; }\n"
         "int inventory_visible() { return 1; }\n");
-    harness.writeFile("/po9b_sword.c",
+    // Real make_function() naming (confirmed by hand, position-by-position,
+    // against the real "omatch+1 >= which || !plural || which>=4" formula):
+    // for an "OBS LIV" rule, the OBS slot's own spelling is "obs" only at
+    // which==2 (the indirect narrowing pass's own probe of a DIFFERENT
+    // object) and which==3 (do_) -- its OWN narrowing pass (which==1) and
+    // the relational probe (which==4) both still say "obj", since
+    // omatch+1>=which forces the short spelling there. The LIV slot never
+    // varies (never plural). So: can_/direct_(which=1)/direct_(which=4,
+    // relational) all read "obj_liv"; indirect_(which=2, narrowing) reads
+    // "obs_liv"; indirect_(which=5, relational) reads "obj_liv" again
+    // (which>=4 forces short); do_(which=3) reads "obs_liv". The guard
+    // (indirect candidate) genuinely needs BOTH indirect_ spellings
+    // defined -- one for its own narrowing pass, a different one for the
+    // relational pairing pass.
+    // real parse_obj()'s own singular-noun match path
+    // (ParserPackage.cpp's own addMatch() call there) strips
+    // PLURAL_MODIFIER off the resulting match whenever the player typed
+    // the SINGULAR noun form, even for an OBS-token rule slot -- OBS
+    // means "this slot accepts either one object or several", not
+    // "always plural"; which one actually happens is decided by what
+    // the player typed. So this test's own sentence must use the real
+    // PLURAL noun ("coins", parse_command_plural_id_list()) to reach the
+    // genuinely-plural match path at all -- confirmed the hard way, by
+    // an initial attempt at this exact test using the singular form
+    // "coin" and getting a real (if initially surprising) ERR_AMBIG
+    // instead, correctly explained once re-derived: with PLURAL_MODIFIER
+    // stripped, two independently-valid direct candidates ARE a genuine
+    // singular-match ambiguity, not a bug.
+    harness.writeFile("/po9d_coin1.c",
         "void setup() { parse_init(); }\n"
         "void go(object dest) { move_object(dest); }\n"
-        "mixed *parse_command_id_list() { return ({\"sword\"}); }\n"
+        "mixed *parse_command_id_list() { return ({\"coin\"}); }\n"
+        "mixed *parse_command_plural_id_list() { return ({\"coins\"}); }\n"
         "int is_living() { return 0; }\n"
         "int inventory_accessible() { return 1; }\n"
-        "int inventory_visible() { return 1; }\n");
-    harness.writeFile("/po9b_chest.c",
+        "int inventory_visible() { return 1; }\n"
+        "int direct_give_obj_liv(object a, object b) { return 1; }\n");
+    harness.writeFile("/po9d_coin2.c",
         "void setup() { parse_init(); }\n"
         "void go(object dest) { move_object(dest); }\n"
-        "mixed *parse_command_id_list() { return ({\"chest\"}); }\n"
+        "mixed *parse_command_id_list() { return ({\"coin\"}); }\n"
+        "mixed *parse_command_plural_id_list() { return ({\"coins\"}); }\n"
         "int is_living() { return 0; }\n"
         "int inventory_accessible() { return 1; }\n"
-        "int inventory_visible() { return 1; }\n");
-    harness.writeFile("/po9b_player.c",
-        "int doFired;\n"
-        // Real dead-souls.net Dead Souls shape (lib/verbs/items/get.c's
-        // own "OBS OBJ" rule, no literal -- kept literal-free
-        // deliberately, since this harness loads no master object and a
-        // literal token needs one to tokenize at all): a plural direct
-        // slot paired with a singular indirect slot.
-        "void setup() { parse_init(); parse_add_rule(\"get\", \"OBS OBJ\"); }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int direct_give_obj_liv(object a, object b) { return 1; }\n");
+    harness.writeFile("/po9d_coin3.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"coin\"}); }\n"
+        "mixed *parse_command_plural_id_list() { return ({\"coins\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int direct_give_obj_liv(object a, object b) { return 0; }\n"); // rejected
+    harness.writeFile("/po9d_guard.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"guard\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int indirect_give_obs_liv(object a, object b) { return 1; }\n" // which==2, narrowing
+        "int indirect_give_obj_liv(object a, object b) { return 1; }\n"); // which==5, relational
+    harness.writeFile("/po9d_player.c",
+        "mixed gotItems; object gotTarget;\n"
+        "void setup() { parse_init(); parse_add_rule(\"give\", \"OBS LIV\"); }\n"
         "void go(object dest) { move_object(dest); }\n"
         "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
         "int is_living() { return 1; }\n"
         "int inventory_accessible() { return 1; }\n"
         "int inventory_visible() { return 1; }\n"
-        "int can_get_obs_obj(mixed a, mixed b) { return 1; }\n"
-        "void do_get_obs_obj(mixed a, object b) { doFired = 1; }\n"
+        "int can_give_obj_liv(mixed a, mixed b) { return 1; }\n"
+        "void do_give_obs_liv(mixed items, object target) { gotItems = items; gotTarget = target; }\n"
         "mixed run(string sentence) { return parse_sentence(sentence); }\n"
-        "int probeFired() { return doFired; }\n");
+        "mixed *probe() { return ({ gotItems, gotTarget }); }\n");
 
-    auto room = harness.objects.cloneObject("/po9b_room");
-    auto player = harness.objects.cloneObject("/po9b_player");
-    auto sword = harness.objects.cloneObject("/po9b_sword");
-    auto chest = harness.objects.cloneObject("/po9b_chest");
-    assert(room && player && sword && chest);
-    for (auto& ob : {room, player, sword, chest}) harness.vm.callFunction(ob, "setup", {});
+    auto room = harness.objects.cloneObject("/po9d_room");
+    auto player = harness.objects.cloneObject("/po9d_player");
+    auto coin1 = harness.objects.cloneObject("/po9d_coin1");
+    auto coin2 = harness.objects.cloneObject("/po9d_coin2");
+    auto coin3 = harness.objects.cloneObject("/po9d_coin3");
+    auto guard = harness.objects.cloneObject("/po9d_guard");
+    assert(room && player && coin1 && coin2 && coin3 && guard);
+    for (auto& ob : {room, player, coin1, coin2, coin3, guard}) harness.vm.callFunction(ob, "setup", {});
     harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
-    harness.vm.callFunction(sword, "go", std::vector<amlp::Value>{amlp::Value(room)});
-    harness.vm.callFunction(chest, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(coin1, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(coin2, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(coin3, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(guard, "go", std::vector<amlp::Value>{amlp::Value(room)});
 
-    amlp::Value result =
-        harness.vm.callFunction(player, "run", std::vector<amlp::Value>{amlp::Value(std::string("get sword chest"))});
+    amlp::Value result = harness.vm.callFunction(
+        player, "run", std::vector<amlp::Value>{amlp::Value(std::string("give coins guard"))});
     assert(std::holds_alternative<int64_t>(result.data));
-    assert(std::get<int64_t>(result.data) <= 0); // never the success value (1) -- no interpretation was ever attempted
-    assert(std::get<int64_t>(harness.vm.callFunction(player, "probeFired", {}).data) == 0);
+    assert(std::get<int64_t>(result.data) == 1);
 
-    std::cout << "testParseObjTwoObjectTokenRuleWithAPluralSideStillSkippedNotSilentlyMismatched OK\n";
+    amlp::Value probe = harness.vm.callFunction(player, "probe", {});
+    auto pr = std::get<std::shared_ptr<amlp::Array>>(probe.data);
+    assert(pr->items.size() == 2);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(pr->items[1].data) == guard);
+    auto items = std::get<std::shared_ptr<amlp::Array>>(pr->items[0].data);
+    // Real descending object-index order, coin3 excluded (its own
+    // direct_give_obj_liv() rejected it).
+    assert(items->items.size() == 2);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(items->items[0].data) == coin2);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(items->items[1].data) == coin1);
+
+    std::cout << "testParseObjTwoObjectTokenRulePluralDirectSingularIndirectResolvesTheFilteredArray OK\n";
+}
+
+// The mirror shape, also real in dead-souls.net's own Dead Souls
+// give.c ("LIV OBS" -- do_give_liv_obs(object target, mixed *items)):
+// a singular DIRECT slot (one recipient) paired with a plural INDIRECT
+// slot (multiple items).
+static void testParseObjTwoObjectTokenRuleSingularDirectPluralIndirectResolvesTheFilteredArray() {
+    ObjectVarHarness harness;
+    harness.writeFile("/po9e_room.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"room\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    // Real make_function() naming (same derivation as the other test,
+    // mirrored): for "LIV OBS" the OBS slot is now at POSITION 1, so
+    // "omatch+1 < which" needs which > 2 for the "obs" spelling to ever
+    // apply -- true only at which==3 (do_). which==2 (the indirect
+    // slot's own narrowing pass) and which==5 (the relational probe)
+    // both land on "obj" already, so they coincide on ONE name here,
+    // unlike the other test's own guard, which genuinely needed two.
+    // Same real "the player typed the singular noun form" caveat as the
+    // other test above -- parse_command_plural_id_list()/"coins" needed
+    // to actually reach the plural match path.
+    harness.writeFile("/po9e_coin1.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"coin\"}); }\n"
+        "mixed *parse_command_plural_id_list() { return ({\"coins\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int indirect_give_liv_obj(object a, object b) { return 1; }\n");
+    harness.writeFile("/po9e_coin2.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"coin\"}); }\n"
+        "mixed *parse_command_plural_id_list() { return ({\"coins\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int indirect_give_liv_obj(object a, object b) { return 0; }\n"); // rejected
+    harness.writeFile("/po9e_guard.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"guard\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int direct_give_liv_obj(object a, object b) { return 1; }\n");
+    harness.writeFile("/po9e_player.c",
+        "object gotTarget; mixed gotItems;\n"
+        "void setup() { parse_init(); parse_add_rule(\"give\", \"LIV OBS\"); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int can_give_liv_obj(mixed a, mixed b) { return 1; }\n"
+        "void do_give_liv_obs(object target, mixed items) { gotTarget = target; gotItems = items; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n"
+        "mixed *probe() { return ({ gotTarget, gotItems }); }\n");
+
+    auto room = harness.objects.cloneObject("/po9e_room");
+    auto player = harness.objects.cloneObject("/po9e_player");
+    auto coin1 = harness.objects.cloneObject("/po9e_coin1");
+    auto coin2 = harness.objects.cloneObject("/po9e_coin2");
+    auto guard = harness.objects.cloneObject("/po9e_guard");
+    assert(room && player && coin1 && coin2 && guard);
+    for (auto& ob : {room, player, coin1, coin2, guard}) harness.vm.callFunction(ob, "setup", {});
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(coin1, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(coin2, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(guard, "go", std::vector<amlp::Value>{amlp::Value(room)});
+
+    amlp::Value result = harness.vm.callFunction(
+        player, "run", std::vector<amlp::Value>{amlp::Value(std::string("give guard coins"))});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    amlp::Value probe = harness.vm.callFunction(player, "probe", {});
+    auto pr = std::get<std::shared_ptr<amlp::Array>>(probe.data);
+    assert(pr->items.size() == 2);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(pr->items[0].data) == guard);
+    auto items = std::get<std::shared_ptr<amlp::Array>>(pr->items[1].data);
+    assert(items->items.size() == 1);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(items->items[0].data) == coin1);
+
+    std::cout << "testParseObjTwoObjectTokenRuleSingularDirectPluralIndirectResolvesTheFilteredArray OK\n";
 }
 
 // Two direct-object candidates that BOTH individually pass every real
@@ -20798,7 +20968,8 @@ int main() {
     testParseObjAllOfPluralResolvesToTheAcceptedCandidatesOnly();
     testParseObjMyAdjectiveResolvesToThePlayersOwnCarriedItem();
     testParseObjTwoSingularObjectTokenRuleResolvesTheRealPairEndToEnd();
-    testParseObjTwoObjectTokenRuleWithAPluralSideStillSkippedNotSilentlyMismatched();
+    testParseObjTwoObjectTokenRulePluralDirectSingularIndirectResolvesTheFilteredArray();
+    testParseObjTwoObjectTokenRuleSingularDirectPluralIndirectResolvesTheFilteredArray();
     testParseObjTwoSingularObjectTokenRuleWithTwoValidDirectCandidatesProducesErrAmbig();
     testParseMyRulesRestrictsMatchingToTheCallersOwnRegisteredRulesOnly();
     testParseMyRulesDefaultFlagReturnsVerbRuleArgsArrayWithoutCallingAnything();
