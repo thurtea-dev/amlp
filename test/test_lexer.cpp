@@ -24,6 +24,7 @@
 #include "amlp/dialect/DialectSelect.hpp"
 #include <algorithm>
 #include <cassert>
+#include <csignal>
 #include <iostream>
 #include <memory>
 #include <fstream>
@@ -18875,7 +18876,53 @@ static void testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag() {
     std::cout << "testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag OK\n";
 }
 
+// --- SIGPIPE (src/main.cpp, src/net/instruct.md's own "Known gap"
+// note): a client connection closing at the wrong moment relative to
+// this process's own next write() to that same socket used to be able
+// to kill the *entire driver process*, not just that one connection --
+// SIGPIPE's own default disposition is to terminate the process, and
+// nothing in this codebase ever told the OS otherwise. Deterministically
+// reproducible, unlike the crash-claim investigation two sessions before
+// this one (which needed a live client and a running scheduler loop):
+// closing one end of a connected socketpair and then writing to the
+// other is the textbook, guaranteed way to raise SIGPIPE on any POSIX
+// system, no timing race involved.
+static void testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess() {
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    ::close(fds[1]); // the peer disappears
+
+    // Before main()'s own std::signal(SIGPIPE, SIG_IGN) (replicated at
+    // the top of this file's own main(), since this test binary has its
+    // own separate entry point -- see that call site's own comment),
+    // this next line would have taken down this entire test process,
+    // not just failed one assertion. Real Connection::send() already
+    // tolerates a failed write() gracefully on its own (Connection.cpp:
+    // "if (n < 0) { if (errno == EINTR) continue; break; }") -- it was
+    // never Connection's own code that was missing anything, only the
+    // process-wide signal disposition that decided whether send() ever
+    // got the chance to run that handling at all.
+    conn.send("this write must not kill the process");
+
+    // Simply reaching this line, still running, is the real assertion:
+    // proof the write above returned a normal -1/EPIPE instead of
+    // delivering a fatal signal.
+    assert(true);
+
+    std::cout << "testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess OK\n";
+}
+
 int main() {
+    // Matches src/main.cpp's own real startup sequence exactly (see its
+    // own comment) -- this test binary has its own separate main(), so
+    // it needs its own copy of the same call for
+    // testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess
+    // below to actually exercise anything real; everything else in this
+    // suite is unaffected either way (nothing else here writes to a
+    // socket whose peer has already closed).
+    std::signal(SIGPIPE, SIG_IGN);
+
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
     // "nonexistent_marker_efun" used by the short-circuit tests are not
@@ -19538,6 +19585,7 @@ int main() {
     testParseSentenceSkipsAnObjectTokenRuleGracefullyAndStillMatchesASiblingStrRule();
     testParseSentenceFallsBackToTheGenericDoVerbRuleNamingWhenTheSimpleNameIsNotDefined();
     testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag();
+    testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess();
     std::cout << "all tests passed\n";
     return 0;
 }

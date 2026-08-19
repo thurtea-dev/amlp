@@ -132,19 +132,29 @@ See `src/proto/instruct.md` for the detailed implementation plan - the
 - Socket handles returned by `socket_create` are globally unique integers
   (never reused within a session). Use a monotonic counter in `SocketRegistry`.
 
-## Known gap (found live, 2026-08-18, not fixed)
+## Known gap, fixed 2026-08-18 (continued)
 
-The driver process has no `SIGPIPE` handling at all -- confirmed directly,
-zero hits for `SIGPIPE`/`MSG_NOSIGNAL`/`SO_NOSIGPIPE` anywhere in `src/`
-or `include/`; `main.cpp` registers signal handlers only for `SIGINT`/
-`SIGTERM`. A client connection closing at the wrong moment relative to
-the driver's own next `write()`/`send()` to that same socket can raise
-`SIGPIPE`, whose default disposition kills the *entire process*, not
-just that one connection. Reproduced once, live, during a `parse_*`
-live-verification session (STATUS.md's own dated entry has the full
-citation) -- not reliably reproducible on demand, a genuine timing
-race, but the underlying gap is certain from source alone regardless.
-The standard, low-risk fix is `std::signal(SIGPIPE, SIG_IGN)` alongside
-the existing `SIGINT`/`SIGTERM` registration in `main.cpp`, relying on
-each write call's own error return (`EPIPE`) instead of the signal --
-not attempted yet, flagged here so it is not rediscovered from scratch.
+The driver process used to have no `SIGPIPE` handling at all -- confirmed
+directly, zero hits for `SIGPIPE`/`MSG_NOSIGNAL`/`SO_NOSIGPIPE` anywhere in
+`src/`/`include/`; `main.cpp` registered handlers only for `SIGINT`/
+`SIGTERM`. A client connection closing at the wrong moment relative to the
+driver's own next `write()`/`send()` to that same socket could raise
+`SIGPIPE`, whose default disposition kills the *entire process*, not just
+that one connection. Reproduced once, live, during a `parse_*` live-
+verification session (STATUS.md's own dated entry has the full citation).
+Fixed the same day: `main.cpp` now calls `std::signal(SIGPIPE, SIG_IGN)`
+alongside the existing `SIGINT`/`SIGTERM` registration, matching this
+codebase's own existing `std::signal()` convention rather than introducing
+`sigaction()`. `Connection::send()` (`Connection.cpp`) already tolerated a
+failed `write()` gracefully on its own (`if (n < 0) { if (errno == EINTR)
+continue; break; }`) -- it was only ever the process-wide signal
+disposition that was missing, not anything in the write path itself, so no
+other code needed to change. Deterministically regression-tested (`test/
+test_lexer.cpp`'s own `testSigpipeIsIgnoredSoAWriteAfterThePeerCloses...`:
+closing one end of a connected socketpair and writing to the other is the
+textbook, 100%-reproducible way to raise `SIGPIPE`, no live server or
+timing race needed) and confirmed live: a real driver process survived 50
+forced abrupt (`SO_LINGER`-RST) client disconnects across two separate
+rounds while a second, independent client stayed connected and kept
+receiving normal responses throughout, both via this project's own
+harness-tracked backgrounding, not manual `nohup`/`pkill`.

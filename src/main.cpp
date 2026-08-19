@@ -16,6 +16,25 @@ void handleSignal(int) {
 }
 }
 
+// real production servers all do this; this driver never did. A client
+// connection closing at the wrong moment relative to this process's own
+// next write()/send() to that same socket raises SIGPIPE, whose default
+// disposition terminates the *entire process* -- confirmed live,
+// reproduced once as a background driver instance exiting with code 141
+// (the standard 128+SIGPIPE shell convention) right after a test
+// client's socket closed, see STATUS.md's own dated entry and
+// src/net/instruct.md's own "Known gap" note, both now closed by this
+// fix. Ignoring the signal here is the standard, low-risk fix: every
+// write()/send() that would have raised it instead just returns -1 with
+// errno set to EPIPE, a completely ordinary failed-write return value
+// this codebase's own connection-handling code already has to tolerate
+// regardless (a peer that vanished between the read that detected EOF
+// and this process's own next write to it is not a new failure mode --
+// see Connection.cpp/Server.cpp's own existing handling for a closed
+// connection). No interaction with the existing SIGINT/SIGTERM handling
+// below: SIGPIPE is a distinct signal number, ignoring it changes
+// nothing about how those two are delivered or handled.
+
 int main(int argc, char** argv) {
     // No fallback config path: this used to default to "config/driver.cfg",
     // a path that has never existed anywhere in this repo (found during a
@@ -44,6 +63,7 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
+    std::signal(SIGPIPE, SIG_IGN);
 
     amlp::Config config;
     if (!config.loadFromFile(configPath)) {

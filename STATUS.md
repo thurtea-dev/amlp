@@ -3,6 +3,108 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): item 8 (noun-phrase-to-object resolution
+engine) investigated fresh after the `SIGPIPE` fix -- confirmed
+genuinely too large for this same session, stopped and reported rather
+than forced, real scope broken into 5 sub-pieces for the next session
+(no test-count change, no code changed by this part of the session).**
+
+Picked up directly from this row's own next-slice recommendation. Asked
+explicitly to confirm real scope from source before building anything,
+and to stop and report rather than force it if too large -- re-read
+`load_objects()` and `parse_obj()` directly with fresh eyes (not trusting
+the two-sessions-old scoping note's own summary alone) before deciding.
+Confirmed: unlike `parse_sentence()`'s own STR/WRD/literal subset (this
+row's immediately preceding slice), item 8 has no genuinely smaller
+separable piece inside it -- even the single simplest possible `OBJ`
+match needs the *entire* real chain (a real per-object noun/adjective/
+plural cache, the rest of `interrogate_master()`, environment-based
+object collection, a word-to-objects hash table, and finally `parse_obj()`
+itself, packages/parser.c's own ~220-line word-matcher) working end to
+end before there is anything real for the matching logic to operate on
+at all. None of the five pieces is independently observable via any real
+efun surface the way the sentence tokenizer's own word-splitter turned
+out to almost be for the previous slice.
+
+Broke the confirmed real scope into 5 ordered sub-pieces (see ROADMAP.md
+row 0.13a's own updated "Next slice recommendation" for the full
+citation-backed breakdown, each piece's own real source lines, and a
+recommended internal order) so the next session can start building
+immediately rather than re-deriving this from scratch: (1) the real
+per-object noun/adjective/plural cache (`interrogate_object()`, six real
+applies, plus the `PI_LIVING`/`PI_INV_ACCESSIBLE`/`PI_INV_VISIBLE` flags
+this row's own prior slice already added storage for but left
+unpopulated); (2) the rest of `interrogate_master()` (the `MS_HAS_USERS`/
+`MS_HAS_SPECIALS` halves -- the literals third is already real); (3)
+environment-based object collection (the most tractable piece, since
+`LpcObject::environment()`/`inventory()` already exist and closely match
+real `super()`/`first_inv()`/`next_inv()`); (4) the word-to-objects hash
+table; (5) `parse_obj()` itself, the real word-matching logic (articles,
+"all"/"all of", possessive "my", ordinals, nicknames, adjective chains,
+singular/plural, living/visible modifiers) -- the exact piece
+`ParserPackage.cpp`'s own `parseRule()`/`makeFunction()`/
+`makeErrorMessage()` already have a documented dead-branch insertion
+point waiting for, left there deliberately by the `parse_sentence()`
+slice. Recommended a first sub-slice landing just pieces 1-4 (the
+object-collection-and-cache pipeline, real and complete on its own even
+with `parse_obj()` itself still a documented gap) as a reasonably-sized
+single-session target, the same "half the group, cleanly bounded"
+pattern the `parse_free()`/`parse_refresh()` slice already used
+successfully for item 7 two sessions ago.
+
+**2026-08-18 (continued): the `SIGPIPE` gap flagged last session fixed
+and rigorously verified, both deterministically and live, before
+resuming `parse_*` work (657 tests, up from 656).**
+
+Priority task, ahead of any further parser work: the driver process had
+no `SIGPIPE` handling at all (`src/net/instruct.md`'s own "Known gap"
+note, written the previous session after observing a real, live crash --
+a background driver instance exiting with code 141, the standard
+`128+SIGPIPE` shell convention). Fixed with `std::signal(SIGPIPE,
+SIG_IGN)` in `main.cpp`, right alongside the existing `SIGINT`/`SIGTERM`
+registration -- matching this codebase's own existing `std::signal()`
+convention directly rather than introducing `sigaction()` for just this
+one signal. Confirmed this cannot interact badly with the existing
+`SIGINT`/`SIGTERM` handling: distinct signal numbers, and
+`Connection::send()` (`Connection.cpp`) already tolerated a failed
+`write()` gracefully on its own (`if (n < 0) { if (errno == EINTR)
+continue; break; }`) before this fix ever existed -- the signal itself
+was the only thing standing between a completely ordinary failed-write
+return value and the whole process dying, not a gap in the write path's
+own error handling.
+
+**Added a genuinely deterministic regression test**, not just a live
+check: closing one end of a connected `socketpair()` and then writing to
+the other is the textbook, 100%-reliable way to raise `SIGPIPE` on any
+POSIX system -- no live server, no timing race, unlike the earlier
+process-level crash-claim investigation two sessions before this one,
+which needed a real running scheduler loop and a live client to even
+have a chance of reproducing anything. Since the test binary has its own
+separate `main()` (not `src/main.cpp`'s), it needed its own copy of the
+same `std::signal(SIGPIPE, SIG_IGN)` call to actually exercise anything
+real -- added at the top of `test/test_lexer.cpp`'s own `main()`.
+**Proved the test itself is genuinely meaningful, not just plausible**:
+temporarily commented out that one line, rebuilt, and confirmed the
+whole test binary reliably died with exit code 141 partway through the
+suite, right at the new test's own write call -- restored immediately
+after confirming this, then reconfirmed a clean run with the real fix
+back in place. 657 tests passing, up from 656, zero regressions.
+
+**Verified live against the real running driver**, same harness-tracked
+`run_in_background`/`TaskStop` methodology already established for this
+row's own prior live-verification sessions (never manual `nohup`/
+`pkill`): a real driver instance survived two separate rounds of 50
+total forced-abrupt client disconnects (`SO_LINGER` set for a hard RST
+rather than a graceful FIN, deliberately reproducing the unread-buffered-
+data-at-close condition that raises `SIGPIPE` on the peer's own next
+write) while a second, independent client stayed connected throughout
+and kept receiving normal `who` responses on every tick, confirmed via
+60+ seconds of active `ps`-polling after each round (never idle, matching
+the same discipline the earlier crash-claim correction established).
+Ordinary gameplay (`eval return 6*7;`) confirmed still working afterward.
+`src/net/instruct.md`'s own "Known gap" note updated to record the fix,
+not just the finding.
+
 **2026-08-18 (continued): `parse_sentence()` implemented, `parse_*` (row
 0.13a) slice four -- restricted to STR/WRD/literal-only rules, confirmed
 from source to be a genuine subset of real behavior rather than a
