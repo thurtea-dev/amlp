@@ -182,11 +182,30 @@ AstPtr Parser::parsePrimary() {
         advance(); // [
         auto lit = std::make_unique<MappingLiteralExpr>();
         if (!checkText("]")) {
+            int expectedWidth = -1;
             for (;;) {
                 AstPtr key = parseExpr();
                 expectText(":", "mapping literal entry");
-                AstPtr value = parseExpr();
-                lit->entries.emplace_back(std::move(key), std::move(value));
+                std::vector<AstPtr> values;
+                values.push_back(parseExpr());
+                // LDMud N-column mapping literal: same-key values
+                // separated by ';' (real m_expr_values, prolang.y:17257).
+                // FluffOS has no width concept (DGD neither -- assoc_exp
+                // is a strict single key-value pair), so extra values
+                // stay a parse error there.
+                if (dialect_ == LpcDialect::LdMud) {
+                    while (checkText(";")) {
+                        advance();
+                        values.push_back(parseExpr());
+                    }
+                }
+                int thisWidth = static_cast<int>(values.size());
+                if (expectedWidth < 0) expectedWidth = thisWidth;
+                else if (thisWidth != expectedWidth) {
+                    // real prolang.y:17246, exact message.
+                    throw LpcRuntimeError("Inconsistent number of values in mapping literal");
+                }
+                lit->entries.emplace_back(std::move(key), std::move(values));
                 if (checkText(",")) {
                     advance();
                     // Trailing comma before the closing "]" -- same real
@@ -626,8 +645,16 @@ AstPtr Parser::parsePostfix() {
             }
             AstPtr startExpr = parseExpr();
             AstPtr endExpr = nullptr;
+            AstPtr mapColumn = nullptr;
             bool endFromEnd = false;
-            if (checkText("..")) {
+            if (checkText(",") && dialect_ == LpcDialect::LdMud) {
+                // real index_map_expr: '[' expr0 ',' expr0 ']'
+                // (prolang.y:17007, F_MAP_INDEX). Reverse-from-end
+                // column (`map[key, <n]`) and mapping range
+                // (`map[key, n1..n2]`) stay unimplemented this slice.
+                advance();
+                mapColumn = parseExpr();
+            } else if (checkText("..")) {
                 advance();
                 if (checkText("]")) {
                     // Open-ended range ("arr[start..]", real LPC for
@@ -656,6 +683,7 @@ AstPtr Parser::parsePostfix() {
             idx->rangeEnd = std::move(endExpr);
             idx->indexFromEnd = startFromEnd;
             idx->rangeEndFromEnd = endFromEnd;
+            idx->mapColumn = std::move(mapColumn);
             expr = std::move(idx);
             continue;
         }
@@ -911,6 +939,7 @@ AstPtr Parser::parseUnary() {
             auto assign = std::make_unique<IndexAssignExpr>();
             assign->target = std::move(idx->target);
             assign->index = std::move(idx->index);
+            assign->mapColumn = std::move(idx->mapColumn);
             assign->value = std::move(value);
             assign->isCompound = isCompound;
             assign->compoundOp = compoundOp;
@@ -1463,6 +1492,7 @@ AstPtr Parser::parseStatement() {
                 auto stmt = std::make_unique<IndexAssignStmt>();
                 stmt->target = std::move(idx->target);
                 stmt->index = std::move(idx->index);
+                stmt->mapColumn = std::move(idx->mapColumn);
                 stmt->value = parseExpr();
                 stmt->isCompound = isCompound;
                 stmt->compoundOp = compoundOp;

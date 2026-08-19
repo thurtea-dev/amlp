@@ -3,6 +3,89 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (a further fresh session, same day): env-override test
+confirmed, nicks remaining-work recorded, parse_* false-pass audit
+found none, then row 1.9's first real N-column mapping-width slice
+(682 tests, up from 678).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules). The previous session had added
+`testParseSentenceExplicitEnvArrayOverridesTheOrdinaryEnvironmentWalk`
+but cut off before the suite was confirmed. That test is wired in
+`main()` next to the other parse tests, compiles, and passes. Both
+runners (`ctest --test-dir build --output-on-failure` and
+`./build/test/amlp_tests`) are the confirmation path used below.
+
+**Housekeeping (a), env/nicks:** the env half is closed. Confirmed from
+source, not just the new test: `EfunTable.cpp` passes `args[2]` into
+`ParserPackage::parseSentence()`, which stores it on
+`SentenceSession::envArray`, and `loadObjects()` already walks
+`getObjectsFromArray`/`addObjectsFromArray` when `envArray` is set.
+The nicks half is not `add_action` nicknames. Remaining work is
+`parse_sentence()`'s own 4th argument, a mapping of nickname word to
+object. Real `f_parse_sentence()` (`packages/parser.c:3046-3050`)
+stores `parse_nicks` then `parse_env`. Real `add_nicknames()`
+(`parser.c:1095-1108`) marks hash entries `HV_NICKNAME` for string
+keys. Real `load_objects()` calls it at `parser.c:1162-1163` after
+the `"my"` adjective. Real `expand_node()` (`parser.c:1302-1323`)
+lazy-looks up and only sets `HV_NOUN` if the object is already in
+`loaded_objects`. Real `parse_obj()` calls `expand_node()` at
+`parser.c:1402-1403` when `HV_NICKNAME` is set. This port:
+`HashEntry::isNickname` exists but is never set; `parseObj()` has no
+`expand_node` path; `EfunTable.cpp` still does not pass a 4th arg.
+Not trivial, not implemented. Concrete remaining-work note recorded
+in `ROADMAP.md` row 0.13a.
+
+**Housekeeping (b), bounded false-pass audit:** the interrupt point
+around `test_lexer.cpp:4778` is regexp tests, not parse_*. The
+parse_* tests live at about 18143-20321. Known false-pass cases from
+prior sessions (the two-object skip test; the plural-side skip test)
+were already rewritten. Bounded pass of the parse_* tests from that
+work: no new "asserting success without a fixture that could actually
+fail the assertion meaningfully" instances found. No test fixes
+required for this item.
+
+**Re-rank:** re-checked corpus evidence for row 1.9 (LDMud mapping
+N-width), row 1.7/1.8 (LDMud closure kinds), and row 1.4/1.16
+(connect/disconnect). Row 1.7/1.8 still has `unbound_lambda` at 4
+hits in `secure/master/hooks.c`, `lambda`/`bind_lambda` at 0, remaining
+`#'` forms at 0 real hits. Row 1.4/1.16: FluffOS `net_dead()` is
+already used; LDMud `void disconnect(object, string)` still 0;
+`Server.cpp` already hardcodes `connect`/`net_dead`. Row 1.9's prior
+"zero width usage" claim was wrong: `temp/core-lib/areas/tol-dhurath/objects/rune-wall.c`
+has a real width-2 literal, `m_values(wall, 1)`, and
+`wall[whichRune, 0]` / `wall[whichRune, 1]` assigns. Highest impact.
+Picked.
+
+**First N-column slice:** enough for rune-wall.c. Real source followed:
+literal `prolang.y:17232-17259` (exact `"Inconsistent number of values
+in mapping literal"`); index `prolang.y:17007` `F_MAP_INDEX` and
+`interpret.c:6862-6938` `push_map_index_value`; `m_values`
+`mapping.c:3159-3211` (C errors on out-of-range, man page fallback
+does not match, C is authoritative); missing-key column read returns
+int 0; missing-key assign auto-inserts after column range-check.
+`Mapping` gained `width`/`extraColumns`. Parser is LDMud-only for `;`
+extra values and `map[key, n]`. Copy/delete/filter/map_mapping/reclaim
+paths that would have dropped extra columns were updated rather than
+left silently wrong. Still open: `([:width])`, `m_allocate`/`m_entry`/
+`m_reallocate`/`m_add`/`m_contains`, mapping range index, save/restore
+of extra columns, IncDec on `map[key, n]`. 4 new regression tests
+plus the existing width-1 `m_values` rejection now asserts the real
+illegal-index message.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4122, `dialect: ldmud`, a
+plain TCP client, real `eval` calls):
+`mapping m = (["weakness": "<missing>"; 1]); return ({ m["weakness"],
+m["weakness", 0], m["weakness", 1], m_values(m, 1) });` returned
+`({ "<missing>", "<missing>", 1, ({ 1 }) })`; a missing-key column-1
+read returned int 0. Driver stayed healthy afterward (`eval return
+6*7;` -> 42, `who`). Live `tmp_eval_file.c` removed before stopping
+the scratch process, leaving the bundled mudlib tree as found.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (a further fresh session, same day): `parse_*` (row 0.13a)
 ninth real slice -- item 9's plural side (`"give OBS to LIV"` and the
 mirror `"give LIV OBS"` shape), landed with zero new production logic

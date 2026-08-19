@@ -1629,18 +1629,47 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     auto leftMap = std::get<std::shared_ptr<Mapping>>(lhs.data);
                     auto rightMap = std::get<std::shared_ptr<Mapping>>(rhs.data);
                     auto result = std::make_shared<Mapping>();
-                    if (leftMap) result->entries = leftMap->entries;
+                    int leftW = leftMap ? leftMap->width : 1;
+                    int rightW = rightMap ? rightMap->width : 1;
+                    if (leftMap && rightMap && leftW != rightW) {
+                        // real doc/LPC/mappings: "Joining mappings is only
+                        // possible, if they have the same width"
+                        throw LpcRuntimeError("Add: mappings of different width");
+                    }
+                    if (leftMap) {
+                        result->entries = leftMap->entries;
+                        result->width = leftMap->width;
+                        result->extraColumns = leftMap->extraColumns;
+                    } else {
+                        result->width = rightW;
+                    }
                     if (rightMap) {
-                        for (const auto& entry : rightMap->entries) {
+                        for (size_t ri = 0; ri < rightMap->entries.size(); ++ri) {
+                            const auto& entry = rightMap->entries[ri];
                             bool replaced = false;
-                            for (auto& existing : result->entries) {
-                                if (valuesEqual(existing.first, entry.first)) {
-                                    existing.second = entry.second;
+                            for (size_t li = 0; li < result->entries.size(); ++li) {
+                                if (valuesEqual(result->entries[li].first, entry.first)) {
+                                    result->entries[li].second = entry.second;
+                                    if (!result->extraColumns.empty()) {
+                                        result->extraColumns[li] = rightMap->extraColumns.empty()
+                                            ? std::vector<Value>(static_cast<size_t>(result->width - 1))
+                                            : rightMap->extraColumns[ri];
+                                    }
                                     replaced = true;
                                     break;
                                 }
                             }
-                            if (!replaced) result->entries.push_back(entry);
+                            if (!replaced) {
+                                result->entries.push_back(entry);
+                                if (result->width > 1) {
+                                    if (!rightMap->extraColumns.empty()) {
+                                        result->extraColumns.push_back(rightMap->extraColumns[ri]);
+                                    } else {
+                                        result->extraColumns.emplace_back(
+                                            static_cast<size_t>(result->width - 1));
+                                    }
+                                }
+                            }
                         }
                     }
                     localStack.emplace_back(Value(result));
@@ -1669,17 +1698,26 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
 
             case OpCode::MakeMapping: {
                 int entryCount = instr.argCount;
+                int width = instr.operand;
+                if (width < 1) width = 1;
+                size_t stride = static_cast<size_t>(width) + 1; // key + values
                 if (entryCount < 0 ||
-                    static_cast<size_t>(entryCount) * 2 > localStack.size()) {
+                    stride * static_cast<size_t>(entryCount) > localStack.size()) {
                     throw LpcRuntimeError("MakeMapping: bad arg count");
                 }
-                size_t total = static_cast<size_t>(entryCount) * 2;
+                size_t total = stride * static_cast<size_t>(entryCount);
                 size_t base = localStack.size() - total;
                 auto map = std::make_shared<Mapping>();
+                map->width = width;
                 for (int i = 0; i < entryCount; ++i) {
-                    Value key = localStack[base + static_cast<size_t>(i) * 2];
-                    Value value = localStack[base + static_cast<size_t>(i) * 2 + 1];
-                    map->entries.emplace_back(std::move(key), std::move(value));
+                    size_t off = base + static_cast<size_t>(i) * stride;
+                    Value key = localStack[off];
+                    std::vector<Value> values;
+                    values.reserve(static_cast<size_t>(width));
+                    for (int c = 0; c < width; ++c) {
+                        values.push_back(localStack[off + 1 + static_cast<size_t>(c)]);
+                    }
+                    map->appendEntry(std::move(key), std::move(values));
                 }
                 localStack.erase(localStack.end() - static_cast<long>(total), localStack.end());
                 localStack.emplace_back(Value(map));
@@ -1688,14 +1726,21 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
             }
 
             case OpCode::Index: {
-                if (localStack.size() < 2) {
+                bool hasMapColumn = (instr.argCount & 0x4) != 0;
+                size_t needed = hasMapColumn ? 3 : 2;
+                if (localStack.size() < needed) {
                     throw LpcRuntimeError("Index: stack underflow");
+                }
+                Value mapColumnVal;
+                if (hasMapColumn) {
+                    mapColumnVal = localStack.back(); localStack.pop_back();
                 }
                 Value indexVal = localStack.back(); localStack.pop_back();
                 Value targetVal = localStack.back(); localStack.pop_back();
                 // See CodeGen.cpp's own comment: argCount is repurposed
                 // as a "from the end" flags bitmask for this opcode,
-                // bit 0 for the single index here.
+                // bit 0 for the single index here. Bit 2 is the LDMud
+                // mapping-column flag (map[key, n]).
                 bool indexFromEnd = (instr.argCount & 0x1) != 0;
 
                 if (auto* arr = std::get_if<std::shared_ptr<Array>>(&targetVal.data)) {
@@ -1721,15 +1766,44 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                     }
                     bool hit = false;
                     Value found;
-                    for (auto& entry : (*map)->entries) {
-                        if (valuesEqual(entry.first, indexVal)) {
-                            coerceIfDestructed(entry.second);
-                            found = entry.second;
+                    size_t hitIdx = 0;
+                    for (size_t i = 0; i < (*map)->entries.size(); ++i) {
+                        if (valuesEqual((*map)->entries[i].first, indexVal)) {
                             hit = true;
+                            hitIdx = i;
                             break;
                         }
                     }
-                    localStack.push_back(hit ? found : Value{});
+                    int col = 0;
+                    if (hasMapColumn) {
+                        // real push_map_index_value(), interpret.c:6884-6900:
+                        // column out of range errors even before the key
+                        // lookup; a missing key then returns 0 (const0),
+                        // including for col > 0 -- a real doc-vs-code
+                        // divergence (doc/LPC/mappings claimed n>0 on a
+                        // missing key errors; the C does not).
+                        if (!std::holds_alternative<int64_t>(mapColumnVal.data)) {
+                            throw LpcRuntimeError("Illegal sub-index type, expected number.");
+                        }
+                        col = static_cast<int>(std::get<int64_t>(mapColumnVal.data));
+                        if (col < 0 || col >= (*map)->width) {
+                            throw LpcRuntimeError(
+                                "Illegal sub-index " + std::to_string(col) +
+                                ", mapping width is " + std::to_string((*map)->width) + ".");
+                        }
+                    }
+                    if (hit) {
+                        found = (*map)->getColumn(hitIdx, col);
+                        coerceIfDestructed(found);
+                        localStack.push_back(found);
+                    } else if (hasMapColumn) {
+                        // real put_number(sp, 0) -- a genuine int 0, not
+                        // this driver's monostate missing-key sentinel
+                        // used by ordinary map[key].
+                        localStack.push_back(Value(int64_t{0}));
+                    } else {
+                        localStack.push_back(Value{});
+                    }
                 } else if (auto* str = std::get_if<std::string>(&targetVal.data)) {
                     if (!std::holds_alternative<int64_t>(indexVal.data)) {
                         throw LpcRuntimeError("Index: string index must be an integer");
@@ -1749,10 +1823,16 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
             }
 
             case OpCode::IndexAssign: {
-                if (localStack.size() < 3) {
+                bool hasMapColumn = (instr.argCount & 0x4) != 0;
+                size_t needed = hasMapColumn ? 4 : 3;
+                if (localStack.size() < needed) {
                     throw LpcRuntimeError("IndexAssign: stack underflow");
                 }
                 Value value = localStack.back(); localStack.pop_back();
+                Value mapColumnVal;
+                if (hasMapColumn) {
+                    mapColumnVal = localStack.back(); localStack.pop_back();
+                }
                 Value indexVal = localStack.back(); localStack.pop_back();
                 Value targetVal = localStack.back(); localStack.pop_back();
 
@@ -1773,15 +1853,38 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
                         throw LpcRuntimeError("IndexAssign: target mapping is null");
                     }
                     bool found = false;
-                    for (auto& entry : (*map)->entries) {
-                        if (valuesEqual(entry.first, indexVal)) {
-                            entry.second = value;
+                    size_t foundIdx = 0;
+                    for (size_t i = 0; i < (*map)->entries.size(); ++i) {
+                        if (valuesEqual((*map)->entries[i].first, indexVal)) {
                             found = true;
+                            foundIdx = i;
                             break;
                         }
                     }
-                    if (!found) {
-                        (*map)->entries.emplace_back(indexVal, value);
+                    int col = 0;
+                    if (hasMapColumn) {
+                        if (!std::holds_alternative<int64_t>(mapColumnVal.data)) {
+                            throw LpcRuntimeError("Illegal sub-index type, expected number.");
+                        }
+                        col = static_cast<int>(std::get<int64_t>(mapColumnVal.data));
+                        if (col < 0 || col >= (*map)->width) {
+                            throw LpcRuntimeError(
+                                "Illegal sub-index " + std::to_string(col) +
+                                ", mapping width is " + std::to_string((*map)->width) + ".");
+                        }
+                    }
+                    if (found) {
+                        (*map)->setColumn(foundIdx, col, value);
+                    } else {
+                        // real get_map_lvalue creates a new entry (docs:
+                        // missing key with n==0 auto-inserts; the C
+                        // assign_mapentry_lvalue path also creates for
+                        // n>0 once the column has already been range-
+                        // checked against width). Extra columns default
+                        // to 0.
+                        std::vector<Value> values(static_cast<size_t>((*map)->width), Value(int64_t{0}));
+                        values[static_cast<size_t>(col)] = value;
+                        (*map)->appendEntry(indexVal, std::move(values));
                     }
                 } else {
                     throw LpcRuntimeError("IndexAssign: target is not an array or mapping");

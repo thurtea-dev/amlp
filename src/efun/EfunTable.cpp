@@ -958,12 +958,17 @@ int reclaimSweepValue(Value& v, int depth) {
             for (size_t i = 0; i < entries.size();) {
                 auto* keyOb = std::get_if<std::shared_ptr<LpcObject>>(&entries[i].first.data);
                 if (keyOb && *keyOb && (*keyOb)->isDestructed()) {
-                    entries.erase(entries.begin() + static_cast<long>(i));
+                    (*mapPtr)->eraseAt(i);
                     ++cleaned;
                     continue;
                 }
                 cleaned += reclaimSweepValue(entries[i].first, depth + 1);
                 cleaned += reclaimSweepValue(entries[i].second, depth + 1);
+                if (!(*mapPtr)->extraColumns.empty()) {
+                    for (auto& extra : (*mapPtr)->extraColumns[i]) {
+                        cleaned += reclaimSweepValue(extra, depth + 1);
+                    }
+                }
                 ++i;
             }
         }
@@ -1746,20 +1751,16 @@ void registerCoreEfuns() {
     // "keys" efun, grepped `temp/reference/fluffos-2.9-ds2.08` for
     // "m_indices"/"m_values" too, zero hits either direction: FluffOS has
     // no LDMud-style m_-prefixed mapping efuns at all, LDMud has no plain
-    // keys()/values(). Picked over the rest of row 1.9's own remaining
-    // scope (real N-column value semantics, `m_allocate`/`m_entry`/
-    // `m_reallocate`/`m_add`/`m_contains`, the `([ k: v1; v2 ])`/`([: N
-    // ])` literal syntaxes) by the same real corpus-frequency method row
-    // 0.13's efun gaps and this session's own `#'` closure work both
-    // used: `m_indices` alone has 544 real call sites in `temp/core-lib`
+    // keys()/values(). The first N-column slice (width-2 literals,
+    // map[key, n], m_values(map, col) against a real matching width) is
+    // now also real; remaining row 1.9 scope is `m_allocate`/`m_entry`/
+    // `m_reallocate`/`m_add`/`m_contains`, `([: N ])`, and mapping range
+    // index. `m_indices` alone has 544 real call sites in `temp/core-lib`
     // (the one confirmed genuinely LDMud-targeting corpus this repo has),
-    // `m_values` has 17 -- neither implemented under any name before this
-    // slice, a real, immediately-fixable compatibility gap distinct from
-    // the harder N-column rework the rest of row 1.9 still needs. No
-    // dialect gate on *availability* here, matching this table's own
-    // already-established convention (see `unshadow()`'s own comment on
-    // this exact point) -- registered unconditionally like every other
-    // efun, not withheld under `dialect: fluffos`/`dgd`.
+    // `m_values` has 17. No dialect gate on *availability* here, matching
+    // this table's own already-established convention (see `unshadow()`'s
+    // own comment on this exact point) -- registered unconditionally like
+    // every other efun, not withheld under `dialect: fluffos`/`dgd`.
     t.registerEfun("m_indices", [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data)) {
             throw LpcRuntimeError("m_indices: expected a mapping argument");
@@ -1776,38 +1777,37 @@ void registerCoreEfuns() {
 
     // mixed *m_values(mapping, int width_col default: 0) -- real LDMud
     // signature (func_spec:481: "mixed *m_values(mapping, int default:
-    // F_CONST0);"), confirmed real corpus usage is overwhelmingly the
-    // bare one-argument form (15 of 17 real `m_values(...)` call sites in
-    // `temp/core-lib`, the other 2 both `m_values(wall, 1)` at the same
-    // two call sites in one file, `rune-wall.c`) -- this driver's own
-    // `Mapping` (`std::vector<pair<Value, Value>>`) has exactly one value
-    // column, matching real column 0 (the default) exactly, so the
-    // overwhelming majority of real usage is already fully, correctly
-    // served without any width rework at all. A genuine, non-zero width
-    // argument is honestly rejected rather than silently ignored (which
-    // would return column 0's values while the caller asked for a
-    // different column and never find out) -- real N-column support is
-    // row 1.9's own still-open remaining scope, not faked here.
+    // F_CONST0);"). Column 0 is the ordinary single-value mapping; a
+    // non-zero column is real as of row 1.9's first width slice, against
+    // mappings whose own width actually has that column (real
+    // f_m_values() mapping.c:3188-3190 errors if the column is out of
+    // range -- the man page's "else the values of the first column"
+    // fallback does not match the C; the C is authoritative). Confirmed
+    // real call sites: 15 of 17 in temp/core-lib are the bare /
+    // explicit-0 form; the other 2 are both m_values(wall, 1) in
+    // rune-wall.c against a real width-2 mapping literal.
     t.registerEfun("m_values", [](VM&, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::shared_ptr<Mapping>>(args[0].data)) {
             throw LpcRuntimeError("m_values: expected a mapping argument");
         }
+        int64_t col = 0;
         if (args.size() > 1) {
             if (!std::holds_alternative<int64_t>(args[1].data)) {
                 throw LpcRuntimeError("m_values: width column argument must be an int");
             }
-            int64_t col = std::get<int64_t>(args[1].data);
-            if (col != 0) {
-                throw LpcRuntimeError(
-                    "m_values: this driver's mappings do not support width > 1 yet "
-                    "(ROADMAP.md row 1.9, still open) -- only column 0 (the default) is available");
-            }
+            col = std::get<int64_t>(args[1].data);
         }
         auto map = std::get<std::shared_ptr<Mapping>>(args[0].data);
+        int width = map ? map->width : 1;
+        if (col < 0 || col >= width) {
+            throw LpcRuntimeError(
+                "Illegal index " + std::to_string(col) +
+                " to m_values(): should be in 0.." + std::to_string(width - 1) + ".");
+        }
         auto result = std::make_shared<Array>();
         if (map) {
-            for (const auto& entry : map->entries) {
-                result->items.push_back(entry.second);
+            for (size_t i = 0; i < map->entries.size(); ++i) {
+                result->items.push_back(map->getColumn(i, static_cast<int>(col)));
             }
         }
         return Value(result);
@@ -1845,13 +1845,10 @@ void registerCoreEfuns() {
         auto map = std::get<std::shared_ptr<Mapping>>(args[0].data);
         if (map) {
             const Value& key = args[1];
-            auto& entries = map->entries;
-            entries.erase(
-                std::remove_if(entries.begin(), entries.end(),
-                    [&key](const std::pair<Value, Value>& entry) {
-                        return valuesEqual(entry.first, key);
-                    }),
-                entries.end());
+            for (size_t i = 0; i < map->entries.size();) {
+                if (valuesEqual(map->entries[i].first, key)) map->eraseAt(i);
+                else ++i;
+            }
         }
         return Value{};
     };
@@ -5473,7 +5470,11 @@ void registerCoreEfuns() {
         }
         if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&args[0].data)) {
             auto result = std::make_shared<Mapping>();
-            if (*map) result->entries = (*map)->entries;
+            if (*map) {
+                result->entries = (*map)->entries;
+                result->width = (*map)->width;
+                result->extraColumns = (*map)->extraColumns;
+            }
             return Value(result);
         }
         return args[0];
@@ -8459,6 +8460,8 @@ void registerCoreEfuns() {
         auto result = std::make_shared<Mapping>();
         if (!m) return Value(result);
         result->entries = m->entries;
+        result->width = m->width;
+        result->extraColumns = m->extraColumns;
 
         if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
             if (!*closurePtr) return Value(result);
@@ -8516,11 +8519,13 @@ void registerCoreEfuns() {
         auto m = std::get<std::shared_ptr<Mapping>>(args[0].data);
         auto result = std::make_shared<Mapping>();
         if (!m) return Value(result);
+        result->width = m->width;
 
         if (auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[1].data)) {
             if (!*closurePtr) return Value(result);
             std::vector<Value> extra(args.begin() + 2, args.end());
-            for (auto& entry : m->entries) {
+            for (size_t i = 0; i < m->entries.size(); ++i) {
+                auto& entry = m->entries[i];
                 std::vector<Value> callArgs;
                 callArgs.reserve(2 + extra.size());
                 callArgs.push_back(entry.first);
@@ -8528,6 +8533,7 @@ void registerCoreEfuns() {
                 callArgs.insert(callArgs.end(), extra.begin(), extra.end());
                 if (isTruthy(vm.callClosure(*closurePtr, std::move(callArgs)))) {
                     result->entries.push_back(entry);
+                    if (!m->extraColumns.empty()) result->extraColumns.push_back(m->extraColumns[i]);
                 }
             }
             return Value(result);
@@ -8542,7 +8548,8 @@ void registerCoreEfuns() {
         const std::string& funcName = std::get<std::string>(args[1].data);
         auto target = std::get<std::shared_ptr<LpcObject>>(args[2].data);
         std::vector<Value> extra(args.begin() + 3, args.end());
-        for (auto& entry : m->entries) {
+        for (size_t i = 0; i < m->entries.size(); ++i) {
+            auto& entry = m->entries[i];
             std::vector<Value> callArgs;
             callArgs.reserve(2 + extra.size());
             callArgs.push_back(entry.first);
@@ -8554,6 +8561,7 @@ void registerCoreEfuns() {
             // map_array's own comment above.
             if (isTruthy(vm.callFunction(target, funcName, std::move(callArgs), Origin::Efun))) {
                 result->entries.push_back(entry);
+                if (!m->extraColumns.empty()) result->extraColumns.push_back(m->extraColumns[i]);
             }
         }
         return Value(result);

@@ -361,12 +361,19 @@ void CodeGen::emitExpr(const AstNode& expr) {
         return;
     }
     if (auto* mapLit = dynamic_cast<const MappingLiteralExpr*>(&expr)) {
+        int width = 1;
+        if (!mapLit->entries.empty()) {
+            width = static_cast<int>(mapLit->entries[0].second.size());
+            if (width < 1) width = 1;
+        }
         for (const auto& entry : mapLit->entries) {
             emitExpr(*entry.first);
-            emitExpr(*entry.second);
+            for (const auto& val : entry.second) {
+                emitExpr(*val);
+            }
         }
         out_->code.push_back(
-            Instruction{OpCode::MakeMapping, 0, static_cast<int32_t>(mapLit->entries.size())});
+            Instruction{OpCode::MakeMapping, width, static_cast<int32_t>(mapLit->entries.size())});
         return;
     }
     if (auto* tern = dynamic_cast<const TernaryExpr*>(&expr)) {
@@ -386,13 +393,18 @@ void CodeGen::emitExpr(const AstNode& expr) {
         // end" flags bitmask instead: bit 0 = the start/single index,
         // bit 1 = the range end -- see Ast.hpp's IndexExpr comment and
         // VM.cpp's own handling of these two opcodes for where the
-        // flags are actually consumed.
+        // flags are actually consumed. Bit 2 = LDMud mapping column
+        // (map[key, n]): an extra int is pushed after the key.
         int32_t flags = (idx->indexFromEnd ? 0x1 : 0);
         if (idx->rangeEnd) {
             emitExpr(*idx->rangeEnd);
             flags |= (idx->rangeEndFromEnd ? 0x2 : 0);
             out_->code.push_back(Instruction{OpCode::RangeIndex, 0, flags});
         } else {
+            if (idx->mapColumn) {
+                emitExpr(*idx->mapColumn);
+                flags |= 0x4;
+            }
             out_->code.push_back(Instruction{OpCode::Index, 0, flags});
         }
         return;
@@ -565,12 +577,15 @@ void CodeGen::emitAssignStmt(const AssignStmt& stmt) {
 // currentValue]; then the rhs and combine op leave [T, I, newValue],
 // exactly IndexAssign's expected layout.
 void CodeGen::emitIndexAssignStmt(const IndexAssignStmt& stmt) {
+    int32_t flags = stmt.mapColumn ? 0x4 : 0;
     if (stmt.isCompound) {
         emitExpr(*stmt.target);
         emitExpr(*stmt.index);
+        if (stmt.mapColumn) emitExpr(*stmt.mapColumn);
         emitExpr(*stmt.target);
         emitExpr(*stmt.index);
-        out_->code.push_back(Instruction{OpCode::Index, 0, 0});
+        if (stmt.mapColumn) emitExpr(*stmt.mapColumn);
+        out_->code.push_back(Instruction{OpCode::Index, 0, flags});
         emitExpr(*stmt.value);
         OpCode combineOp;
         switch (stmt.compoundOp) {
@@ -582,14 +597,15 @@ void CodeGen::emitIndexAssignStmt(const IndexAssignStmt& stmt) {
             default: throw LpcRuntimeError("codegen: unsupported compound assignment operator");
         }
         out_->code.push_back(Instruction{combineOp, 0, 0});
-        out_->code.push_back(Instruction{OpCode::IndexAssign, 0, 0});
+        out_->code.push_back(Instruction{OpCode::IndexAssign, 0, flags});
         return;
     }
 
     emitExpr(*stmt.target);
     emitExpr(*stmt.index);
+    if (stmt.mapColumn) emitExpr(*stmt.mapColumn);
     emitExpr(*stmt.value);
-    out_->code.push_back(Instruction{OpCode::IndexAssign, 0, 0});
+    out_->code.push_back(Instruction{OpCode::IndexAssign, 0, flags});
 }
 
 // The expression-producing counterpart above (see Ast.hpp's
@@ -611,7 +627,9 @@ void CodeGen::emitIndexAssignExpr(const IndexAssignExpr& assign) {
     if (assign.isCompound) {
         emitExpr(*assign.target);
         emitExpr(*assign.index);
-        out_->code.push_back(Instruction{OpCode::Index, 0, 0});
+        int32_t flags = assign.mapColumn ? 0x4 : 0;
+        if (assign.mapColumn) emitExpr(*assign.mapColumn);
+        out_->code.push_back(Instruction{OpCode::Index, 0, flags});
         emitExpr(*assign.value);
         OpCode combineOp;
         switch (assign.compoundOp) {
@@ -630,8 +648,10 @@ void CodeGen::emitIndexAssignExpr(const IndexAssignExpr& assign) {
 
     emitExpr(*assign.target);
     emitExpr(*assign.index);
+    int32_t flags = assign.mapColumn ? 0x4 : 0;
+    if (assign.mapColumn) emitExpr(*assign.mapColumn);
     out_->code.push_back(Instruction{OpCode::PushLocal, tempSlot, 0});
-    out_->code.push_back(Instruction{OpCode::IndexAssign, 0, 0});
+    out_->code.push_back(Instruction{OpCode::IndexAssign, 0, flags});
 
     out_->code.push_back(Instruction{OpCode::PushLocal, tempSlot, 0});
 }

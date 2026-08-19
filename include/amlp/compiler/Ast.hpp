@@ -297,7 +297,12 @@ struct ArrayLiteralExpr : AstNode {
 };
 
 struct MappingLiteralExpr : AstNode {
-    std::vector<std::pair<AstPtr, AstPtr>> entries;
+    // values.size() is the mapping width; every entry has the same count
+    // (Parser rejects "Inconsistent number of values in mapping literal",
+    // real prolang.y:17246). Width 1 (a single value after ':') is the
+    // ordinary FluffOS/LDMud shape; width > 1 is LDMud-only
+    // ("key: v0; v1; ...", ROADMAP.md row 1.9).
+    std::vector<std::pair<AstPtr, std::vector<AstPtr>>> entries;
 };
 
 // "<N" inside an index/range bound means "N from the end", real LPC's
@@ -315,6 +320,11 @@ struct IndexExpr : AstNode {
     AstPtr rangeEnd = nullptr; // non-null means range index, e.g. str[start..end]
     bool indexFromEnd = false;
     bool rangeEndFromEnd = false;
+    // LDMud mapping column index, map[key, n] (real index_map_expr,
+    // prolang.y:17007, F_MAP_INDEX). Null for ordinary map[key] /
+    // arr[i] / str[i]. Range form map[key, n1..n2] is not represented
+    // here (still row 1.9 remaining scope).
+    AstPtr mapColumn;
 };
 
 // isCompound/compoundOp mirror AssignExpr's own fields: "target[index]
@@ -333,6 +343,7 @@ struct IndexAssignStmt : AstNode {
     AstPtr value;
     bool isCompound = false;
     BinOp compoundOp = BinOp::Add;
+    AstPtr mapColumn; // LDMud map[key, n] = value, same as IndexExpr
 };
 
 // The expression-producing counterpart to IndexAssignStmt above, needed
@@ -354,6 +365,7 @@ struct IndexAssignExpr : AstNode {
     AstPtr value;
     bool isCompound = false;
     BinOp compoundOp = BinOp::Add;
+    AstPtr mapColumn; // LDMud map[key, n] = value, same as IndexExpr
 };
 
 struct Block : AstNode {

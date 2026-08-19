@@ -17615,13 +17615,12 @@ static void testMValuesBareFormReturnsColumnZeroValues() {
 static void testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth() {
     // Real corpus evidence (see EfunTable.cpp's own comment): the
     // overwhelming majority of real m_values() call sites are the bare
-    // one-argument form, matching this driver's own single-column
-    // Mapping exactly -- confirmed here to also accept an *explicit*
-    // "0" for the same result (real func_spec.c's own default), and to
-    // honestly reject any other column instead of silently returning
-    // column 0's values for a column the caller never actually asked
-    // for -- real N-column support stays row 1.9's own open scope, not
-    // faked here.
+    // one-argument form. An explicit 0 is the same column (real
+    // func_spec.c's own default). A non-zero column against a width-1
+    // mapping is still an error, now using real f_m_values()'s own
+    // out-of-range message (mapping.c:3188-3190) rather than a
+    // placeholder "not implemented" string. Width-2 maps that actually
+    // have column 1 are covered by the tests immediately below.
     std::string src =
         "mixed *probeExplicitZero() {\n"
         "    mapping m = ([\"a\": 1, \"b\": 2]);\n"
@@ -17646,12 +17645,179 @@ static void testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth() {
     bool threw = false;
     try {
         vm.callFunction(obj, "probeNonZero", {});
-    } catch (const amlp::LpcRuntimeError&) {
+    } catch (const amlp::LpcRuntimeError& e) {
         threw = true;
+        // VM::run() prefixes uncaught errors with filename::fn():
+        assert(std::string(e.what()).find(
+            "Illegal index 1 to m_values(): should be in 0..0.") != std::string::npos);
     }
     assert(threw);
 
     std::cout << "testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth OK\n";
+}
+
+// ROADMAP.md row 1.9's first real N-column slice: width-2 mapping
+// literals, map[key, n] index/assign, and m_values(map, 1), enough for
+// temp/core-lib/areas/tol-dhurath/objects/rune-wall.c. Routed through
+// ObjectVarHarness("dialect: ldmud\n") because compileProgramObject()
+// defaults the Parser to FluffOS, which has no width syntax.
+
+static void testLdmudWidthTwoMappingLiteralReadsAssignsAndMValuesColumnOne() {
+    // rune-wall.c's own real shape: "weakness": "<missing>"; 1, then
+    // wall[whichRune, 0] / wall[whichRune, 1] assignment, then
+    // m_values(wall, 1). Ordinary map[key] still reads column 0.
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/mw_rune.c",
+        "mapping wall;\n"
+        "void resetWall() {\n"
+        "    wall = ([\"weakness\": \"<missing>\"; 1, \"aegis\": \"armor\"; 0]);\n"
+        "}\n"
+        "mixed col0() { return wall[\"weakness\"]; }\n"
+        "mixed col0Explicit() { return wall[\"weakness\", 0]; }\n"
+        "mixed col1() { return wall[\"weakness\", 1]; }\n"
+        "mixed aegisFlag() { return wall[\"aegis\", 1]; }\n"
+        "void place() {\n"
+        "    wall[\"weakness\", 0] = \"I am weak\";\n"
+        "    wall[\"weakness\", 1] = 0;\n"
+        "}\n"
+        "mixed *flags() { return m_values(wall, 1); }\n"
+        "mixed *texts() { return m_values(wall, 0); }\n");
+    auto obj = harness.objects.cloneObject("/mw_rune");
+    assert(obj != nullptr);
+    harness.vm.callFunction(obj, "resetWall", {});
+
+    amlp::Value c0 = harness.vm.callFunction(obj, "col0", {});
+    assert(std::holds_alternative<std::string>(c0.data));
+    assert(std::get<std::string>(c0.data) == "<missing>");
+    amlp::Value c0e = harness.vm.callFunction(obj, "col0Explicit", {});
+    assert(std::get<std::string>(c0e.data) == "<missing>");
+    amlp::Value c1 = harness.vm.callFunction(obj, "col1", {});
+    assert(std::holds_alternative<int64_t>(c1.data));
+    assert(std::get<int64_t>(c1.data) == 1);
+    amlp::Value aegis = harness.vm.callFunction(obj, "aegisFlag", {});
+    assert(std::get<int64_t>(aegis.data) == 0);
+
+    harness.vm.callFunction(obj, "place", {});
+    assert(std::get<std::string>(harness.vm.callFunction(obj, "col0", {}).data) == "I am weak");
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "col1", {}).data) == 0);
+
+    amlp::Value flags = harness.vm.callFunction(obj, "flags", {});
+    auto flagArr = std::get<std::shared_ptr<amlp::Array>>(flags.data);
+    assert(flagArr->items.size() == 2);
+    assert(std::get<int64_t>(flagArr->items[0].data) == 0); // weakness, after place()
+    assert(std::get<int64_t>(flagArr->items[1].data) == 0); // aegis, still 0
+    amlp::Value texts = harness.vm.callFunction(obj, "texts", {});
+    auto textArr = std::get<std::shared_ptr<amlp::Array>>(texts.data);
+    assert(std::get<std::string>(textArr->items[0].data) == "I am weak");
+
+    std::cout << "testLdmudWidthTwoMappingLiteralReadsAssignsAndMValuesColumnOne OK\n";
+}
+
+static void testLdmudMappingLiteralRejectsInconsistentWidthWithRealMessage() {
+    // real prolang.y:17246, exact message.
+    bool threw = false;
+    try {
+        amlp::Lexer lexer(
+            "mapping probe() { return ([\"a\": 1; 2, \"b\": 3]); }\n",
+            amlp::LpcDialect::LdMud);
+        amlp::Parser parser(lexer.tokenize(), amlp::LpcDialect::LdMud);
+        parser.parseProgram();
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        assert(std::string(e.what()) == "Inconsistent number of values in mapping literal");
+    }
+    assert(threw);
+
+    std::cout << "testLdmudMappingLiteralRejectsInconsistentWidthWithRealMessage OK\n";
+}
+
+static void testLdmudMapColumnOutOfRangeAndMissingKeyFollowRealIndexSemantics() {
+    // real push_map_index_value() interpret.c:6884-6933: column range is
+    // checked before the key lookup; a missing key then returns int 0
+    // (const0), including for col > 0. Ordinary map[missing] without a
+    // column stays this driver's monostate sentinel.
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/mw_idx.c",
+        "mixed missingCol1() {\n"
+        "    mapping m = ([\"a\": 1; 2]);\n"
+        "    return m[\"nope\", 1];\n"
+        "}\n"
+        "mixed missingCol0() {\n"
+        "    mapping m = ([\"a\": 1; 2]);\n"
+        "    return m[\"nope\"];\n"
+        "}\n"
+        "mixed oob() {\n"
+        "    mapping m = ([\"a\": 1; 2]);\n"
+        "    return m[\"a\", 2];\n"
+        "}\n"
+        "mixed insertedCol0() {\n"
+        "    mapping m = ([\"a\": 1; 2]);\n"
+        "    m[\"b\", 1] = 9;\n"
+        "    return m[\"b\", 0];\n"
+        "}\n"
+        "mixed insertedCol1() {\n"
+        "    mapping m = ([\"a\": 1; 2]);\n"
+        "    m[\"b\", 1] = 9;\n"
+        "    return m[\"b\", 1];\n"
+        "}\n");
+    auto obj = harness.objects.cloneObject("/mw_idx");
+    assert(obj != nullptr);
+
+    amlp::Value miss1 = harness.vm.callFunction(obj, "missingCol1", {});
+    assert(std::holds_alternative<int64_t>(miss1.data));
+    assert(std::get<int64_t>(miss1.data) == 0);
+
+    amlp::Value miss0 = harness.vm.callFunction(obj, "missingCol0", {});
+    assert(miss0.isVoid());
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(obj, "oob", {});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        assert(std::string(e.what()).find(
+            "Illegal sub-index 2, mapping width is 2.") != std::string::npos);
+    }
+    assert(threw);
+
+    amlp::Value ins0 = harness.vm.callFunction(obj, "insertedCol0", {});
+    assert(std::holds_alternative<int64_t>(ins0.data));
+    assert(std::get<int64_t>(ins0.data) == 0);
+    amlp::Value ins1 = harness.vm.callFunction(obj, "insertedCol1", {});
+    assert(std::get<int64_t>(ins1.data) == 9);
+
+    std::cout << "testLdmudMapColumnOutOfRangeAndMissingKeyFollowRealIndexSemantics OK\n";
+}
+
+static void testFluffosMappingLiteralRejectsWidthTwoSemicolonSyntaxWhileLdmudAcceptsIt() {
+    const char* src =
+        "mapping probe() { return ([\"a\": 1; 2]); }\n";
+    {
+        amlp::Lexer lexer(src);
+        amlp::Parser parser(lexer.tokenize());
+        bool threw = false;
+        try {
+            parser.parseProgram();
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+    {
+        amlp::Lexer lexer(src, amlp::LpcDialect::LdMud);
+        amlp::Parser parser(lexer.tokenize(), amlp::LpcDialect::LdMud);
+        auto program = parser.parseProgram();
+        assert(program->functions.size() == 1);
+        auto* ret = dynamic_cast<amlp::ReturnStmt*>(
+            program->functions[0]->body->statements[0].get());
+        assert(ret != nullptr);
+        auto* lit = dynamic_cast<amlp::MappingLiteralExpr*>(ret->expr.get());
+        assert(lit != nullptr);
+        assert(lit->entries.size() == 1);
+        assert(lit->entries[0].second.size() == 2);
+    }
+
+    std::cout << "testFluffosMappingLiteralRejectsWidthTwoSemicolonSyntaxWhileLdmudAcceptsIt OK\n";
 }
 
 // --- Wand of Creation (mudlib/clone/wand_of_creation.c) -------------------
@@ -20993,6 +21159,10 @@ int main() {
     testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
     testMValuesBareFormReturnsColumnZeroValues();
     testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();
+    testLdmudWidthTwoMappingLiteralReadsAssignsAndMValuesColumnOne();
+    testLdmudMappingLiteralRejectsInconsistentWidthWithRealMessage();
+    testLdmudMapColumnOutOfRangeAndMissingKeyFollowRealIndexSemantics();
+    testFluffosMappingLiteralRejectsWidthTwoSemicolonSyntaxWhileLdmudAcceptsIt();
     testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld();
     testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld();
     testWandOfCreationCreateWritesCompilesAndPlacesARealNewObject();
@@ -21045,6 +21215,7 @@ int main() {
     testParseObjTwoSingularObjectTokenRuleResolvesTheRealPairEndToEnd();
     testParseObjTwoObjectTokenRulePluralDirectSingularIndirectResolvesTheFilteredArray();
     testParseObjTwoObjectTokenRuleSingularDirectPluralIndirectResolvesTheFilteredArray();
+    testParseSentenceExplicitEnvArrayOverridesTheOrdinaryEnvironmentWalk();
     testParseObjTwoSingularObjectTokenRuleWithTwoValidDirectCandidatesProducesErrAmbig();
     testParseMyRulesRestrictsMatchingToTheCallersOwnRegisteredRulesOnly();
     testParseMyRulesDefaultFlagReturnsVerbRuleArgsArrayWithoutCallingAnything();

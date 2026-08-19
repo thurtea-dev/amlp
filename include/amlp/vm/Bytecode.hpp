@@ -86,6 +86,11 @@ enum class OpCode : uint8_t {
     PushEfunClosure,
     CallApply,
     MakeArray,
+    // operand = mapping width (real mapping->num_values, at least 1);
+    // argCount = number of entries. Stack layout per entry is the key
+    // followed by `width` values. Width 1 is the ordinary single-column
+    // shape (key, value) this opcode has always used; width > 1 is
+    // LDMud's N-column mapping literal (ROADMAP.md row 1.9).
     MakeMapping,
     Index,
     IndexAssign,

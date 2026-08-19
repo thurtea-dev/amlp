@@ -97,6 +97,41 @@ struct Array {
 
 struct Mapping {
     std::vector<std::pair<Value, Value>> entries;
+    // Real LDMud mapping->num_values (mapping.c): number of value
+    // columns per key, not counting the key. Ordinary FluffOS-style
+    // mappings, and every mapping this driver produced before row 1.9's
+    // first real width slice, are width 1. Columns 1..width-1 live in
+    // extraColumns, kept the same length as entries whenever width > 1
+    // (empty whenever width == 1, so every existing column-0 consumer
+    // of entries[i].second is unaffected).
+    int width = 1;
+    std::vector<std::vector<Value>> extraColumns;
+
+    Value getColumn(size_t i, int col) const {
+        if (col <= 0) return entries[i].second;
+        return extraColumns[i][static_cast<size_t>(col - 1)];
+    }
+    void setColumn(size_t i, int col, const Value& v) {
+        if (col <= 0) entries[i].second = v;
+        else extraColumns[i][static_cast<size_t>(col - 1)] = v;
+    }
+    void appendEntry(Value key, std::vector<Value> values) {
+        Value col0 = values.empty() ? Value{} : std::move(values[0]);
+        entries.emplace_back(std::move(key), std::move(col0));
+        if (width > 1) {
+            std::vector<Value> extra(static_cast<size_t>(width - 1), Value(int64_t{0}));
+            for (int c = 1; c < width && static_cast<size_t>(c) < values.size(); ++c) {
+                extra[static_cast<size_t>(c - 1)] = std::move(values[static_cast<size_t>(c)]);
+            }
+            extraColumns.push_back(std::move(extra));
+        }
+    }
+    void eraseAt(size_t i) {
+        entries.erase(entries.begin() + static_cast<long>(i));
+        if (!extraColumns.empty()) {
+            extraColumns.erase(extraColumns.begin() + static_cast<long>(i));
+        }
+    }
 };
 
 // A real LPC "function" value -- the "(: name, bound_args... :)" closure
