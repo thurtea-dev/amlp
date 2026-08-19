@@ -20000,6 +20000,81 @@ static void testParseObjTwoObjectTokenRuleSingularDirectPluralIndirectResolvesTh
     std::cout << "testParseObjTwoObjectTokenRuleSingularDirectPluralIndirectResolvesTheFilteredArray OK\n";
 }
 
+// parse_sentence()'s own third argument (real `parse_env`): an explicit
+// object-array override for loadObjects()'s candidate universe, real as
+// of this session (housekeeping item 1 -- confirmed already fully
+// implemented on the loadObjects() side, this was purely a wiring gap).
+// A lamp sitting in a DIFFERENT room than the player, unreachable via
+// the ordinary environment walk, resolves anyway when explicitly passed
+// via `env` -- and does NOT resolve without it, proving the override
+// genuinely substitutes the search space rather than merely adding to
+// it.
+static void testParseSentenceExplicitEnvArrayOverridesTheOrdinaryEnvironmentWalk() {
+    ObjectVarHarness harness;
+    harness.writeFile("/pe_roomA.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"rooma\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/pe_roomB.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"roomb\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/pe_lamp.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"lamp\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/pe_player.c",
+        "void setup() { parse_init(); parse_add_rule(\"get\", \"OBJ\"); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int can_get_obj(mixed a) { return 1; }\n"
+        "int direct_get_obj(object a) { return 1; }\n"
+        "object gotIt;\n"
+        "void do_get_obj(object a) { gotIt = a; }\n"
+        "mixed runPlain(string s) { return parse_sentence(s); }\n"
+        "mixed runWithEnv(string s, object *env) { return parse_sentence(s, 0, env); }\n"
+        "object probe() { return gotIt; }\n");
+
+    auto roomA = harness.objects.cloneObject("/pe_roomA");
+    auto roomB = harness.objects.cloneObject("/pe_roomB");
+    auto player = harness.objects.cloneObject("/pe_player");
+    auto lamp = harness.objects.cloneObject("/pe_lamp");
+    assert(roomA && roomB && player && lamp);
+    for (auto& ob : {roomA, roomB, player, lamp}) harness.vm.callFunction(ob, "setup", {});
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(roomA)});
+    harness.vm.callFunction(lamp, "go", std::vector<amlp::Value>{amlp::Value(roomB)}); // NOT roomA
+
+    // Without an env override: the lamp is unreachable from the
+    // player's own actual room, so the match genuinely fails.
+    amlp::Value plainResult =
+        harness.vm.callFunction(player, "runPlain", std::vector<amlp::Value>{amlp::Value(std::string("get lamp"))});
+    assert(std::holds_alternative<int64_t>(plainResult.data));
+    assert(std::get<int64_t>(plainResult.data) != 1);
+
+    // With an explicit env array naming the lamp directly: the match
+    // succeeds, resolving to the real lamp object, even though it is
+    // still physically sitting in roomB.
+    auto envArr = std::make_shared<amlp::Array>();
+    envArr->items.push_back(amlp::Value(lamp));
+    amlp::Value envResult = harness.vm.callFunction(
+        player, "runWithEnv", std::vector<amlp::Value>{amlp::Value(std::string("get lamp")), amlp::Value(envArr)});
+    assert(std::holds_alternative<int64_t>(envResult.data));
+    assert(std::get<int64_t>(envResult.data) == 1);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(harness.vm.callFunction(player, "probe", {}).data) == lamp);
+
+    std::cout << "testParseSentenceExplicitEnvArrayOverridesTheOrdinaryEnvironmentWalk OK\n";
+}
+
 // Two direct-object candidates that BOTH individually pass every real
 // check (their own dependentCheckFunctions() probe, and checkOneRelation()'s
 // own per-pair relational probe against the one indirect candidate) must

@@ -439,34 +439,47 @@ public:
 
     // real f_parse_sentence() (packages/parser.c). Real signature is
     // `mixed parse_sentence(string, void|int, void|object*,
-    // void|mapping)`; this driver only implements the required first
-    // argument -- `debugFlag`, if explicitly truthy, throws the exact
+    // void|mapping)`. `debugFlag`, if explicitly truthy, throws the exact
     // real "Parser debugging not enabled" error real code's own
     // `#else` branch throws when compiled without `-DDEBUG`/
     // `-DPARSE_DEBUG` (this driver has no such tracing at all, so that
-    // branch is always the real one taken); `env`/`nicks` are accepted
-    // for real signature compatibility but never consulted (both are
-    // exclusively read by loadObjects(), which this driver always calls
-    // with parseUser's own environment, never an explicit envArray).
-    // OBJ/LIV/OBS/LVS tokens now resolve real objects (item 8 piece 5,
-    // parse_obj(), plus the single-object slice of item 9's own
-    // can_/direct_/indirect_/do_ disambiguation family --
-    // singular_check_functions()/plural_check_functions()) for any rule
-    // with at most one object-family token; a rule needing TWO
-    // (VerbRuleNode::objectTokenCount's own comment -- the real
-    // dependent_check_functions()/check_object_relations() ambiguity
-    // family) is skipped by parseRulesFor(), the same honest "not yet
-    // supported" stance already used elsewhere in this row. Returns int
-    // 1 on a successful match (after invoking the winning do_* function,
-    // real do_the_call()); otherwise a real, negative "how close did we
-    // get" signal (`-foundLevel`, see .cpp) or, if some candidate's own
-    // can_/direct_/... callback rejected explicitly (a falsy return or
-    // an explicit string), whatever master()->parser_error_message()
-    // returns for the resulting error (real int 0 if master does not
-    // define that apply, matching real code's own "apply_master_ob()
-    // returned null" -> "*sp = const0" fallback).
+    // branch is always the real one taken). `envArray` (real `parse_env`,
+    // the third argument) is real as of 2026-08-19 -- when given,
+    // loadObjects() below builds its whole candidate universe from this
+    // explicit array instead of walking `caller`'s own environment (real
+    // "if (parse_env) get_objects_from_array(...)/
+    // add_objects_from_array(...) else find_uninited_objects(...)/
+    // rec_add_object(...)"), confirmed already fully implemented on the
+    // loadObjects() side (getObjectsFromArray()/addObjectsFromArray(),
+    // item 8's own pieces 3/4) -- this was purely a wiring gap, not
+    // missing algorithm. The fourth argument, `nicks` (real
+    // `add_nicknames()`/`expand_node()`'s lazy nickname-to-object
+    // mapping -- a caller-supplied `mapping` from arbitrary word strings
+    // to specific objects, resolved lazily the first time parse_obj()'s
+    // own word loop actually encounters that word), remains genuinely
+    // unimplemented -- real scope confirmed by reading
+    // `packages/parser.c:1095-1109` (`add_nicknames()`) and
+    // `packages/parser.c:1302-1319` (`expand_node()`) directly: needs a
+    // new `HV_NICKNAME`-equivalent lazy-placeholder hash-entry flag and a
+    // one-shot expansion step inside parseObj()'s own word-matching loop
+    // (ParserPackage.cpp), not yet built. Not attempted here -- ROADMAP.md
+    // row 0.13a's own note records this as the row's one remaining real
+    // gap.
+    //
+    // OBJ/LIV/OBS/LVS tokens resolve real objects for any rule shape
+    // (single-object, both-singular two-object, and plural-involving
+    // two-object alike -- item 8/item 9's own full real derivation).
+    // Returns int 1 on a successful match (after invoking the winning
+    // do_* function, real do_the_call()); otherwise a real, negative "how
+    // close did we get" signal (`-foundLevel`, see .cpp) or, if some
+    // candidate's own can_/direct_/... callback rejected explicitly (a
+    // falsy return or an explicit string), whatever
+    // master()->parser_error_message() returns for the resulting error
+    // (real int 0 if master does not define that apply, matching real
+    // code's own "apply_master_ob() returned null" -> "*sp = const0"
+    // fallback).
     static Value parseSentence(VM& vm, const std::shared_ptr<LpcObject>& caller, const std::string& sentence,
-                                bool debugFlag);
+                                bool debugFlag, const Value* envArray = nullptr);
 
     // real f_parse_my_rules() (packages/parser.c): identical matching
     // engine to parseSentence() above, restricted two ways real

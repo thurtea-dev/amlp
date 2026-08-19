@@ -4877,16 +4877,13 @@ void registerCoreEfuns() {
     t.registerEfun("parse_dump", [](VM&, std::vector<Value>&) -> Value { return Value(ParserPackage::dump()); });
 
     // mixed parse_sentence(string, void|int, void|object*, void|mapping)
-    // -- real packages/parser.c's f_parse_sentence(), restricted to
-    // rules built entirely from STR/WRD tokens and literal words (see
-    // ParserPackage::parseSentence()'s own header comment for the full
-    // real derivation of why that scope is genuinely separable). Only
-    // the first (required) and second (debug flag) arguments are read;
-    // the third/fourth (env override, nicknames mapping) are accepted
-    // for real signature compatibility but never consulted -- both are
-    // exclusively read by load_objects(), which this slice's own
-    // matcher never reaches (no rule it can attempt ever needs an
-    // object).
+    // -- real packages/parser.c's f_parse_sentence(). The third argument
+    // (real `parse_env`, an explicit object-array override for
+    // loadObjects()'s own candidate universe) is real as of 2026-08-19 --
+    // see ParserPackage::parseSentence()'s own header comment. The fourth
+    // (`nicks`, a lazy word-to-object nickname mapping) is accepted for
+    // real signature compatibility but still not consulted -- a
+    // genuinely separate, still-unimplemented feature, same comment.
     t.registerEfun("parse_sentence", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("parse_sentence: expected a string sentence argument");
@@ -4895,8 +4892,12 @@ void registerCoreEfuns() {
         if (args.size() > 1) {
             if (auto* n = std::get_if<int64_t>(&args[1].data)) debugFlag = (*n != 0);
         }
+        const Value* envArray = nullptr;
+        if (args.size() > 2 && std::holds_alternative<std::shared_ptr<Array>>(args[2].data)) {
+            envArray = &args[2];
+        }
         auto ob = vm.currentObject();
-        return ParserPackage::parseSentence(vm, ob, std::get<std::string>(args[0].data), debugFlag);
+        return ParserPackage::parseSentence(vm, ob, std::get<std::string>(args[0].data), debugFlag, envArray);
     });
 
     // mixed parse_my_rules(object user, string sentence, void|int

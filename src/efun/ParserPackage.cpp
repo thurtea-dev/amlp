@@ -898,10 +898,13 @@ LoadedObjectSet ParserPackage::loadObjects(VM& vm, const std::shared_ptr<LpcObje
     // real "he = add_hash_entry(my_string); he->flags |= HV_ADJ;
     // bitvec_copy(&he->pv.adj, &my_objects);" -- the fixed "my"
     // adjective, covering exactly the objects the RAO_MY walk above
-    // marked. Real add_nicknames(parse_nicks) is not ported here --
-    // nothing in this driver's own parseSentence() signature consumes a
-    // `nicks` argument yet either (see that method's own comment), so
-    // there is nothing real for it to be exercised with.
+    // marked. Real add_nicknames(parse_nicks) is still not ported here --
+    // a genuinely separate feature from `envArray` above (a lazy
+    // word-to-object mapping consumed inside parseObj()'s own matching
+    // loop, not loadObjects()'s own object-universe construction), needs
+    // real new machinery, not yet built -- see
+    // ParserPackage::parseSentence()'s own header comment for the full
+    // real scope and citation.
     {
         HashEntry& myEntry = addHashEntry(result, "my", result.objects.size());
         myEntry.isAdj = true;
@@ -1206,6 +1209,18 @@ struct SentenceSession {
     // pattern depends on.
     int directObject = -1;
     int indirectObject = -1;
+
+    // real `parse_env` (packages/parser.c): the explicit object-array
+    // override to parse_sentence()'s own third argument, when given --
+    // loadObjects() below already fully implements consuming it
+    // (getObjectsFromArray()/addObjectsFromArray(), item 8's own
+    // pieces 3/4), this is purely the per-session carrier so
+    // runParseMatch()'s own loadObjects() call site can pass it through.
+    // Real code stores this as a process-wide static, reset per call via
+    // free_parse_globals(); collapsed into a per-session field for the
+    // same reason every other "current parse in progress" global already
+    // is (this struct's own header comment).
+    std::optional<Value> envArray;
 };
 
 // real isignore(x) = (!uisprint(x) || x == '\'').
@@ -2905,7 +2920,8 @@ void runParseMatch(VM& vm, SentenceSession& session, const std::shared_ptr<LpcOb
                 bool verbHasObj = std::any_of(target->nodes.begin(), target->nodes.end(),
                                                [](const VerbRuleNode& n) { return n.hasObjectToken; });
                 if (verbHasObj) {
-                    session.loaded = ParserPackage::loadObjects(vm, session.caller);
+                    session.loaded = ParserPackage::loadObjects(
+                        vm, session.caller, session.envArray ? &*session.envArray : nullptr);
                     session.objectsLoaded = true;
                 }
             }
@@ -2949,7 +2965,7 @@ Value buildRuleArgsArray(const SentenceSession& session) {
 } // namespace
 
 Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& caller, const std::string& sentence,
-                                     bool debugFlag) {
+                                     bool debugFlag, const Value* envArray) {
     // real code's own check order: the "not known by the parser" guard
     // runs before anything else, including the debug-flag check below.
     if (!caller || !caller->hasParseInfo()) {
@@ -2966,6 +2982,10 @@ Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& cal
     SentenceSession session;
     session.rawInput = sentence;
     session.caller = caller;
+    // real `parse_env = (sp--)->u.arr;` -- only consulted by
+    // loadObjects() (its own comment), which the verb-lookup loop below
+    // lazily calls at most once per parseSentence() call.
+    if (envArray) session.envArray = *envArray;
 
     // real "pi = parse_user->pinfo;", set for the duration of this call
     // (ParseInProgressGuard's own comment) -- parseSentence() itself
