@@ -4,6 +4,122 @@ Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
 **2026-08-19 (a further fresh session, same day): row 1.7/1.8's
+`inaugurate_master()` boot-sequence slice landed -- real LDMud master
+boot now calls `inaugurate_master(0)` automatically, wiring last
+session's `set_driver_hook()`/`H_MOVE_OBJECT0` work into a real boot
+sequence for the first time, verified live boot-to-hook-execution with
+zero manual wiring. Also found and fixed a real, pre-existing
+ROADMAP.md structural bug from the last two sessions' own edits (row
+1.7's content had been fragmented across a misplaced block wedged into
+row 1.4's cell and several orphaned paragraphs, breaking the table)
+(692 tests, up from 690).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules).
+
+**Real scope confirmed from source before writing anything.** Read real
+`main.c:590-663` in full: the real boot order is master load -> pin ->
+`initialize_master_uid()` -> `push_number(inter_sp, 0);
+callback_master(STR_INAUGURATE, 1);` (real `inaugurate_master(0)`) ->
+`setup_print_block_dispatcher()` (internal, unrelated) -> `-f` flag
+applies -> `assert_simul_efun_object()`. `callback_master(fun, n)` is
+`apply_master_ob(fun, n, MY_TRUE)` (`interpret.h:336`). Read real
+`doc/master/inaugurate_master` for the exact contract: "called in the
+master object after it has been created and is fully functional...
+has to at least set up the driverhooks to use", `arg=0` meaning "the
+mud just started, this is the first master of all" (arg 1/2/3 are
+master-reload/reactivation cases, confirmed out of scope for a
+boot-sequence slice, not silently dropped without checking).
+
+Confirmed this driver's own boot sequence (`main.cpp`) calls exactly
+one apply on the master before this session -- the UID query (row
+1.4's `queryMasterUid()`) -- fully greenfield for anything else.
+Confirmed real `addDriverHooks()` is the *only* thing
+`inaugurate_master()` needs to trigger for hooks.c's own real content
+to install: real hooks.c's own body is a one-line
+`inaugurate_master(int arg) { addDriverHooks(); }`, nothing else shares
+this exact real boot point in the real corpus. Confirmed this is
+genuinely LDMud-only, not a differently-named universal concept: read
+real FluffOS's own `set_master()` (`temp/reference/
+fluffos-2.9-ds2.08/master.c:88-141`, only queries `get_root_uid()`/
+`get_backbone_uid()`) and real FluffOS `main.c` (`preload_objects()`, a
+C-level mechanism, plus `APPLY_FLAG` for `-f` flags -- no single
+"you're ready" master callback exists there at all).
+
+**Built.** `BootApi::inaugurateMasterApply()` (`std::optional<string>`,
+matching `simulEfunFile()`'s own optional-apply shape) -- `LdmudBootApi`
+returns `"inaugurate_master"`, `FluffOsBootApi` returns `std::nullopt`
+(a real, structural "no equivalent apply" distinct from "the mudlib
+doesn't define one", the latter already covered separately by
+`callFunction()`'s own existing convention). New
+`applyInaugurateMaster(VM&, const BootApi&)`
+(`src/dialect/InaugurateMasterBoot.{hpp,cpp}`), mirroring
+`queryMasterUid()`'s own established shape and non-fatal-on-error
+convention exactly -- a no-op under `std::nullopt`, calls
+`inaugurate_master(0)` under LDMud, silently tolerates an undefined
+apply. Wired into `main.cpp` at the exact real boot-order position,
+right after the master UID query and before the simul_efun load.
+
+2 new regression tests: `inaugurate_master(0)` fires for LDMud and not
+at all for FluffOS even when the master defines a function by that
+exact name (proving the gate is real, not coincidental); and the real
+point of the whole investigation -- real hooks.c's own `H_MOVE_OBJECT0`
+shape installed with *zero* manual `set_driver_hook()` calls anywhere
+in the test, only `applyInaugurateMaster()` itself, then triggered
+through a genuine `move_object()` efun call.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4126, `dialect: ldmud`, a
+plain TCP client, real `eval` calls, a scratch `master_file:
+/tmp_hooks_master` -- a real master object living in the same real
+bundled `mudlib/` tree, reproducing hooks.c's own real
+`inaugurate_master()`/`addDriverHooks()`/`moveHook()` content plus the
+real bundled mudlib's own real `connect()` so a real client gets a
+working login/eval shell -- with no manual `set_driver_hook()` call
+issued at any point in the live session): the boot log itself shows
+`master inaugurate_master(0) ...` printed at the correct real
+boot-order position; a fresh connection's own real login worked
+normally; `eval object room = clone_object("/tmp_hooks_room2"); object
+before = environment(); move_object(room); object after =
+environment(); return ({ before, after, after == room });` returned
+`({ 0, //tmp_hooks_room2, 1 })` -- confirming the hook was installed
+purely by the boot sequence and fired correctly on the first real
+`move_object()` call, boot to hook execution, no manual wiring step
+anywhere. Driver stayed healthy throughout (`eval return 200+1;` ->
+201, `who`). Scratch master/room files and `tmp_eval_file.c` removed
+before stopping the scratch process, leaving the bundled `mudlib/`
+tree as found.
+
+**One real, pre-existing ROADMAP.md structural bug found and fixed
+along the way, not introduced this session but directly touching the
+same row.** Row 1.7's own cell had been fragmented across two earlier
+sessions' own edits: a large block of real, correct content (the
+`unbound_lambda()`/`bind_lambda()` corpus re-check and the
+`set_driver_hook()` slice write-up) had landed as orphaned paragraphs
+wedged between row 1.4's cell and row 1.5's, breaking the markdown
+table's own single-line-per-row structure (confirmed by checking every
+row line actually starts with `|` -- rows 1.4 through 1.7 did not
+before this fix). The content itself was accurate and not lost, just
+misplaced and split across multiple paragraphs instead of appended to
+row 1.7's own line. Fixed by moving the misplaced block into row 1.7's
+actual cell (flattened back to single-line prose, matching every other
+row's own convention) and closing row 1.4's cell cleanly where its own
+real content actually ends. Verified line by line afterward that every
+row from 1.1 through 1.16 is a single, well-formed table line again.
+This was a documentation-structure fix only, not a code or scope
+change -- done because leaving it broken would have compounded the
+confusion for whichever session reads row 1.7 next, and this session
+was already the one adding new content to that exact row.
+
+Still open: `H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS` dispatch,
+every other real hook number, real per-hook type-map validation,
+`privilege_violation()`, and `inaugurate_master()`'s own arg=1/2/3
+master-reload/reactivation cases.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
+**2026-08-19 (a further fresh session, same day): row 1.7/1.8's
 `set_driver_hook()` first slice landed -- real storage plus real
 H_MOVE_OBJECT0/1 dispatch wired into `move_object()`'s own real trigger
 point, confirmed live through the real efun call, exercising last

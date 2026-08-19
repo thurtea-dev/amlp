@@ -29,6 +29,12 @@ public:
     // attributed the FluffOS name to LDMud; corrected here.
     std::string masterUidApply() const override { return "get_master_uid"; }
 
+    // Real name, "inaugurate_master" -- see BootApi::inaugurateMasterApply()'s
+    // own comment for the full real-source citation.
+    std::optional<std::string> inaugurateMasterApply() const override {
+        return "inaugurate_master";
+    }
+
 private:
     const Config& config_;
 };

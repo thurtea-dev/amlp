@@ -43,6 +43,29 @@ public:
     // FluffOS name for LDMud too, corrected 2026-08-22 against a real
     // LDMud 3.6.8 clone. This method exists to carry that corrected fact.
     virtual std::string masterUidApply() const = 0;
+
+    // The real LDMud post-master-load boot callback (ROADMAP.md row
+    // 1.7/1.8): "void inaugurate_master(int arg)", called once right
+    // after the master object is loaded and its UID is set -- real
+    // main.c:661-663's own "initialize_master_uid(); push_number(
+    // inter_sp, 0); callback_master(STR_INAUGURATE, 1);". Real doc/
+    // master/inaugurate_master's own words: "This function has to at
+    // least set up the driverhooks to use" -- this is the real trigger
+    // for secure/master/hooks.c's own addDriverHooks(). Genuinely
+    // LDMud-only, not just a differently-spelled version of a universal
+    // concept the way masterUidApply() is: real FluffOS's own
+    // set_master() (master.c:88-141) only ever queries get_root_uid()/
+    // get_backbone_uid(), and real FluffOS main.c's own boot sequence
+    // calls preload_objects() (a C-level mechanism, not a single mudlib
+    // callback) instead -- confirmed directly against the vendored real
+    // FluffOS 2.9 reference source, not assumed. std::optional (unlike
+    // masterUidApply() and friends) exactly because FluffOS/DGD
+    // genuinely have nothing to return here -- std::nullopt means "this
+    // dialect has no equivalent apply at all", distinct from "the
+    // mudlib doesn't happen to define one" (already handled safely
+    // either way by callFunction()'s own existing "undefined function
+    // is not an error" convention).
+    virtual std::optional<std::string> inaugurateMasterApply() const = 0;
 };
 
 } // namespace amlp

@@ -21,6 +21,7 @@
 #include "amlp/dialect/FluffOsBootApi.hpp"
 #include "amlp/dialect/LdmudBootApi.hpp"
 #include "amlp/dialect/MasterUidBoot.hpp"
+#include "amlp/dialect/InaugurateMasterBoot.hpp"
 #include "amlp/dialect/DialectSelect.hpp"
 #include <algorithm>
 #include <cassert>
@@ -18598,6 +18599,117 @@ static void testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply() {
     std::cout << "testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply OK\n";
 }
 
+// applyInaugurateMaster() -- ROADMAP.md row 1.7/1.8's own
+// inaugurate_master() boot-sequence slice. Real doc/master/
+// inaugurate_master's own arg=0 case ("the mud just started, this is
+// the first master of all") -- confirms the real per-dialect divergence
+// this function exists for: LDMud calls "inaugurate_master(0)" on the
+// master object at boot, FluffOS calls nothing at all (BootApi::
+// inaugurateMasterApply() returns std::nullopt there, real FluffOS
+// having no equivalent apply -- see BootApi.hpp's own citation).
+static void testApplyInaugurateMasterCallsInaugurateMasterForLdmudOnlyNotFluffOs() {
+    {
+        ObjectVarHarness harness("dialect: ldmud\n");
+        harness.writeFile("/unused.c",
+            "mixed calledWithArg; mixed wasCalled;\n"
+            "void create() { wasCalled = 0; }\n"
+            "void inaugurate_master(int arg) { wasCalled = 1; calledWithArg = arg; }\n"
+            "mixed getWasCalled() { return wasCalled; }\n"
+            "mixed getCalledWithArg() { return calledWithArg; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        amlp::LdmudBootApi ldmudApi(harness.config);
+        amlp::applyInaugurateMaster(harness.vm, ldmudApi);
+
+        auto master = harness.objects.masterObject();
+        assert(master != nullptr);
+        amlp::Value wasCalled = harness.vm.callFunction(master, "getWasCalled", {});
+        amlp::Value arg = harness.vm.callFunction(master, "getCalledWithArg", {});
+        assert(std::get<int64_t>(wasCalled.data) == 1);
+        assert(std::get<int64_t>(arg.data) == 0);
+    }
+    {
+        // Same master, FluffOsBootApi this time -- real FluffOS has no
+        // inaugurate_master()-equivalent apply at all, so this must stay
+        // completely untouched even though the master object happens to
+        // define a function by that exact name.
+        ObjectVarHarness harness; // default dialect (fluffos)
+        harness.writeFile("/unused.c",
+            "mixed wasCalled;\n"
+            "void create() { wasCalled = 0; }\n"
+            "void inaugurate_master(int arg) { wasCalled = 1; }\n"
+            "mixed getWasCalled() { return wasCalled; }\n");
+        assert(harness.objects.loadMasterObject());
+
+        amlp::FluffOsBootApi fluffApi(harness.config);
+        assert(!fluffApi.inaugurateMasterApply().has_value());
+        amlp::applyInaugurateMaster(harness.vm, fluffApi);
+
+        auto master = harness.objects.masterObject();
+        amlp::Value wasCalled = harness.vm.callFunction(master, "getWasCalled", {});
+        assert(std::get<int64_t>(wasCalled.data) == 0);
+    }
+
+    std::cout << "testApplyInaugurateMasterCallsInaugurateMasterForLdmudOnlyNotFluffOs OK\n";
+}
+
+// The actual point of this whole investigation, done the way it should
+// have happened from the start: real secure/master/hooks.c's own
+// H_MOVE_OBJECT0 shape, installed with *zero* manual set_driver_hook()
+// calls anywhere in this test -- only applyInaugurateMaster(), the same
+// real boot-sequence call main.cpp now makes automatically -- then
+// triggered through a genuine move_object() efun call, exactly mirroring
+// last session's own live end-to-end verification but this time proving
+// the *boot path itself* installs the hook, not a scratch object
+// standing in for one.
+static void testApplyInaugurateMasterInstallsHooksCsOwnH_MOVE_OBJECT0AutomaticallyAtBoot() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "mixed lastItem; mixed lastDest;\n"
+        "static nomask void moveHook(object item, object destination) {\n"
+        "    if (objectp(item) && objectp(destination)) {\n"
+        "        lastItem = item; lastDest = destination;\n"
+        "        set_environment(item, destination);\n"
+        "    }\n"
+        "}\n"
+        "nomask void addDriverHooks() {\n"
+        "    set_driver_hook(0,\n" // H_MOVE_OBJECT0, real mudlib/sys/driver_hook.h
+        "        unbound_lambda( ({'item, 'dest}),\n"
+        "            ({#'moveHook, 'item, 'dest }) )\n"
+        "    );\n"
+        "}\n"
+        "void inaugurate_master(int arg) { addDriverHooks(); }\n"
+        "mixed getLastItem() { return lastItem; }\n"
+        "mixed getLastDest() { return lastDest; }\n");
+    harness.writeFile("/mh_room.c", "int isRoom() { return 1; }\n");
+    harness.writeFile("/mh_mover.c", "void doMove(mixed dest) { move_object(dest); }\n");
+    assert(harness.objects.loadMasterObject());
+
+    // The real boot-sequence call -- this is the *only* set_driver_hook()
+    // trigger anywhere in this test.
+    amlp::LdmudBootApi ldmudApi(harness.config);
+    amlp::applyInaugurateMaster(harness.vm, ldmudApi);
+
+    auto master = harness.objects.masterObject();
+    auto room = harness.objects.cloneObject("/mh_room");
+    auto mover = harness.objects.cloneObject("/mh_mover");
+    assert(master != nullptr);
+    assert(room != nullptr);
+    assert(mover != nullptr);
+
+    harness.vm.callFunction(mover, "doMove", {amlp::Value(room)});
+
+    amlp::Value item = harness.vm.callFunction(master, "getLastItem", {});
+    amlp::Value dest = harness.vm.callFunction(master, "getLastDest", {});
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(item.data) == mover);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(dest.data) == room);
+    assert(mover->environment().lock() == room);
+    auto& roomInv = room->inventory();
+    assert(std::find(roomInv.begin(), roomInv.end(), mover) != roomInv.end());
+
+    std::cout << "testApplyInaugurateMasterInstallsHooksCsOwnH_MOVE_OBJECT0AutomaticallyAtBoot OK\n";
+}
+
 // Config::dialect() and makeBootApiForConfig() -- ROADMAP row 1.1's own
 // config-driven dialect switch, scoped to unblocking main.cpp's one
 // masterUidApply() call site. The tests below exercise the real,
@@ -21559,6 +21671,8 @@ int main() {
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();
     testQueryMasterUidCallsGetRootUidForFluffOsAndGetMasterUidForLdmudAtRuntime();
     testQueryMasterUidReturnsNulloptWhenMasterDoesNotDefineTheApply();
+    testApplyInaugurateMasterCallsInaugurateMasterForLdmudOnlyNotFluffOs();
+    testApplyInaugurateMasterInstallsHooksCsOwnH_MOVE_OBJECT0AutomaticallyAtBoot();
     testConfigDialectDefaultsToFluffosWhenUnsetMatchingPriorHardcodedBehavior();
     testConfigDialectReadsAnExplicitlyConfiguredValue();
     testMakeBootApiForConfigSelectsTheRightBootApiForARealQueryMasterUidCallAtRuntime();

@@ -3,6 +3,7 @@ add_library(dialect
     FluffOsBootApi.cpp
     LdmudBootApi.cpp
     MasterUidBoot.cpp
+    InaugurateMasterBoot.cpp
     DialectSelect.cpp
 )
 target_include_directories(dialect PUBLIC ${CMAKE_SOURCE_DIR}/include)

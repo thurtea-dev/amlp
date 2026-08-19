@@ -9,6 +9,7 @@
 #include "amlp/efun/EfunTable.hpp"
 #include "amlp/dialect/DialectSelect.hpp"
 #include "amlp/dialect/MasterUidBoot.hpp"
+#include "amlp/dialect/InaugurateMasterBoot.hpp"
 
 namespace {
 void handleSignal(int) {
@@ -105,6 +106,22 @@ int main(int argc, char** argv) {
     } else {
         std::cout << "  master does not define " << bootApi->masterUidApply() << "()\n";
     }
+
+    // Real LDMud's own inaugurate_master(0) boot callback (ROADMAP.md
+    // row 1.7/1.8; see BootApi::inaugurateMasterApply()'s own comment
+    // and InaugurateMasterBoot.cpp for the full real-source citation) --
+    // the real trigger for a real LDMud master's own addDriverHooks(),
+    // and the actual reason set_driver_hook()/H_MOVE_OBJECT0 dispatch
+    // (built over the last two sessions) is reachable at all from a real
+    // mud simply coming online, not just by hand. Placed here, right
+    // after the master UID query and before the simul_efun load,
+    // matching real main.c's own exact real ordering (main.c:661-663
+    // runs before assert_simul_efun_object() at main.c:687). A no-op
+    // under FluffOS/DGD (no equivalent apply exists there at all).
+    if (auto inaugurateApply = bootApi->inaugurateMasterApply()) {
+        std::cout << "  master " << *inaugurateApply << "(0) ...\n";
+    }
+    amlp::applyInaugurateMaster(vm, *bootApi);
 
     // Non-fatal: an unconfigured or currently-uncompilable simul_efun
     // file should not block the rest of the driver from booting (see

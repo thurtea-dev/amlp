@@ -21,6 +21,10 @@ public:
     std::optional<std::string> autoObjectFile() const override { return std::nullopt; }
     std::string masterUidApply() const override { return "get_root_uid"; }
 
+    // No equivalent in real FluffOS -- see BootApi::inaugurateMasterApply()'s
+    // own comment for the real source confirming this.
+    std::optional<std::string> inaugurateMasterApply() const override { return std::nullopt; }
+
 private:
     const Config& config_;
 };
