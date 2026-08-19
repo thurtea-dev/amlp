@@ -131,3 +131,20 @@ See `src/proto/instruct.md` for the detailed implementation plan - the
   should receive write() output right now".
 - Socket handles returned by `socket_create` are globally unique integers
   (never reused within a session). Use a monotonic counter in `SocketRegistry`.
+
+## Known gap (found live, 2026-08-18, not fixed)
+
+The driver process has no `SIGPIPE` handling at all -- confirmed directly,
+zero hits for `SIGPIPE`/`MSG_NOSIGNAL`/`SO_NOSIGPIPE` anywhere in `src/`
+or `include/`; `main.cpp` registers signal handlers only for `SIGINT`/
+`SIGTERM`. A client connection closing at the wrong moment relative to
+the driver's own next `write()`/`send()` to that same socket can raise
+`SIGPIPE`, whose default disposition kills the *entire process*, not
+just that one connection. Reproduced once, live, during a `parse_*`
+live-verification session (STATUS.md's own dated entry has the full
+citation) -- not reliably reproducible on demand, a genuine timing
+race, but the underlying gap is certain from source alone regardless.
+The standard, low-risk fix is `std::signal(SIGPIPE, SIG_IGN)` alongside
+the existing `SIGINT`/`SIGTERM` registration in `main.cpp`, relying on
+each write call's own error return (`EPIPE`) instead of the signal --
+not attempted yet, flagged here so it is not rediscovered from scratch.

@@ -4880,6 +4880,29 @@ void registerCoreEfuns() {
     // a destructed handler's own text).
     t.registerEfun("parse_dump", [](VM&, std::vector<Value>&) -> Value { return Value(ParserPackage::dump()); });
 
+    // mixed parse_sentence(string, void|int, void|object*, void|mapping)
+    // -- real packages/parser.c's f_parse_sentence(), restricted to
+    // rules built entirely from STR/WRD tokens and literal words (see
+    // ParserPackage::parseSentence()'s own header comment for the full
+    // real derivation of why that scope is genuinely separable). Only
+    // the first (required) and second (debug flag) arguments are read;
+    // the third/fourth (env override, nicknames mapping) are accepted
+    // for real signature compatibility but never consulted -- both are
+    // exclusively read by load_objects(), which this slice's own
+    // matcher never reaches (no rule it can attempt ever needs an
+    // object).
+    t.registerEfun("parse_sentence", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("parse_sentence: expected a string sentence argument");
+        }
+        bool debugFlag = false;
+        if (args.size() > 1) {
+            if (auto* n = std::get_if<int64_t>(&args[1].data)) debugFlag = (*n != 0);
+        }
+        auto ob = vm.currentObject();
+        return ParserPackage::parseSentence(vm, ob, std::get<std::string>(args[0].data), debugFlag);
+    });
+
     // string query_verb() -- the full typed first word of the line
     // currently being dispatched (real semantics, even for a
     // V_SHORT/V_NOSPACE partial match -- see VM::dispatchCommand()).

@@ -1,7 +1,9 @@
 #include "amlp/efun/ParserPackage.hpp"
 #include "amlp/core/Errors.hpp"
 #include "amlp/object/LpcObject.hpp"
+#include "amlp/vm/VM.hpp"
 #include <algorithm>
+#include <cctype>
 #include <optional>
 
 namespace amlp {
@@ -240,6 +242,15 @@ void fillLitFromTokens(VerbRuleNode& node) {
         }
     }
 }
+
+// See VerbRuleNode::hasObjectToken's own comment: real VB_HAS_OBJ,
+// computed per-node here instead of per-verb.
+bool computeHasObjectToken(const std::vector<int>& tokens) {
+    for (int t : tokens) {
+        if (t >= ParserToken::ObjA) return true;
+    }
+    return false;
+}
 } // namespace
 
 void ParserPackage::addRule(const std::string& verb, const std::string& rule,
@@ -263,6 +274,7 @@ void ParserPackage::addRule(const std::string& verb, const std::string& rule,
     node.tokens = tokens;
     node.weight = weight;
     node.handler = handler;
+    node.hasObjectToken = computeHasObjectToken(tokens);
     fillLitFromTokens(node);
 
     // real "verb_node->next = verb_entry->node; verb_entry->node =
@@ -479,6 +491,726 @@ void ParserPackage::onObjectDestroyed(const std::shared_ptr<LpcObject>& destruct
     // is this.
     destructed->setHasParseInfo(false);
     destructed->setParseInfoFlags(0);
+}
+
+const std::vector<std::string>& ParserPackage::currentLiterals() { return cachedLiterals(); }
+
+// ============================================================================
+// Sentence matching (real f_parse_sentence() and everything it calls:
+// parse_sentence()/parse_recurse() (the sentence tokenizer, ROADMAP.md
+// row 0.13a item 6), parse_rules()/parse_rule()/we_are_finished() (the
+// recursive-descent matcher, item 9), check_functions()/process_answer()/
+// make_function()/push_real_names()/do_the_call() (the can_/direct_/
+// indirect_/do_ callback machinery, also item 9), and
+// make_error_message()/get_the_error() (error reporting, item 10)).
+//
+// Restricted to STR/WRD/literal-only rules -- no OBJ/LIV/OBS/LVS support
+// yet. Confirmed directly from source before writing any of this that
+// this really is a separable, real, complete slice: interrogate_object()
+// (the function that actually populates a live object's noun/adjective/
+// plural id cache) has exactly one real call site, load_objects(),
+// itself only reachable from parse_obj(), itself only reached by
+// parse_rule()'s own OBJ-family token case -- a rule using only STR/WRD/
+// literal tokens never touches any of that machinery at all, real code
+// included, so this is a genuine subset of real behavior, not a
+// simplification of it. VerbRuleNode::hasObjectToken marks the rules
+// this slice cannot yet attempt; parseRulesFor() below skips them
+// entirely rather than attempting and silently mismatching them.
+// ============================================================================
+
+namespace {
+
+// real word_t (packages/parser.h). See the header's own note on why
+// this stays private to this file. `rawStart`/`rawEnd` are byte offsets
+// into the original (pre-lowercasing) input, spanning exactly the kept
+// characters this word is made of -- provably equivalent to real code's
+// own less precise `start`/`end` pointers once real strput_words()'s
+// own leading/trailing-whitespace trim is accounted for (real code
+// trims down to the same boundary this driver computes directly).
+struct SentenceWord {
+    std::string text;
+    size_t rawStart = 0;
+    size_t rawEnd = 0;
+};
+
+// real match_t (packages/parser.h). The object-token payload (val.obs/
+// val.number/ordinal) is not included -- nothing in this slice ever
+// produces an OBJ/LIV/OBS/LVS match (VerbRuleNode::hasObjectToken's own
+// comment). Extend, don't replace, when object matching lands.
+struct SentenceMatch {
+    int token = 0;
+    int first = 0;
+    int last = 0;
+};
+
+// real parser_error_t, reduced to the one payload shape (a plain
+// string) this slice's own reachable error kind (Allocated) carries.
+struct ParserErrorInfo {
+    int errorType = ParserErrorType::None;
+    std::string allocatedMessage;
+};
+
+// real parse_result_t -- one already-resolved winning match, cached by
+// we_are_finished() and invoked later by do_the_call(). See
+// ParserPackage.hpp's own removed comment (now here, since this type
+// moved): all four res[i] use the real "do_" prefix; the index selects
+// one of four real naming *strategies* for the same call (real
+// make_function()'s own "try" parameter).
+struct SentenceMatchResult {
+    std::weak_ptr<LpcObject> handler;
+    struct FunctionCall {
+        std::string functionName;
+        std::vector<Value> args;
+    };
+    FunctionCall res[4];
+};
+
+// real parse_state_t (packages/parser.h): the per-recursion-branch state
+// real parse_rule() threads through as a pointer, copied by value
+// ("local_state = *state;") at every point real code starts a genuinely
+// new branch. Passed by reference here for the same "mutate in place,
+// tail-recurse" steps real code's own pointer aliasing achieves; a local
+// `MatchState` copy is made explicitly, matching real code exactly,
+// wherever real code copies `*state` into a `local_state`.
+struct MatchState {
+    int tokIndex = 0;
+    int wordIndex = 0;
+    int numMatches = 0;
+    int numErrors = 0;
+};
+
+// real parser.c's own single shared set of "current parse in progress"
+// globals (num_words/words[]/matches[]/parse_vn/parse_verb_entry/
+// best_match/best_error_match/best_num_errors/found_level/
+// current_error_info/best_error_info/best_result/parse_user), collected
+// into one object constructed fresh per parseSentence() call and
+// threaded through by reference instead. A deliberate, real behavior
+// improvement over real code's own global mutable statics -- real
+// parse_sentence()'s own recursion guard is explicitly disabled ("may
+// not be done in case of an error, or in case of tail recursion", real
+// code's own comment), meaning a genuinely reentrant call in real
+// FluffOS can silently corrupt an outer parse still in progress; this
+// shape cannot do that, since each call gets its own session with no
+// shared mutable global at all. Not a fidelity loss: nothing any real
+// caller depends on requires the corruption itself, only each call's
+// own correct result, and single-call behavior is identical either way.
+struct SentenceSession {
+    std::string rawInput;
+    std::shared_ptr<LpcObject> caller; // real parse_user
+
+    std::vector<SentenceWord> words;
+    std::vector<SentenceMatch> matches; // real matches[], reused/overwritten via the same add_match() high-water-mark technique
+
+    const VerbEntry* matchedVerb = nullptr; // real parse_verb_entry
+    const VerbRuleNode* currentNode = nullptr; // real parse_vn
+
+    int bestMatchWeight = 0;   // real best_match
+    int bestErrorWeight = 0;   // real best_error_match
+    int bestNumErrors = 5732;  // real best_num_errors -- "Yes. Exactly 5,732 errors. Don't ask." (reset_error()'s own real comment, kept verbatim)
+    int foundLevel = 0;        // real found_level
+
+    ParserErrorInfo currentError; // real current_error_info
+    ParserErrorInfo bestError;    // real best_error_info
+
+    std::optional<SentenceMatchResult> bestResult; // real best_result
+};
+
+// real isignore(x) = (!uisprint(x) || x == '\'').
+bool isIgnorableChar(unsigned char c) { return !std::isprint(c) || c == '\''; }
+// real iskeep(x) = uisalnum(x) || x == '*'.
+bool isKeepChar(unsigned char c) { return std::isalnum(c) || c == '*'; }
+
+// real parse_sentence()'s own word-splitting front end (packages/
+// parser.c) -- item 6, the sentence tokenizer. Ported to byte offsets
+// into a std::string rather than raw char* pointer arithmetic; see
+// SentenceWord's own comment for why the resulting rawStart/rawEnd are
+// provably equivalent to real code's own less-precise pointers. Real
+// MAX_WORD_LENGTH/MAX_WORDS_PER_LINE truncation (pure C buffer-safety
+// limits) is not ported -- no realistic input reaches them, and this
+// driver's own containers have no equivalent fixed-size hazard to guard
+// against.
+std::vector<SentenceWord> splitSentenceWords(const std::string& input) {
+    std::vector<SentenceWord> words;
+    size_t n = input.size();
+    size_t i = 0;
+
+    std::string current;
+    size_t wordRawStart = 0;
+    size_t wordRawEnd = 0;
+    bool haveWord = false;
+
+    auto finishWord = [&]() {
+        if (haveWord) {
+            words.push_back(SentenceWord{current, wordRawStart, wordRawEnd});
+            current.clear();
+            haveWord = false;
+        }
+    };
+
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(input[i]);
+        if (isIgnorableChar(c)) {
+            i++;
+            continue;
+        }
+        if (isKeepChar(c)) {
+            unsigned char lower = std::isupper(c) ? static_cast<unsigned char>(std::tolower(c)) : c;
+            if (!haveWord) {
+                haveWord = true;
+                wordRawStart = i;
+            }
+            current += static_cast<char>(lower);
+            wordRawEnd = i;
+            i++;
+            continue;
+        }
+        // separator: whitespace, or a run of other punctuation -- real
+        // code's own "!iskeep(*inp) && !uisspace(*inp)" skip-run does
+        // not special-case isignore() chars within it either, so
+        // neither does this.
+        finishWord();
+        if (std::isspace(c)) {
+            i++;
+            while (i < n && std::isspace(static_cast<unsigned char>(input[i]))) i++;
+        } else {
+            while (i < n) {
+                unsigned char cc = static_cast<unsigned char>(input[i]);
+                if (isKeepChar(cc) || std::isspace(cc)) break;
+                i++;
+            }
+        }
+    }
+    finishWord();
+    return words;
+}
+
+// real strput_words() (packages/parser.c): the ORIGINAL-cased,
+// original-punctuated text spanning word[first..last] inclusive,
+// trimmed of leading/trailing whitespace -- used for a STR/WRD token's
+// own matched text, deliberately distinct from the lowercased/stripped
+// form used for grammar matching itself. Everything *between*
+// session.words[first] and session.words[last] (including any
+// punctuation the grammar-matching pass silently ignored) is preserved
+// verbatim, since this operates on `session.rawInput` directly rather
+// than reassembling from the individual (already-normalized) word
+// strings.
+std::string extractWordRange(const SentenceSession& session, int first, int last) {
+    if (first < 0 || last < first || last >= static_cast<int>(session.words.size())) return "";
+    size_t start = session.words[first].rawStart;
+    size_t end = session.words[last].rawEnd;
+    const std::string& raw = session.rawInput;
+    while (start <= end && start < raw.size() && std::isspace(static_cast<unsigned char>(raw[start]))) start++;
+    while (end > start && end < raw.size() && std::isspace(static_cast<unsigned char>(raw[end]))) end--;
+    if (start > end || start >= raw.size()) return "";
+    return raw.substr(start, end - start + 1);
+}
+
+int tokenAt(const VerbRuleNode& node, int index) {
+    return index >= 0 && index < static_cast<int>(node.tokens.size()) ? node.tokens[index] : 0;
+}
+
+// real add_match() (packages/parser.c): appends to (or, past the first
+// pass through this depth, overwrites) session.matches at
+// state.numMatches, the same shared-array-reused-across-sibling-
+// branches technique real code's own fixed `matches[]` array uses, via
+// a vector instead. Real code's own "if (token == ERROR_TOKEN)
+// state->num_errors++;" is folded in here too.
+void addMatch(SentenceSession& session, MatchState& state, int token, int first, int last) {
+    if (state.numMatches < static_cast<int>(session.matches.size())) {
+        session.matches[state.numMatches] = SentenceMatch{token, first, last};
+    } else {
+        session.matches.push_back(SentenceMatch{token, first, last});
+    }
+    if (token == ParserToken::Error) state.numErrors++;
+    state.numMatches++;
+}
+
+// real check_literal() (packages/parser.c): real parse_rules()'s own
+// fast prefilter, confirming literal `literals[litIndex]` appears
+// somewhere at or after word index `start`. Returns the word index
+// right after the match (so a second prefilter literal must appear
+// strictly later), or 0 if not found.
+int checkLiteral(const SentenceSession& session, int litIndex, int start) {
+    const auto& literals = ParserPackage::currentLiterals();
+    if (litIndex < 0 || static_cast<size_t>(litIndex) >= literals.size()) return 0;
+    const std::string& want = literals[litIndex];
+    for (int i = start; i < static_cast<int>(session.words.size()); i++) {
+        if (session.words[i].text == want) return i + 1;
+    }
+    return 0;
+}
+
+void weAreFinished(VM& vm, SentenceSession& session, MatchState& state);
+
+// real parse_rule() (packages/parser.c), restricted to the token kinds
+// this slice actually supports -- STR_TOKEN, WRD_TOKEN, literal words,
+// and the rule terminator. real code's own OBJ/LIV/OBS/LVS case is not
+// reached: parseRulesFor() below never attempts a node with
+// hasObjectToken set, so `session.currentNode->tokens` never actually
+// contains one here. Kept as an explicit, documented dead branch rather
+// than silently absent, so the noun-phrase-resolution slice has an
+// obvious, exact insertion point.
+void parseRule(VM& vm, SentenceSession& session, MatchState& state) {
+    const VerbRuleNode& node = *session.currentNode;
+    const int numWords = static_cast<int>(session.words.size());
+
+    while (true) {
+        int tok = tokenAt(node, state.tokIndex++);
+        if (state.wordIndex == numWords && tok) {
+            return; // real "Ran out of words to parse."
+        }
+        int masked = tok & ~ParserToken::ChooseModifier;
+
+        if (masked == 0) {
+            if (state.wordIndex == numWords) weAreFinished(vm, session, state);
+            return;
+        }
+
+        if (masked >= ParserToken::ObjA) {
+            // Unreachable -- see this function's own header comment.
+            return;
+        }
+
+        if (masked == ParserToken::Str) {
+            if (tokenAt(node, state.tokIndex) == 0) {
+                // real "At end; match must be the whole thing."
+                int start = state.wordIndex;
+                state.wordIndex = numWords;
+                addMatch(session, state, ParserToken::Str, start, state.wordIndex - 1);
+                parseRule(vm, session, state);
+            } else {
+                int start = state.wordIndex++;
+                while (state.wordIndex <= numWords) {
+                    MatchState local = state;
+                    addMatch(session, local, ParserToken::Str, start, state.wordIndex - 1);
+                    parseRule(vm, session, local);
+                    state.wordIndex++;
+                }
+            }
+            return;
+        }
+
+        if (masked == ParserToken::Wrd) {
+            addMatch(session, state, ParserToken::Wrd, state.wordIndex, state.wordIndex);
+            state.wordIndex++;
+            parseRule(vm, session, state);
+            return;
+        }
+
+        // literal (tok <= 0)
+        int litIndex = -(tok + 1);
+        const auto& literals = ParserPackage::currentLiterals();
+        bool matched = litIndex >= 0 && static_cast<size_t>(litIndex) < literals.size() &&
+                       state.wordIndex < numWords && session.words[state.wordIndex].text == literals[litIndex];
+        if (matched) {
+            state.wordIndex++;
+            continue;
+        }
+        // Mismatch. Real code's own recovery (a forward search that
+        // marks the *previous* match as an error) only ever fires when
+        // the immediately preceding token was itself an object-family
+        // one -- unreachable here for the same reason the OBJ branch
+        // above is. A preceding STR token, a preceding WRD/literal
+        // token, or this being the rule's very first token (real
+        // "state->tok_index == 1") all just return without recording
+        // an error either way in real code, which is exactly what
+        // falling out of this loop here does.
+        return;
+    }
+}
+
+// real make_error_message() (packages/parser.c), restricted to the
+// STR/WRD/literal branches this slice reaches -- the object-token
+// branch (`query_the_short()`) is unreachable, same reasoning as
+// parseRule()'s own OBJ case.
+void makeErrorMessage(SentenceSession& session, int which, ParserErrorInfo& err) {
+    std::string buf = "You can't ";
+    buf += session.words[0].text;
+    buf += ' ';
+
+    int cnt = 0;
+    int match = 0;
+    for (int tok : session.currentNode->tokens) {
+        if (tok == ParserToken::Str || tok == ParserToken::Wrd) {
+            if (tok == ParserToken::Str && cnt == which - 1) {
+                buf += "that ";
+                cnt++;
+                continue;
+            }
+            buf += extractWordRange(session, session.matches[match].first, session.matches[match].last);
+            buf += ' ';
+            cnt++;
+            match++;
+        } else if (tok <= 0) {
+            const auto& literals = ParserPackage::currentLiterals();
+            int litIndex = -(tok + 1);
+            if (litIndex >= 0 && static_cast<size_t>(litIndex) < literals.size()) buf += literals[litIndex];
+            buf += ' ';
+        }
+        // tok >= ObjA (object-family): unreachable, see this
+        // function's own header comment.
+    }
+    if (!buf.empty()) buf.pop_back(); // real "p--;" -- nuke the trailing space
+    buf += ".\n";
+
+    err.errorType = ParserErrorType::Allocated;
+    err.allocatedMessage = buf;
+}
+
+// real process_answer() (packages/parser.c). `wasDefined` replaces real
+// code's own "!sv" (real apply() returns a null svalue_t* specifically
+// for an undefined function; this driver instead checks
+// VM::functionExists() up front at the call site, and passes the
+// result here explicitly, rather than trying to infer it from the
+// returned Value -- see the monostate handling below for why that
+// distinction has to be made before the call, not after).
+// Returns: 1 accept, 0 undefined/wrong-type (try next), -2 generated
+// error (an explicit falsy int), -1 generated error (an explicit
+// string), -3 abort (already have an equally good candidate).
+int processAnswer(SentenceSession& session, MatchState& state, bool wasDefined, const Value& result, int which) {
+    if (!wasDefined) return 0;
+    if (auto* s = std::get_if<std::string>(&result.data)) {
+        if (state.numErrors == session.bestNumErrors) return -3;
+        if (state.numErrors++ == 0) {
+            session.currentError.errorType = ParserErrorType::Allocated;
+            session.currentError.allocatedMessage = *s;
+        }
+        return -1;
+    }
+    // real "if (sv->type == T_NUMBER) { if (sv->u.number) return 1;
+    // ... }" -- this driver's own monostate ("void") is folded into the
+    // same falsy-zero branch here: a genuine LPC function with no
+    // explicit `return` statement implicitly returns int 0 in real
+    // semantics, but this driver's own Return opcode represents that
+    // exact case as monostate instead of a real int64_t 0 (VM.cpp's own
+    // "if (localStack.empty()) return Value{};") -- a pre-existing,
+    // driver-wide representation choice unrelated to this efun, not
+    // something to work around by treating a no-return can_/direct_/
+    // do_ function as if it were undefined (which `wasDefined` above
+    // already correctly rules out for a genuinely undefined name).
+    // Every other real "not a number, not a string" result (an object/
+    // array/mapping/closure) still falls through to the final "return
+    // 0" below, matching real code's own "if (sv->type != T_STRING)
+    // return 0;" exactly.
+    if (std::holds_alternative<std::monostate>(result.data)) {
+        if (state.numErrors == session.bestNumErrors) return -3;
+        if (state.numErrors++ == 0) makeErrorMessage(session, which, session.currentError);
+        return -2;
+    }
+    if (auto* n = std::get_if<int64_t>(&result.data)) {
+        if (*n != 0) return 1;
+        if (state.numErrors == session.bestNumErrors) return -3;
+        if (state.numErrors++ == 0) makeErrorMessage(session, which, session.currentError);
+        return -2;
+    }
+    return 0;
+}
+
+// real prefixes[] (packages/parser.c).
+const char* const kPrefixes[] = {"can_", "direct_", "indirect_", "do_", "direct_", "indirect_"};
+
+struct BuiltFunction {
+    std::string functionName;
+    std::vector<Value> args;
+};
+
+// real make_function() (packages/parser.c), restricted to the STR/WRD/
+// literal branches this slice reaches -- the OBJ-family branch
+// (push_object()/push_bitvec_as_array()/direct_object/indirect_object)
+// is unreachable, same reasoning as parseRule()'s own OBJ case. Real
+// code's own `state`/`target` parameters are unused inside the real
+// function body itself (confirmed by inspection, not an oversight
+// here) except for `target`'s one real OBJ-branch use, so neither is
+// threaded through this port at all.
+BuiltFunction makeFunction(SentenceSession& session, int which, int tryIdx) {
+    BuiltFunction result;
+    std::string name = kPrefixes[which];
+
+    if (tryIdx < 2) {
+        name += session.matchedVerb->matchName;
+    } else {
+        name += "verb";
+        result.args.push_back(Value(session.matchedVerb->matchName));
+    }
+
+    // real "if (try == 3) { buf = strput(buf, end, \"_rule\"); buf++;
+    // ... }" -- the name is truncated to exactly "<prefix>verb_rule"
+    // for tryIdx == 3; real code's own token loop keeps running after
+    // this (still pushing arguments), it just writes past the
+    // truncating null, which no caller ever reads back. This port
+    // reproduces the observable effect directly: stop appending to
+    // `name` from here on, but keep processing every token's own
+    // argument-pushing side effect exactly as real code does.
+    bool nameTruncated = (tryIdx == 3);
+    if (tryIdx == 3) {
+        name += "_rule";
+        result.args.push_back(Value(ParserPackage::ruleString(session.currentNode->tokens, ParserPackage::currentLiterals())));
+    }
+
+    int match = 0;
+    const auto& literals = ParserPackage::currentLiterals();
+    for (int tok : session.currentNode->tokens) {
+        if (!nameTruncated) name += '_';
+
+        int masked = tok & ~ParserToken::ChooseModifier;
+        if (masked >= ParserToken::ObjA) {
+            // Unreachable -- see this function's own header comment.
+            match++;
+            continue;
+        }
+        if (masked == ParserToken::Str) {
+            if (!nameTruncated) name += "str";
+            result.args.push_back(Value(extractWordRange(session, session.matches[match].first, session.matches[match].last)));
+            match++;
+            continue;
+        }
+        if (masked == ParserToken::Wrd) {
+            if (!nameTruncated) name += "wrd";
+            result.args.push_back(Value(extractWordRange(session, session.matches[match].first, session.matches[match].last)));
+            match++;
+            continue;
+        }
+        // literal
+        int litIndex = -(tok + 1);
+        std::string litText = (litIndex >= 0 && static_cast<size_t>(litIndex) < literals.size()) ? literals[litIndex] : "";
+        if (tryIdx == 0) {
+            if (!nameTruncated) name += litText;
+        } else if (tryIdx < 3) {
+            if (!nameTruncated) name += "word";
+            result.args.push_back(Value(litText));
+        }
+        // tryIdx == 3: real code contributes neither a name segment
+        // nor an argument for a literal token.
+    }
+
+    result.functionName = name;
+    return result;
+}
+
+// real push_real_names() (packages/parser.c).
+std::vector<Value> pushRealNames(SentenceSession& session, int tryIdx) {
+    std::vector<Value> args;
+    if (tryIdx >= 2) {
+        args.push_back(Value(extractWordRange(session, 0, 0)));
+    }
+    int match = 0;
+    for (int tok : session.currentNode->tokens) {
+        if (tok > 0) {
+            args.push_back(Value(extractWordRange(session, session.matches[match].first, session.matches[match].last)));
+            match++;
+        }
+    }
+    return args;
+}
+
+// real check_functions() (packages/parser.c): probes can_ (real
+// which == 0) under all four real naming strategies, first against
+// `player`, then (tryIdx 4-7, i.e. tryIdx % 4 again) against the rule's
+// own registering object (session.currentNode->handler) if the first
+// four attempts found nothing.
+bool checkFunctions(VM& vm, SentenceSession& session, MatchState& state, const std::shared_ptr<LpcObject>& player) {
+    std::shared_ptr<LpcObject> ob = player;
+    if (!ob || ob->isDestructed()) return false;
+
+    int ret = 0;
+    for (int tryIdx = 0; !ret && tryIdx < 8; tryIdx++) {
+        if (tryIdx == 4) {
+            ob = session.currentNode->handler.lock();
+            if (!ob || ob->isDestructed()) return false;
+        }
+        BuiltFunction built = makeFunction(session, 0, tryIdx % 4);
+        std::vector<Value> extra = pushRealNames(session, tryIdx % 4);
+        built.args.insert(built.args.end(), extra.begin(), extra.end());
+
+        bool exists = vm.functionExists(ob, built.functionName);
+        Value result = exists ? vm.callFunction(ob, built.functionName, built.args) : Value{};
+        ret = processAnswer(session, state, exists, result, 0);
+        if (ob->isDestructed()) return false;
+        if (ret == -3) return false;
+    }
+    if (!ret) {
+        if (state.numErrors == session.bestNumErrors) return false;
+        if (state.numErrors++ == 0) makeErrorMessage(session, 0, session.currentError);
+    }
+    return true;
+}
+
+// real we_are_finished() (packages/parser.c), minus the per-match
+// object-token loop and check_object_relations() -- both real no-ops
+// for this slice, since no match here ever carries an OBJ-family token
+// and state.numObjs (real parse_state_t::num_objs) accordingly never
+// leaves 0. Not modeled as a field on MatchState at all, since nothing
+// in this slice could ever set it to anything else.
+void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
+    if (session.foundLevel < 2) session.foundLevel = 2;
+    if (session.bestMatchWeight >= session.currentNode->weight) return;
+    if (state.numErrors) {
+        if (state.numErrors > session.bestNumErrors) return;
+        if (state.numErrors == session.bestNumErrors && session.currentNode->weight < session.bestErrorWeight) return;
+    }
+
+    if (!checkFunctions(vm, session, state, session.caller)) return;
+
+    if (state.numErrors) {
+        int weight = session.currentNode->weight;
+        // real ERR_THERE_IS_NO reweighting is unreachable here (that
+        // error kind is exclusively produced by object-token matching).
+        if (state.numErrors == session.bestNumErrors && weight <= session.bestErrorWeight) return;
+        session.bestError = session.currentError;
+        session.currentError = ParserErrorInfo{};
+        session.bestNumErrors = state.numErrors;
+        session.bestErrorWeight = weight;
+        return;
+    }
+
+    session.bestMatchWeight = session.currentNode->weight;
+    auto handler = session.currentNode->handler.lock();
+    if (!handler || handler->isDestructed()) return;
+
+    SentenceMatchResult result;
+    result.handler = handler;
+    for (int tryIdx = 0; tryIdx < 4; tryIdx++) {
+        BuiltFunction built = makeFunction(session, 3, tryIdx);
+        std::vector<Value> extra = pushRealNames(session, tryIdx);
+        built.args.insert(built.args.end(), extra.begin(), extra.end());
+        result.res[tryIdx].functionName = built.functionName;
+        result.res[tryIdx].args = std::move(built.args);
+    }
+    session.bestResult = std::move(result);
+}
+
+// real parse_rules() (packages/parser.c): tries every rule node
+// registered under the matched verb, skipping any node this slice
+// cannot attempt (hasObjectToken -- see VerbRuleNode's own comment),
+// any node whose weight cannot beat the current best match, and any
+// node whose own lit[0]/lit[1] prefilter fails.
+void parseRulesFor(VM& vm, SentenceSession& session) {
+    for (const VerbRuleNode& node : session.matchedVerb->nodes) {
+        if (node.hasObjectToken) continue;
+        if (session.bestMatchWeight > node.weight) continue;
+
+        int pos = 0;
+        if (node.lit[0] != -1) {
+            pos = checkLiteral(session, node.lit[0], 1);
+            if (pos == 0) continue;
+        }
+        if (node.lit[1] != -1) {
+            if (checkLiteral(session, node.lit[1], pos) == 0) continue;
+        }
+
+        session.currentNode = &node;
+        MatchState state;
+        state.tokIndex = 0;
+        state.wordIndex = 1;
+        state.numMatches = 0;
+        state.numErrors = 0;
+        parseRule(vm, session, state);
+    }
+}
+
+// real do_the_call() (packages/parser.c): invokes the first of the four
+// pre-built do_ variants that is actually defined on the handler.
+void doTheCall(VM& vm, SentenceSession& session) {
+    auto ob = session.bestResult->handler.lock();
+    if (!ob || ob->isDestructed()) return;
+    for (int i = 0; i < 4; i++) {
+        if (ob->isDestructed()) return;
+        const auto& call = session.bestResult->res[i];
+        if (vm.functionExists(ob, call.functionName)) {
+            vm.callFunction(ob, call.functionName, call.args);
+            return;
+        }
+    }
+    throw LpcRuntimeError("parse_sentence: parse accepted, but no do_* function found on /" + ob->filename());
+}
+
+// real get_the_error() (packages/parser.c), with `obj` fixed at real
+// code's own -1 -- confirmed directly that every real call site
+// (f_parse_sentence(), f_parse_my_rules()) passes -1, making the
+// "push_object(loaded_objects[obj])" branch genuinely dead code in real
+// usage; only the "push_undefined()" (real const0u, a plain int 0)
+// branch is ever reached, so this driver only implements that one.
+Value getTheError(VM& vm, SentenceSession& session) {
+    if (session.bestError.errorType == ParserErrorType::Allocated) {
+        if (!vm.masterObject()) return Value(static_cast<int64_t>(0));
+        std::vector<Value> args = {Value(static_cast<int64_t>(ParserErrorType::Allocated)),
+                                    Value(static_cast<int64_t>(0)), Value(session.bestError.allocatedMessage)};
+        Value ret = vm.applyMaster("parser_error_message", std::move(args));
+        if (std::holds_alternative<std::monostate>(ret.data)) return Value(static_cast<int64_t>(0));
+        return ret;
+    }
+    // real "default: ...; hack.u.number = -found_level; return &hack;"
+    return Value(static_cast<int64_t>(-session.foundLevel));
+}
+
+} // namespace
+
+Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& caller, const std::string& sentence,
+                                     bool debugFlag) {
+    // real code's own check order: the "not known by the parser" guard
+    // runs before anything else, including the debug-flag check below.
+    if (!caller || !caller->hasParseInfo()) {
+        throw LpcRuntimeError("parse_sentence: object is not known by the parser (call parse_init() first)");
+    }
+    // real f_parse_sentence()'s own `#else error("Parser debugging not
+    // enabled. (compile with -DDEBUG or -DPARSE_DEBUG).\n");` -- this
+    // driver has no such tracing at all, so that branch is always the
+    // real one taken for a truthy debug argument.
+    if (debugFlag) {
+        throw LpcRuntimeError("parse_sentence: parser debugging not enabled (compile with -DDEBUG or -DPARSE_DEBUG)");
+    }
+
+    SentenceSession session;
+    session.rawInput = sentence;
+    session.caller = caller;
+
+    std::vector<SentenceWord> rawWords = splitSentenceWords(sentence);
+
+    // real parse_sentence()'s own "find an interpretation, first word
+    // must be shared (verb)" loop -- tries progressively longer leading
+    // word-phrases as the verb candidate (real code's own findstring()-
+    // based multi-word-verb mechanism, replicated here via a plain
+    // registry lookup instead of a global string-interning table, which
+    // this driver has no equivalent of -- see this file's own earlier
+    // comments on the same point for addRule()/addSynonym()).
+    for (size_t i = 1; i <= rawWords.size(); i++) {
+        std::string candidate = rawWords[0].text;
+        for (size_t k = 1; k < i; k++) {
+            candidate += ' ';
+            candidate += rawWords[k].text;
+        }
+
+        auto it = verbs().find(candidate);
+        if (it == verbs().end()) continue;
+
+        for (VerbEntry& ve : it->second) {
+            const VerbEntry* target = &ve;
+            if (ve.isSynonym) {
+                auto targetIt = verbs().find(ve.synonymOf);
+                target = (targetIt != verbs().end()) ? findPlainEntry(targetIt->second, ve.synonymOf) : nullptr;
+                if (!target) continue;
+            }
+
+            if (session.foundLevel < 1) session.foundLevel = 1;
+
+            session.words.clear();
+            SentenceWord verbWord;
+            verbWord.text = candidate;
+            verbWord.rawStart = rawWords[0].rawStart;
+            verbWord.rawEnd = rawWords[i - 1].rawEnd;
+            session.words.push_back(verbWord);
+            for (size_t k = i; k < rawWords.size(); k++) session.words.push_back(rawWords[k]);
+
+            session.matchedVerb = target;
+            parseRulesFor(vm, session);
+        }
+    }
+
+    if (session.bestMatchWeight != 0) {
+        doTheCall(vm, session);
+        return Value(static_cast<int64_t>(1));
+    }
+    return getTheError(vm, session);
 }
 
 } // namespace amlp

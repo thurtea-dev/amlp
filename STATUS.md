@@ -3,6 +3,127 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-18 (continued): `parse_sentence()` implemented, `parse_*` (row
+0.13a) slice four -- restricted to STR/WRD/literal-only rules, confirmed
+from source to be a genuine subset of real behavior rather than a
+simplification of it, plus one real, incidental, unrelated driver-wide
+gap found live (no `SIGPIPE` handling at all) (656 tests, up from 646).**
+
+Asked explicitly to confirm from source whether "(6)+(8)+(9) all
+together" (the sentence tokenizer, the noun-phrase resolution engine,
+and the matcher) was genuinely the smallest remaining slice, or whether
+some smaller piece inside that group was separable on its own, the way
+the previous session's own `parse_free()`/`parse_refresh()` pick turned
+out to be for item (7). Traced every real call path into
+`interrogate_object()` (the function that populates a live object's own
+noun/adjective/plural id cache -- item 8's own core) and confirmed its
+one and only real caller is `load_objects()`, itself only reachable from
+`parse_obj()`, itself only reached by `parse_rule()`'s own OBJ/LIV/OBS/
+LVS token case. A rule built entirely from STR tokens, WRD tokens, and
+literal words never reaches any of that machinery **in real FluffOS
+either**, not just in a scoped-down port of it -- meaning "STR/WRD/
+literal-only `parse_sentence()`" is a genuine, real, complete subset of
+real behavior, and every function this slice ported is the *exact* real
+function, with the unreachable OBJ-family branches kept in as explicit,
+documented dead code (a precise insertion point for the next slice)
+rather than silently omitted or guessed at.
+
+Ported: the word-splitter and multi-word-verb-phrase lookup (item 6);
+the recursive-descent matcher and the can_/direct_/indirect_/do_
+callback machinery (item 9) -- including real `make_function()`'s own
+four distinct naming *strategies* for the same callback (embed the
+verb's own name directly; the same but push literal-token arguments as
+data instead; a generic "verb" name with the real verb name pushed as
+an argument; the whole name collapsed to "do_verb_rule" with the exact
+rule string pushed as an argument), all four confirmed reachable and
+correct via a dedicated test for the least obvious one (the do_verb_rule
+form, a genuinely easy shape to get wrong -- only got it right, first
+try, after very careful line-by-line re-derivation of its real 5-
+argument signature rather than working from intuition); error reporting
+restricted to the one real error kind (`ERR_ALLOCATED`) this slice's own
+matcher can actually produce, every other real kind confirmed
+unreachable the same way and recorded with its real numeric value
+(`include/parser_error.h`) for the next slice to extend rather than
+renumber.
+
+One real registry-shape addition, found and added cleanly rather than
+reworked in: real `VB_HAS_OBJ` needed a per-*rule* home (deciding which
+individual rule nodes this slice can even attempt), not the per-verb one
+real code itself uses it for -- added as `VerbRuleNode::hasObjectToken`,
+computed once at rule-registration time, zero changes needed to anything
+the three earlier slices already built.
+
+One real, driver-wide gap found and fixed along the way, unrelated to
+parsing itself: this driver's own `Return` opcode represents a function
+falling off its own end with no explicit `return` statement as
+`Value{}` (monostate/"void"), not a real `int64_t 0` the way genuine LPC
+semantics implicitly return (`VM.cpp`'s own "if (localStack.empty())
+return Value{};", confirmed directly) -- which would have made a
+genuinely-defined-but-early-falling-off `can_`/`direct_`/`do_` function
+get silently treated the same as an undefined one by `process_answer()`'s
+own three-way branch. Fixed by checking `VM::functionExists()` explicitly
+before every call (already needed anyway, to distinguish "undefined, try
+the next naming convention" from "defined, whatever it returned") and
+then treating monostate the same as an explicit falsy `int64_t 0` in
+this one function's own port -- scoped to this efun family specifically,
+not a change to the driver-wide monostate/int-0 choice other code
+elsewhere already relies on.
+
+One real, deliberate architecture improvement over real code, called out
+rather than made silently: real `parse_sentence()`'s own "current parse
+in progress" state is a set of global C statics, with its own recursion
+guard explicitly disabled in the real source ("may not be done in case
+of an error, or in case of tail recursion") -- a genuinely reentrant call
+in real FluffOS can silently corrupt an outer parse still in progress.
+This port collects the same state into one `SentenceSession` object
+constructed fresh per call and threaded through by reference instead,
+rather than reintroducing that same hazard in C++ -- not a fidelity
+loss, since every one of this row's own tests (and any real, well-
+behaved caller) only ever depends on each call's own correct result, not
+on the corruption itself.
+
+10 new regression tests, 656 tests passing, up from 646, zero
+regressions. **Verified live against the real running driver, real
+bundled `mudlib/`**, same harness-tracked `run_in_background`/`TaskStop`
+methodology as the previous two slices: a real cloned object's
+`parse_add_rule("look","STR")` plus `parse_sentence("look at the
+mysterious door")` returned `1` and correctly invoked `do_look_str()`
+with the real original-cased text `"at the mysterious door"`; an
+unrecognized verb returned `0`; a recognized verb with unsatisfiable
+grammar returned `-1`; an explicit string rejection correctly fell back
+to `0` since the real bundled master does not define
+`parser_error_message()`; ordinary gameplay kept working throughout.
+
+**One real, incidental, unrelated finding, not caused by this slice and
+not fixed here:** the driver process has no `SIGPIPE` handling at all
+(confirmed directly -- zero hits for `SIGPIPE`/`MSG_NOSIGNAL`/
+`SO_NOSIGPIPE` anywhere in `src/`/`include/`; `main.cpp` registers
+handlers only for `SIGINT`/`SIGTERM`), meaning a client connection
+closing at the wrong moment relative to the driver's own next write to
+that same socket can raise `SIGPIPE`, whose default disposition kills
+the *entire process*, not just that one connection. Reproduced once,
+live, during this session's own test-client cleanup (a background driver
+instance exited with code 141, the standard `128+SIGPIPE` shell
+convention) -- a second, identical attempt did not retrigger it, so this
+is a genuine timing-dependent race, not a deterministic repro, but the
+underlying gap itself is confirmed with certainty directly from source
+regardless of how reliably any one test happens to trigger it. A
+different root cause from this same session's own earlier "uncaught LPC
+exception" crash-claim correction (see this file's own dated entry below)
+-- that one was a C++ exception-handling question with a confirmed-
+correct answer (no crash); this one is a raw, completely unhandled OS
+signal, genuinely triggerable in principle by any real player's abrupt
+disconnect, not specific to `parse_*` work at all, and out of this
+session's own scope to fix (a `src/net`-level concern). Flagged here with
+its exact real citation so a future session does not need to rediscover
+it from scratch.
+
+See ROADMAP.md row 0.13a for the full updated breakdown; its next-slice
+recommendation now points at the noun-phrase-to-object resolution engine
+(item 8), the one remaining real prerequisite for OBJ/LIV/OBS/LVS token
+support, with every real insertion point this slice's own OBJ-family
+dead branches left already marked in `ParserPackage.cpp`.
+
 **2026-08-18 (continued): `parse_free()`/`parse_refresh()` implemented,
 `parse_*` (row 0.13a) slice three -- picked after confirming from source
 that the fuller `parse_info_t`'s own noun/adj/plural cache is not

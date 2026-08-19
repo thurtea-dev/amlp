@@ -18612,6 +18612,269 @@ static void testParseAddRuleAndParseRefreshBothFireLivingsAreRemoteAndSetTheFlag
     std::cout << "testParseAddRuleAndParseRefreshBothFireLivingsAreRemoteAndSetTheFlagWhenTruthy OK\n";
 }
 
+// --- parse_sentence(): row 0.13a's fourth parse_* slice, restricted to
+// STR/WRD/literal-only rules (no OBJ/LIV/OBS/LVS support yet -- see
+// ParserPackage::parseSentence()'s own header comment for why that
+// scope was confirmed genuinely separable from the noun-phrase
+// resolution engine, not just assumed).
+
+static void testParseSentenceMatchesStrTokenAndInvokesDoFunctionUnderTheSimpleNaming() {
+    std::string src =
+        "string lastArg;\n"
+        "void setup() { parse_init(); parse_add_rule(\"look\", \"STR\"); }\n"
+        "int can_look_str(string s) { return 1; }\n"
+        "void do_look_str(string s) { lastArg = s; }\n"
+        "string probe() { return lastArg; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result =
+        vm.callFunction(obj, "run", std::vector<amlp::Value>{amlp::Value(std::string("look around the room"))});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    amlp::Value probeResult = vm.callFunction(obj, "probe", {});
+    // real strput_words(): original casing/spacing preserved, trimmed --
+    // "around the room", not the lowercased grammar-matching form.
+    assert(std::get<std::string>(probeResult.data) == "around the room");
+
+    std::cout << "testParseSentenceMatchesStrTokenAndInvokesDoFunctionUnderTheSimpleNaming OK\n";
+}
+
+static void testParseSentenceMatchesWrdTokenExactlyOneWord() {
+    std::string src =
+        "string lastArg;\n"
+        "void setup() { parse_init(); parse_add_rule(\"drop\", \"WRD\"); }\n"
+        "int can_drop_wrd(string s) { return 1; }\n"
+        "void do_drop_wrd(string s) { lastArg = s; }\n"
+        "string probe() { return lastArg; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result = vm.callFunction(obj, "run", std::vector<amlp::Value>{amlp::Value(std::string("Drop SWORD"))});
+    assert(std::get<int64_t>(result.data) == 1);
+    // real WRD is exactly one word, original casing preserved.
+    assert(std::get<std::string>(vm.callFunction(obj, "probe", {}).data) == "SWORD");
+
+    std::cout << "testParseSentenceMatchesWrdTokenExactlyOneWord OK\n";
+}
+
+static void testParseSentenceMatchesLiteralPlusStrAgainstRealMasterPrepositionList() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "mixed *parse_command_prepos_list() { return ({\"at\"}); }\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/zzzlooker.c",
+        "string lastArg;\n"
+        "void setup() { parse_init(); parse_add_rule(\"look\", \"at STR\"); }\n"
+        "int can_look_at_str(string s) { return 1; }\n"
+        "void do_look_at_str(string s) { lastArg = s; }\n"
+        "string probe() { return lastArg; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n");
+    auto ob = harness.objects.cloneObject("/zzzlooker");
+    assert(ob != nullptr);
+    harness.vm.callFunction(ob, "setup", {});
+
+    amlp::Value result =
+        harness.vm.callFunction(ob, "run", std::vector<amlp::Value>{amlp::Value(std::string("look at the Painting"))});
+    assert(std::get<int64_t>(result.data) == 1);
+    assert(std::get<std::string>(harness.vm.callFunction(ob, "probe", {}).data) == "the Painting");
+
+    std::cout << "testParseSentenceMatchesLiteralPlusStrAgainstRealMasterPrepositionList OK\n";
+}
+
+static void testParseSentenceReturnsZeroWhenNoVerbRecognizedAtAll() {
+    std::string src = "void setup() { parse_init(); parse_add_rule(\"look\", \"STR\"); }\n"
+                       "mixed run(string sentence) { return parse_sentence(sentence); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result = vm.callFunction(obj, "run", std::vector<amlp::Value>{amlp::Value(std::string("xyzzy"))});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testParseSentenceReturnsZeroWhenNoVerbRecognizedAtAll OK\n";
+}
+
+static void testParseSentenceReturnsNegativeOneWhenVerbRecognizedButGrammarNeedsMoreWords() {
+    // real found_level semantics: 1 once a registered verb word itself
+    // is recognized, even if no rule under it can actually be satisfied
+    // by the rest of the input -- "look" alone against a "STR"-only
+    // rule runs out of words before STR can match at all (real
+    // parse_rule()'s own top-of-loop "ran out of words" check fires
+    // first), so nothing ever reaches we_are_finished().
+    std::string src = "void setup() { parse_init(); parse_add_rule(\"look\", \"STR\"); }\n"
+                       "mixed run(string sentence) { return parse_sentence(sentence); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result = vm.callFunction(obj, "run", std::vector<amlp::Value>{amlp::Value(std::string("look"))});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == -1);
+
+    std::cout << "testParseSentenceReturnsNegativeOneWhenVerbRecognizedButGrammarNeedsMoreWords OK\n";
+}
+
+static void testParseSentenceExplicitStringRejectionRoutesThroughMasterParserErrorMessage() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "string parser_error_message(int errType, mixed obj, string msg) {\n"
+        "    return \"ERRMSG:\" + errType + \":\" + msg;\n"
+        "}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/zzzeater.c",
+        "void setup() { parse_init(); parse_add_rule(\"eat\", \"STR\"); }\n"
+        "mixed can_eat_str(string s) { return \"You can't eat that here.\"; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n");
+    auto ob = harness.objects.cloneObject("/zzzeater");
+    assert(ob != nullptr);
+    harness.vm.callFunction(ob, "setup", {});
+
+    amlp::Value result =
+        harness.vm.callFunction(ob, "run", std::vector<amlp::Value>{amlp::Value(std::string("eat the cake"))});
+    assert(std::holds_alternative<std::string>(result.data));
+    // real ERR_ALLOCATED == 6 (include/parser_error.h), confirmed the
+    // real master apply actually received it, not a placeholder.
+    assert(std::get<std::string>(result.data) == "ERRMSG:6:You can't eat that here.");
+
+    std::cout << "testParseSentenceExplicitStringRejectionRoutesThroughMasterParserErrorMessage OK\n";
+}
+
+static void testParseSentenceExplicitRejectionReturnsZeroWhenMasterDoesNotDefineParserErrorMessage() {
+    std::string src = "void setup() { parse_init(); parse_add_rule(\"eat\", \"STR\"); }\n"
+                       "mixed can_eat_str(string s) { return \"nope\"; }\n"
+                       "mixed run(string sentence) { return parse_sentence(sentence); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result = vm.callFunction(obj, "run", std::vector<amlp::Value>{amlp::Value(std::string("eat cake"))});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 0);
+
+    std::cout << "testParseSentenceExplicitRejectionReturnsZeroWhenMasterDoesNotDefineParserErrorMessage OK\n";
+}
+
+static void testParseSentenceSkipsAnObjectTokenRuleGracefullyAndStillMatchesASiblingStrRule() {
+    std::string src =
+        "string lastArg;\n"
+        "void setup() {\n"
+        "    parse_init();\n"
+        "    parse_add_rule(\"get\", \"OBJ\");\n"
+        "    parse_add_rule(\"get\", \"STR\");\n"
+        "}\n"
+        "int can_get_str(string s) { return 1; }\n"
+        "void do_get_str(string s) { lastArg = s; }\n"
+        "string probe() { return lastArg; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result =
+        vm.callFunction(obj, "run", std::vector<amlp::Value>{amlp::Value(std::string("get the red apple"))});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    assert(std::get<std::string>(vm.callFunction(obj, "probe", {}).data) == "the red apple");
+
+    std::cout << "testParseSentenceSkipsAnObjectTokenRuleGracefullyAndStillMatchesASiblingStrRule OK\n";
+}
+
+static void testParseSentenceFallsBackToTheGenericDoVerbRuleNamingWhenTheSimpleNameIsNotDefined() {
+    // real make_function()'s own try==3 shape: name collapses to
+    // "do_verb_rule" (real code's own truncating-null trick, ported as
+    // a direct "stop appending" here -- see makeFunction()'s own
+    // comment), with 5 combined arguments in this exact order: the
+    // verb's own real name (from make_function()'s try>=2 "push verb
+    // name" step), the rule string itself (try==3's own "_rule"
+    // argument), the STR token's own matched text (make_function()'s
+    // own per-token loop), then push_real_names()'s own two additions
+    // for try>=2: the verb word as originally typed, and the STR
+    // token's matched text again.
+    std::string src =
+        "string got_verbName, got_ruleStr, got_strText, got_verbWord, got_strTextAgain;\n"
+        "void setup() { parse_init(); parse_add_rule(\"toss\", \"STR\"); }\n"
+        "int can_toss_str(string s) { return 1; }\n"
+        "void do_verb_rule(string verbName, string ruleStr, string strText, string verbWord, string strTextAgain) {\n"
+        "    got_verbName = verbName; got_ruleStr = ruleStr; got_strText = strText;\n"
+        "    got_verbWord = verbWord; got_strTextAgain = strTextAgain;\n"
+        "}\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n"
+        "mixed *probe() { return ({ got_verbName, got_ruleStr, got_strText, got_verbWord, got_strTextAgain }); }\n";
+    auto obj = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(obj, "setup", {});
+    amlp::Value result = vm.callFunction(obj, "run", std::vector<amlp::Value>{amlp::Value(std::string("Toss the coin"))});
+    assert(std::get<int64_t>(result.data) == 1);
+
+    amlp::Value probe = vm.callFunction(obj, "probe", {});
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(probe.data);
+    assert(arr->items.size() == 5);
+    assert(std::get<std::string>(arr->items[0].data) == "toss");   // real verb name (match_name)
+    assert(std::get<std::string>(arr->items[1].data) == "STR");    // rule_string()
+    assert(std::get<std::string>(arr->items[2].data) == "the coin"); // STR match text
+    assert(std::get<std::string>(arr->items[3].data) == "Toss");   // original-cased verb word as typed
+    assert(std::get<std::string>(arr->items[4].data) == "the coin"); // push_real_names()'s own duplicate
+
+    std::cout << "testParseSentenceFallsBackToTheGenericDoVerbRuleNamingWhenTheSimpleNameIsNotDefined OK\n";
+}
+
+static void testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag() {
+    std::string src = "void setup() { parse_init(); parse_add_rule(\"look\", \"STR\"); }\n"
+                       "int probeNoInit() {\n"
+                       "    if (!catch(parse_sentence(\"look around\"))) return 0;\n"
+                       "    return 1;\n"
+                       "}\n"
+                       "int probeDebugFlag() {\n"
+                       "    parse_init();\n"
+                       "    if (!catch(parse_sentence(\"look around\", 1))) return 0;\n"
+                       "    return 1;\n"
+                       "}\n";
+    auto objA = compileProgramObject(src); // never calls setup()/parse_init()
+    auto objB = compileProgramObject(src);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    assert(std::get<int64_t>(vm.callFunction(objA, "probeNoInit", {}).data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(objB, "probeDebugFlag", {}).data) == 1);
+
+    std::cout << "testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag OK\n";
+}
+
 int main() {
     // Real efuns (sizeof, write, etc.) are only registered here, in this
     // test binary, so the VM-level tests below can call them. Names like
@@ -19265,6 +19528,16 @@ int main() {
     testParseFreeRealDestructEfunEagerlyRemovesTheDestructedHandlersOwnRuleNodes();
     testParseRefreshThrowsWhenParseInitWasNeverCalledExceptForTheMasterObject();
     testParseAddRuleAndParseRefreshBothFireLivingsAreRemoteAndSetTheFlagWhenTruthy();
+    testParseSentenceMatchesStrTokenAndInvokesDoFunctionUnderTheSimpleNaming();
+    testParseSentenceMatchesWrdTokenExactlyOneWord();
+    testParseSentenceMatchesLiteralPlusStrAgainstRealMasterPrepositionList();
+    testParseSentenceReturnsZeroWhenNoVerbRecognizedAtAll();
+    testParseSentenceReturnsNegativeOneWhenVerbRecognizedButGrammarNeedsMoreWords();
+    testParseSentenceExplicitStringRejectionRoutesThroughMasterParserErrorMessage();
+    testParseSentenceExplicitRejectionReturnsZeroWhenMasterDoesNotDefineParserErrorMessage();
+    testParseSentenceSkipsAnObjectTokenRuleGracefullyAndStillMatchesASiblingStrRule();
+    testParseSentenceFallsBackToTheGenericDoVerbRuleNamingWhenTheSimpleNameIsNotDefined();
+    testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag();
     std::cout << "all tests passed\n";
     return 0;
 }
