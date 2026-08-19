@@ -236,14 +236,25 @@ void CodeGen::emitIncDecExpr(const IncDecExpr& incDec) {
         // produce (the pre- or post-mutation one, per incDec.prefix) is
         // stashed in a hidden temp local rather than kept on the stack
         // across the target/index pushes needed for the write.
+        //
+        // mapColumn (LDMud map[key, n]++, real F_MAP_INDEX_LVALUE) rides
+        // along the same way emitExpr()'s own IndexExpr case pushes it:
+        // one extra value after the key, with bit 2 of Index/IndexAssign's
+        // flags operand set so the VM reads it back. Re-evaluated twice
+        // (once per Index/IndexAssign pair below) same as indexTarget/
+        // indexKey already are -- see emitIndexAssignStmt()'s own comment
+        // on why that is harmless for every real target/index/column this
+        // mudlib's own call sites actually use.
         std::string oldName = "$idxassign#" + std::to_string(indexAssignCounter_++);
         int oldSlot = declareLocal(oldName);
         std::string newName = "$idxassign#" + std::to_string(indexAssignCounter_++);
         int newSlot = declareLocal(newName);
+        int32_t flags = incDec.mapColumn ? 0x4 : 0;
 
         emitExpr(*incDec.indexTarget);
         emitExpr(*incDec.indexKey);
-        out_->code.push_back(Instruction{OpCode::Index, 0, 0});
+        if (incDec.mapColumn) emitExpr(*incDec.mapColumn);
+        out_->code.push_back(Instruction{OpCode::Index, 0, flags});
         out_->code.push_back(Instruction{OpCode::StoreLocal, oldSlot, 0});
 
         out_->code.push_back(Instruction{OpCode::PushLocal, oldSlot, 0});
@@ -253,8 +264,9 @@ void CodeGen::emitIncDecExpr(const IncDecExpr& incDec) {
 
         emitExpr(*incDec.indexTarget);
         emitExpr(*incDec.indexKey);
+        if (incDec.mapColumn) emitExpr(*incDec.mapColumn);
         out_->code.push_back(Instruction{OpCode::PushLocal, newSlot, 0});
-        out_->code.push_back(Instruction{OpCode::IndexAssign, 0, 0});
+        out_->code.push_back(Instruction{OpCode::IndexAssign, 0, flags});
 
         out_->code.push_back(
             Instruction{OpCode::PushLocal, incDec.prefix ? newSlot : oldSlot, 0});

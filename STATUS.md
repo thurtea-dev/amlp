@@ -3,6 +3,105 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (a further fresh session, same day): row 1.9 (LDMud mapping
+N-width) remaining sub-items re-checked against real corpus evidence
+fresh; none showed real usage; picked and fixed a real, live, silently-
+corrupting IncDec-on-`map[key, n]` bug on structural-necessity grounds
+instead (683 tests, up from 682).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules).
+
+**Corpus re-check.** Row 1.9's remaining open sub-items going into this
+session: `([:width])` mapping-width literal syntax, `m_allocate`/
+`m_entry`/`m_reallocate`/`m_add`/`m_contains`, mapping range index
+(`map[key, n1..n2]` / `map[key, <n]`), save/restore of extra columns,
+IncDec (`++`/`--`) on `map[key, n]`. Re-checked each fresh against every
+extracted mudlib corpus under `temp/` (`core-lib`, `dead-souls`,
+`es2_mudlib`, `lima`, `mudlib`, `nightmare3`, `wiz_tools`, `lil`), not
+reused from a prior session's count. `m_allocate`/`m_add` together
+turned up 5 raw substring hits; all 5 were false positives on direct
+read -- the 3 `m_allocate` hits are `dead-souls`/`nightmare3` doc-manual
+prose ("`map = allocate_mapping(10) ...OR... map = m_allocate(10)`"),
+the 2 `m_add` hits are substring matches inside unrelated identifiers
+(`room_add_object`, `LIVE_I_VICTIM_ADDED_AWARENESS`). `m_entry`/
+`m_reallocate`/`m_contains`: zero hits. `([:width])`: zero hits.
+Mapping range index: confirmed as real, separate LDMud machinery by
+reading `temp/ldmud/src/prolang.y`'s own `index_map_range` rule and
+`F_MAP_RANGE`/`F_MAP_RANGE_LVALUE`, plus `interpret.c`'s
+`unprotected_map_range`/`protected_map_range_lvalue` structs -- not
+speculative, it is a real, separate grammar production and lvalue kind
+from the plain `map[key, n]` this row already ships -- but zero real
+corpus usage found for the actual range syntax. Save/restore of extra
+columns: zero real corpus usage found (no width>1 mapping anywhere in
+any corpus is ever the target of `save_object`). Net: none of the five
+remaining sub-items show real corpus usage, matching this session's own
+instructions' fallback case exactly.
+
+**Structural-necessity pick: IncDec on `map[key, n]`.** Per this
+session's own instructions, when no candidate shows corpus usage the
+next pick is whatever is structurally necessary to keep the
+already-built width-2 slice correct and safe. Checking the already-
+built machinery for exactly that kind of latent breakage (rather than
+just picking one of the five to start building fresh) surfaced a real,
+live bug: `Parser::parsePostfix()`/`parseUnary()` (`Parser.cpp`) already
+parse `map[key, n]++` / `--map[key, n]` as an ordinary `IndexExpr` with
+`mapColumn` set -- no parse error -- but both sites then built an
+`IncDecExpr` from it copying only `indexTarget`/`indexKey`, silently
+dropping `mapColumn` on the floor. The result: `m["a", 1]++` compiled
+and ran without error, but silently mutated column 0 instead of column
+1 -- exactly the "silently corrupt an existing width-2 mapping" failure
+mode this session's own instructions named as the deciding case. This
+is real LDMud behavior worth porting faithfully, not a made-up
+extension of this driver's own IncDec support: real LDMud's generic
+lvalue-increment machinery has its own genuine `F_MAP_INDEX_LVALUE`
+operator (`prolang.y:17018`, `interpret.c:16944`) backing
+`map[key, n]++`, the same way plain `F_INDEX_LVALUE` backs `arr[i]++`.
+
+**Fix.** `IncDecExpr` (`Ast.hpp`) gained a `mapColumn` field alongside
+its existing `indexTarget`/`indexKey`. Both Parser sites (the postfix
+branch in `parsePostfix()` and the prefix branch in `parseUnary()`) now
+copy `idx->mapColumn` onto it instead of dropping it.
+`CodeGen::emitIncDecExpr()`'s indexed branch now emits the mapColumn
+expression alongside `indexTarget`/`indexKey` (both places it currently
+re-evaluates them, for the read and for the write, same pre-existing
+double-evaluation caveat `emitIndexAssignStmt()` already documents for
+plain indexed compound assignment) and sets the existing `Index`/
+`IndexAssign` opcodes' `0x4` mapping-column flag bit. No `VM.cpp` change
+was needed at all -- this reuses the exact same opcode paths, including
+the real missing-key auto-insert and out-of-range-column error, that
+the width-2 slice already shipped and tested.
+
+1 new regression test,
+`testLdmudIncDecOnMapColumnMutatesTheCorrectColumnNotColumnZero`:
+postfix and prefix `++`/`--` on a real column of a real width-2 mapping,
+confirming column 0 stays untouched by column-1 operations and vice
+versa, plus a missing-key auto-insert via `++m["new", 1]` (the other
+column defaults to 0, matching the width-2 slice's own already-tested
+plain-assign auto-insert behavior).
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4123, `dialect: ldmud`, a
+plain TCP client, real `eval` calls):
+`mapping m = (["a": 10; 100]); mixed r1 = m["a",1]++; mixed r2 =
+++m["a",1]; mixed r3 = m["a",0]--; mixed r4 = ++m["new",1]; return
+({r1,r2,r3,r4,m["a",0],m["a",1],m["new",0],m["new",1]});` returned
+`({ 100, 102, 10, 1, 9, 102, 0, 1 })`, matching hand-derived expected
+values exactly (postfix `++` returns the pre-mutation 100 and leaves
+column 1 at 101 before the next call; prefix `++` returns the
+post-mutation 102; postfix `--` on column 0 returns 10 and leaves it at
+9, column 1 untouched; the missing-key insert returns 1 with column 0
+defaulted to 0). Driver stayed healthy afterward (`eval return 1+1;` ->
+2, `who`). Live `tmp_eval_file.c` removed before stopping the scratch
+process, leaving the bundled `mudlib/` tree as found.
+
+Still open on row 1.9, confirmed zero real corpus usage this session:
+`([:width])`, `m_allocate`/`m_entry`/`m_reallocate`/`m_add`/
+`m_contains`, mapping range index, save/restore of extra columns.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (a further fresh session, same day): env-override test
 confirmed, nicks remaining-work recorded, parse_* false-pass audit
 found none, then row 1.9's first real N-column mapping-width slice

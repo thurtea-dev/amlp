@@ -714,6 +714,7 @@ AstPtr Parser::parsePostfix() {
             incDec->prefix = false;
             incDec->indexTarget = std::move(idx->target);
             incDec->indexKey = std::move(idx->index);
+            incDec->mapColumn = std::move(idx->mapColumn);
             return incDec;
         }
 
@@ -846,6 +847,7 @@ AstPtr Parser::parseUnary() {
             incDec->prefix = true;
             incDec->indexTarget = std::move(idx->target);
             incDec->indexKey = std::move(idx->index);
+            incDec->mapColumn = std::move(idx->mapColumn);
             return incDec;
         }
 

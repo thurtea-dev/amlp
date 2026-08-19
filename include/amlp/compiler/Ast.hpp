@@ -284,12 +284,25 @@ enum class IncDecOp { Inc, Dec };
 // comment describes for indexed assignment, and for the same reason:
 // only a bare variable name was recognized as a valid ++/-- target).
 // See CodeGen::emitIncDecExpr()'s indexed branch for the codegen.
+//
+// mapColumn mirrors IndexExpr/IndexAssignExpr's own field (LDMud
+// map[key, n], ROADMAP.md row 1.9): real LDMud's generic lvalue
+// increment machinery has its own genuine F_MAP_INDEX_LVALUE operator
+// (prolang.y:17018, interpret.c:16944) backing "map[key, n]++" the same
+// way F_INDEX_LVALUE backs a plain "arr[i]++" -- this is not a made-up
+// extension. Parser::parsePostfix()/parseUnary() previously parsed an
+// IndexExpr with mapColumn set, then silently dropped it while copying
+// indexTarget/indexKey onto this struct, so "map[key, 1]++" compiled
+// without error but silently mutated column 0 instead of column 1 --
+// found and fixed the same session the width-2 slice landed, before
+// any real code could rely on the wrong behavior.
 struct IncDecExpr : AstNode {
     IncDecOp op = IncDecOp::Inc;
     bool prefix = true;
     std::string name;
     AstPtr indexTarget;
     AstPtr indexKey;
+    AstPtr mapColumn;
 };
 
 struct ArrayLiteralExpr : AstNode {

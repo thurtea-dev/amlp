@@ -17789,6 +17789,63 @@ static void testLdmudMapColumnOutOfRangeAndMissingKeyFollowRealIndexSemantics() 
     std::cout << "testLdmudMapColumnOutOfRangeAndMissingKeyFollowRealIndexSemantics OK\n";
 }
 
+// ROADMAP.md row 1.9, IncDec (++/--) on map[key, n]: real LDMud's generic
+// lvalue increment machinery has a genuine F_MAP_INDEX_LVALUE operator
+// (prolang.y:17018, interpret.c:16944) backing this, the same way
+// F_INDEX_LVALUE backs a plain "arr[i]++" -- not a made-up extension.
+// Parser::parsePostfix()/parseUnary() previously parsed the IndexExpr
+// with mapColumn set correctly, then silently dropped it while copying
+// indexTarget/indexKey onto IncDecExpr, so "m[key, 1]++" compiled without
+// error but silently mutated column 0 -- a real, live silent-corruption
+// bug for the width-2 slice this same row already shipped, found and
+// fixed the same session rather than left standing.
+static void testLdmudIncDecOnMapColumnMutatesTheCorrectColumnNotColumnZero() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/mw_incdec.c",
+        "mapping m;\n"
+        "void reset() { m = ([\"a\": 10; 100]); }\n"
+        "mixed col0() { return m[\"a\", 0]; }\n"
+        "mixed col1() { return m[\"a\", 1]; }\n"
+        "mixed postIncCol1() { return m[\"a\", 1]++; }\n"
+        "mixed preIncCol1() { return ++m[\"a\", 1]; }\n"
+        "mixed postDecCol0() { return m[\"a\", 0]--; }\n"
+        "mixed insertViaIncDec() { return ++m[\"new\", 1]; }\n"
+        "mixed insertedCol0() { return m[\"new\", 0]; }\n");
+    auto obj = harness.objects.cloneObject("/mw_incdec");
+    assert(obj != nullptr);
+
+    harness.vm.callFunction(obj, "reset", {});
+    // postfix ++ on column 1: returns the pre-mutation value (100), and
+    // only column 1 changes -- column 0 must stay exactly 10, not the
+    // pre-fix silently-column-0 behavior.
+    amlp::Value post = harness.vm.callFunction(obj, "postIncCol1", {});
+    assert(std::get<int64_t>(post.data) == 100);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "col1", {}).data) == 101);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "col0", {}).data) == 10);
+
+    // prefix ++ on column 1: returns the post-mutation value.
+    amlp::Value pre = harness.vm.callFunction(obj, "preIncCol1", {});
+    assert(std::get<int64_t>(pre.data) == 102);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "col1", {}).data) == 102);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "col0", {}).data) == 10);
+
+    // postfix -- on column 0 leaves column 1 untouched.
+    amlp::Value postDec = harness.vm.callFunction(obj, "postDecCol0", {});
+    assert(std::get<int64_t>(postDec.data) == 10);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "col0", {}).data) == 9);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "col1", {}).data) == 102);
+
+    // Missing key: real get_map_lvalue()/assign_mapentry_lvalue() create
+    // the entry (same auto-insert as plain m[key, n] = value, already
+    // covered above) with the other columns defaulted to 0, then the
+    // increment applies to the requested column only.
+    amlp::Value inserted = harness.vm.callFunction(obj, "insertViaIncDec", {});
+    assert(std::get<int64_t>(inserted.data) == 1);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "insertedCol0", {}).data) == 0);
+
+    std::cout << "testLdmudIncDecOnMapColumnMutatesTheCorrectColumnNotColumnZero OK\n";
+}
+
 static void testFluffosMappingLiteralRejectsWidthTwoSemicolonSyntaxWhileLdmudAcceptsIt() {
     const char* src =
         "mapping probe() { return ([\"a\": 1; 2]); }\n";
@@ -21162,6 +21219,7 @@ int main() {
     testLdmudWidthTwoMappingLiteralReadsAssignsAndMValuesColumnOne();
     testLdmudMappingLiteralRejectsInconsistentWidthWithRealMessage();
     testLdmudMapColumnOutOfRangeAndMissingKeyFollowRealIndexSemantics();
+    testLdmudIncDecOnMapColumnMutatesTheCorrectColumnNotColumnZero();
     testFluffosMappingLiteralRejectsWidthTwoSemicolonSyntaxWhileLdmudAcceptsIt();
     testWandOfCreationHeldGuardBlocksAllCommandsWhenOnlyColocatedNotHeld();
     testWandOfCreationCloneAndPurgeWorkOnceGenuinelyHeld();
