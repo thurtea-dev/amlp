@@ -3,6 +3,153 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (another fresh session): scoped a future account/login/
+character-select mudlib plan (`mudlib/ACCOUNT_LOGIN_PLAN.md`, explicitly
+queued for later, not implementation); `parse_*` (row 0.13a) seventh real
+slice -- `parse_my_rules()`, the eighth and, per this row's own original
+8-function list, final still-missing name (674 tests, up from 670).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules), then produced the scoping plan
+first, as a non-blocking side task explicitly not to compete with driver
+priority. Read the real applies this driver fires around connection/login
+(`master()->connect()`, `logon()`, `Server.cpp:130-213`) and confirmed
+what a menu-driven login could build on: `input_to()` including a genuinely
+working `INPUT_NOECHO` (real telnet echo suppression actually fires, not a
+stub), `call_out()` idle timeouts, `exec()`, `crypt()`, and
+`save_object`/`restore_object` (confirmed round-trip safe with each other
+for same-driver account persistence, despite row 0.7's own "partial"
+status referring only to `save_object`'s output not yet being byte-real
+FluffOS `.o` format) -- versus what is genuinely missing (no
+`getuid()`/`seteuid()`/uid model at all, confirmed by grep; every
+`__PACKAGE_UIDS__` block in the bundled mudlib is dead code under this
+driver). Surveyed `temp/`'s newer corpora for a real reference flow:
+`temp/core-lib/secure/login.c` (+`login/core.c`/`menu-interactions.c`/
+`user-creation.c`) read in full, a modern (2017-2026) LDMud-flavored,
+already-unpacked `input_to()`-driven state machine with a separate auth
+daemon, the most relevant reference found; `final_realms_fluffos_v1.zip`'s
+`lib/secure/login.c`/`new_login.c` and `tmi2_fluffos_v3.zip`'s
+`logind.c` flagged (not read) as stronger candidates for a future session
+specifically because they are FluffOS dialect, this project's actual
+target, unlike `core-lib`. Wrote and staged
+`mudlib/ACCOUNT_LOGIN_PLAN.md`: proposed architecture (an `account_d.c`
+singleton daemon, a reworked `input_to()`-state-machine `login.c`, an
+explicitly-undecided character-object shape), a rough build order, and an
+explicit non-status paragraph so nobody mistakes the plan for
+implementation. See that file's own full content for the complete
+findings; not repeated here.
+
+Continued with row 0.13a per this session's own instructions (checked
+`ROADMAP.md`/`STATUS.md`'s most recent entry for the current priority).
+Investigated item 9's own two-object ambiguity family
+(`dependent_check_functions()`/`check_object_relations()`,
+`packages/parser.c:2184-2493`) first, as the immediately preceding
+session's own prediction named it the natural next slice -- read it in
+full, including the parts past where the roadmap's own prior scoping note
+had stopped (`check_object_relations()`'s own direct/indirect
+ordinal-and-ambiguity combinatorics, `packages/parser.c:2312-2493`).
+Confirmed it is genuinely one of the largest, most bug-prone pieces of the
+whole package: extensive shared mutable state across a whole rule-matching
+pass, ordinal/ambiguity interactions between two independently-resolved
+object sets, and what read as real latent bugs in the vendored source
+itself (e.g. `we_are_finished()`'s own `if (found_direct && ...)` testing
+`found_direct` as a plain truthy int, which cannot distinguish "found
+object index 0" from "found nothing" -- a real, if minor, transcription
+hazard for a faithful port to get right or wrong silently). Stopped and
+reported rather than forced, matching this project's own established
+discipline for comparably-sized items (`bind_lambda`, LDMud mapping width,
+DGD `parse_string`) -- not attempted this session, `VerbRuleNode::
+objectTokenCount`'s own existing "skip nodes needing two objects" stance
+in `ParserPackage::parseRulesFor()` is unchanged, still the single largest
+remaining piece of this row.
+
+Picked up `parse_my_rules()` instead -- the row's own next-ranked,
+appropriately-sized slice (already flagged as ready in an earlier
+session's own note: "reuses (1)/(4) entirely, no new infrastructure").
+While re-reading this row's own top-line status against real source
+before starting, found it stale in two places, both corrected in
+`ROADMAP.md` this session: `parse_refresh()`/`parse_sentence()`/
+`parse_add_synonym()` had already been implemented in intervening
+sessions not reflected in the row's own opening prose; and a claimed
+"`parse_add_rule`'s 3-arg shadow form" was never real at all -- confirmed
+directly against the real vendored signature list,
+`packages/parser_spec.c:6`, `void parse_add_rule(string, string);`,
+exactly two arguments.
+
+Real `mixed parse_my_rules(object user, string sentence, void|int
+do_the_call)` (`packages/parser_spec.c:10`, `packages/parser.c:3103-3160`)
+implemented in full. Refactored `parseSentence()`'s own verb-lookup loop
+into a shared `runParseMatch()` helper (`src/efun/ParserPackage.cpp`) so
+both efuns share the identical matching engine, matching real code's own
+structure (`f_parse_sentence()`/`f_parse_my_rules()` both call one
+internal `parse_sentence()` helper). Threaded real `parse_restricted`
+through `parseRulesFor()` as an explicit `restrictedHandler` parameter
+(real `"!parse_restricted || parse_vn->handler == parse_restricted"`).
+Ported real code's own two separate `hasParseInfo()` guards (on `user`
+*and* on the calling object -- confirmed both are real, distinct checks,
+not one check read twice). Ported the real, still-live "Illegal to call
+parse_sentence() recursively." reentrancy guard -- confirmed by reading
+source directly that this exact guard is commented out in real
+`f_parse_sentence()` (`parser.c:3035-3039`) but genuinely live in
+`f_parse_my_rules()` (`parser.c:3113-3114`), a real asymmetry this port
+now reproduces faithfully via one process-wide bool flag, deliberately
+not a save/restore depth counter -- matching real code's own single
+global `pi` pointer and its own documented consequence that a genuinely
+nested call clobbers it on unwind, not a safer reimplementation than real
+FluffOS actually has. Also confirmed and implemented the real
+default-argument behavior directly from source rather than assuming it:
+`"int flag = (st_num_arg == 3 ? (sp--)->u.number : 0);"` -- the
+two-argument form's own real default is *false* ("return the winning
+match's own pre-built `verb_rule` args array"), not *true* ("invoke the
+match"), the opposite of what the name alone might suggest.
+
+4 new regression tests (`test/test_lexer.cpp`): restriction to the
+caller's own registered rules only (two objects registering
+incompatible-shaped rules -- STR vs. a lone WRD -- under the identical
+verb name, confirming a restricted call can neither wrongly succeed
+through the other object's rule nor silently fall through to it); the
+default two-argument form returning the real 5-element `verb_rule` args
+array without invoking anything (the same real `try==3` shape an earlier
+slice's own `do_verb_rule` fallback test already confirmed, reused here as
+a cross-check rather than re-derived); both real `hasParseInfo()` guards;
+and the recursive-call rejection, confirmed live in-process via a `do_`
+callback that itself attempts a nested `parse_my_rules()` call and catches
+the real error. One implementation bug in this session's own first test
+draft, not the driver, caught before it ever reached a committed test:
+asserting an untouched object variable via `std::get<std::string>(...)
+.empty()` -- a real uninitialized LPC object variable is plain int `0`
+(`LpcObject::LpcObject()`'s own `Value(int64_t{0})` fill), not `""`,
+confirmed by a `std::bad_variant_access` on the first run rather than a
+silent false pass. 674 tests passing (up from 670), zero regressions.
+
+**Verified live against the real running driver, real bundled `mudlib/`**
+(a scratch config on a spare port, a real telnet-negotiating Python
+client, real `eval` calls): built two real handler objects via
+`write_file()`/`clone_object()` registering incompatible rules under one
+shared verb name plus a plain user object, and confirmed live that a
+restricted call to the STR-owning handler resolved and called its own
+`do_` function with the real matched text while the other handler's own
+variable stayed untouched, that the identical sentence restricted to the
+WRD-owning handler correctly failed with the real `-1` "how close did we
+get" signal rather than falling through to the other handler's own STR
+rule, that the default two-argument form returned the real, exact
+5-element `verb_rule` args array without ever invoking anything, and that
+a real nested `parse_my_rules()` call from inside a `do_` callback was
+rejected while the outer call itself still succeeded normally. One
+real, if mundane, methodology lesson hit live and worth recording: real
+`write_file()` genuinely *appends* rather than truncates, confirmed the
+hard way when a stale file left over from an earlier broken test attempt
+in this same session caused a real "object variable already declared"
+compile error on the next `write_file()` to the same path -- fixed by
+`rm()`-ing first, not a driver bug. Confirmed the driver process and
+ordinary gameplay stayed healthy throughout (`eval return 6*7;` -> 42,
+`who`), and cleaned up every live test artifact (`rm()`'d all `/zzzlive*`
+files) before stopping the scratch process, leaving the real bundled
+mudlib tree exactly as found (`git status` clean under `mudlib/`).
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (continued further, fresh session): `parse_*` (row 0.13a)
 sixth real slice -- item 8 piece 5, `parse_obj()` itself (the real
 noun-phrase word-matching engine), wired into `parseSentence()` for the

@@ -2375,9 +2375,16 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
 // object tokens (VerbRuleNode::objectTokenCount's own comment -- not
 // yet supported), any node whose weight cannot beat the current best
 // match, and any node whose own lit[0]/lit[1] prefilter fails.
-void parseRulesFor(VM& vm, SentenceSession& session) {
+// `restrictedHandler` is real parse_restricted (set only by
+// parse_my_rules(), always null for parse_sentence() itself) -- real
+// "(!parse_restricted || parse_vn->handler == parse_restricted)",
+// confirmed directly: a null restriction matches every node exactly as
+// before, a non-null one keeps only nodes registered by that exact
+// object.
+void parseRulesFor(VM& vm, SentenceSession& session, const std::shared_ptr<LpcObject>& restrictedHandler) {
     for (const VerbRuleNode& node : session.matchedVerb->nodes) {
         if (node.objectTokenCount >= 2) continue;
+        if (restrictedHandler && node.handler.lock() != restrictedHandler) continue;
         if (session.bestMatchWeight > node.weight) continue;
 
         int pos = 0;
@@ -2423,6 +2430,122 @@ void doTheCall(VM& vm, SentenceSession& session) {
 // caller instead, above).
 Value getTheError(VM& vm, SentenceSession& session) { return errorInfoToValue(vm, session, session.bestError, -1); }
 
+// real global `pi` (parse_info_t *, packages/parser.c): non-null for the
+// whole duration of any parse_sentence()/parse_my_rules() call currently
+// on the C call stack, set right before matching begins and unconditionally
+// cleared back to 0 when that call unwinds (real free_parse_globals(),
+// installed as an error-handler stack entry so it fires whether the call
+// finishes normally or via error()). Represented here as a plain bool
+// rather than a real pointer, since nothing in this driver ever reads
+// *through* it the way real code's own `pi = parse_user->pinfo` does --
+// the only real consumer, f_parse_my_rules()'s own "if (pi) error(...)"
+// guard, only ever tests it for null/non-null (ParseMyRules() below).
+// Deliberately a single flag, not a save/restore depth counter: real
+// code's own single global `pi` means a genuinely nested call (real
+// parse_sentence()'s own recursion guard is commented out, see
+// SentenceSession's own comment on this exact point) has its inner
+// call's free_parse_globals() clobber `pi` back to 0 while an outer call
+// is still logically in progress on the C stack -- a real, if reckless,
+// consequence of real code's own single shared global this port
+// reproduces faithfully via the same unconditional-clear-on-unwind
+// shape, not a save-and-restore that would silently behave more safely
+// than real FluffOS actually does.
+bool& parseInProgressFlag() {
+    static bool flag = false;
+    return flag;
+}
+struct ParseInProgressGuard {
+    ParseInProgressGuard() { parseInProgressFlag() = true; }
+    ~ParseInProgressGuard() { parseInProgressFlag() = false; }
+};
+
+// real parse_sentence()'s own "find an interpretation, first word must
+// be shared (verb)" loop (packages/parser.c), factored out so both
+// ParserPackage::parseSentence() and ParserPackage::parseMyRules() share
+// it verbatim -- real code's own f_parse_sentence() and f_parse_my_rules()
+// both call the identical static parse_sentence() helper themselves, this
+// is the same split. `restrictedHandler` is threaded straight through to
+// parseRulesFor() (real parse_restricted -- see that function's own
+// comment); null for parseSentence()'s own call, matching real code's own
+// "parse_restricted = 0" default. `verbTable` is ParserPackage::verbs()
+// itself, passed in rather than accessed directly since this is a free
+// function outside the class (verbs() is private) -- the same
+// pass-it-in-explicitly shape findPlainEntry() above already uses.
+void runParseMatch(VM& vm, SentenceSession& session, const std::shared_ptr<LpcObject>& restrictedHandler,
+                    std::unordered_map<std::string, std::vector<VerbEntry>>& verbTable) {
+    std::vector<SentenceWord> rawWords = splitSentenceWords(session.rawInput);
+
+    for (size_t i = 1; i <= rawWords.size(); i++) {
+        std::string candidate = rawWords[0].text;
+        for (size_t k = 1; k < i; k++) {
+            candidate += ' ';
+            candidate += rawWords[k].text;
+        }
+
+        auto it = verbTable.find(candidate);
+        if (it == verbTable.end()) continue;
+
+        for (VerbEntry& ve : it->second) {
+            const VerbEntry* target = &ve;
+            if (ve.isSynonym) {
+                auto targetIt = verbTable.find(ve.synonymOf);
+                target = (targetIt != verbTable.end()) ? findPlainEntry(targetIt->second, ve.synonymOf) : nullptr;
+                if (!target) continue;
+            }
+
+            if (session.foundLevel < 1) session.foundLevel = 1;
+
+            // real "if (!objects_loaded && (parse_verb_entry->flags &
+            // VB_HAS_OBJ)) load_objects();" -- lazy, once per whole call,
+            // the first time a matched verb has any rule with an
+            // object-family token. Always called with session.caller's
+            // own environment (real parse_user -- parseSentence()'s own
+            // this_player(), parseMyRules()'s own explicit `user` arg).
+            if (!session.objectsLoaded) {
+                bool verbHasObj = std::any_of(target->nodes.begin(), target->nodes.end(),
+                                               [](const VerbRuleNode& n) { return n.hasObjectToken; });
+                if (verbHasObj) {
+                    session.loaded = ParserPackage::loadObjects(vm, session.caller);
+                    session.objectsLoaded = true;
+                }
+            }
+
+            session.words.clear();
+            SentenceWord verbWord;
+            verbWord.text = candidate;
+            verbWord.rawStart = rawWords[0].rawStart;
+            verbWord.rawEnd = rawWords[i - 1].rawEnd;
+            session.words.push_back(verbWord);
+            for (size_t k = i; k < rawWords.size(); k++) session.words.push_back(rawWords[k]);
+
+            session.matchedVerb = target;
+            parseRulesFor(vm, session, restrictedHandler);
+        }
+    }
+}
+
+// real f_parse_my_rules()'s own non-call branch: the winning match's
+// already-built "verb_rule" argument array (real best_result->res[3],
+// the same try==3 naming variant we_are_finished() pre-builds for every
+// match -- SentenceMatchResult::res's own comment), copied out and
+// re-filtered for any object that got destructed as a side effect of a
+// LATER candidate rule's own can_/direct_/do_ callbacks running before
+// this call returns (real "if (arr->item[n].type == T_OBJECT &&
+// arr->item[n].u.ob->flags & O_DESTRUCTED) { ...; arr->item[n] =
+// const0u; }" -- the object was valid when we_are_finished() captured
+// it, so this is a real, reachable case, not defensive-programming
+// paranoia).
+Value buildRuleArgsArray(const SentenceSession& session) {
+    auto arr = std::make_shared<Array>();
+    arr->items = session.bestResult->res[3].args;
+    for (Value& v : arr->items) {
+        if (auto* obp = std::get_if<std::shared_ptr<LpcObject>>(&v.data)) {
+            if (!*obp || (*obp)->isDestructed()) v = Value(static_cast<int64_t>(0));
+        }
+    }
+    return Value(arr);
+}
+
 } // namespace
 
 Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& caller, const std::string& sentence,
@@ -2444,67 +2567,62 @@ Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& cal
     session.rawInput = sentence;
     session.caller = caller;
 
-    std::vector<SentenceWord> rawWords = splitSentenceWords(sentence);
-
-    // real parse_sentence()'s own "find an interpretation, first word
-    // must be shared (verb)" loop -- tries progressively longer leading
-    // word-phrases as the verb candidate (real code's own findstring()-
-    // based multi-word-verb mechanism, replicated here via a plain
-    // registry lookup instead of a global string-interning table, which
-    // this driver has no equivalent of -- see this file's own earlier
-    // comments on the same point for addRule()/addSynonym()).
-    for (size_t i = 1; i <= rawWords.size(); i++) {
-        std::string candidate = rawWords[0].text;
-        for (size_t k = 1; k < i; k++) {
-            candidate += ' ';
-            candidate += rawWords[k].text;
-        }
-
-        auto it = verbs().find(candidate);
-        if (it == verbs().end()) continue;
-
-        for (VerbEntry& ve : it->second) {
-            const VerbEntry* target = &ve;
-            if (ve.isSynonym) {
-                auto targetIt = verbs().find(ve.synonymOf);
-                target = (targetIt != verbs().end()) ? findPlainEntry(targetIt->second, ve.synonymOf) : nullptr;
-                if (!target) continue;
-            }
-
-            if (session.foundLevel < 1) session.foundLevel = 1;
-
-            // real "if (!objects_loaded && (parse_verb_entry->flags &
-            // VB_HAS_OBJ)) load_objects();" -- lazy, once per whole
-            // parseSentence() call, the first time a matched verb has
-            // any rule with an object-family token. Always called with
-            // parseUser's own environment (real parse_env is never set
-            // by anything reaching this driver's own parse_sentence()
-            // efun -- ParserPackage::loadObjects()'s own comment).
-            if (!session.objectsLoaded) {
-                bool verbHasObj = std::any_of(target->nodes.begin(), target->nodes.end(),
-                                               [](const VerbRuleNode& n) { return n.hasObjectToken; });
-                if (verbHasObj) {
-                    session.loaded = ParserPackage::loadObjects(vm, caller);
-                    session.objectsLoaded = true;
-                }
-            }
-
-            session.words.clear();
-            SentenceWord verbWord;
-            verbWord.text = candidate;
-            verbWord.rawStart = rawWords[0].rawStart;
-            verbWord.rawEnd = rawWords[i - 1].rawEnd;
-            session.words.push_back(verbWord);
-            for (size_t k = i; k < rawWords.size(); k++) session.words.push_back(rawWords[k]);
-
-            session.matchedVerb = target;
-            parseRulesFor(vm, session);
-        }
-    }
+    // real "pi = parse_user->pinfo;", set for the duration of this call
+    // (ParseInProgressGuard's own comment) -- parseSentence() itself
+    // never checks this (real code's own guard is commented out here),
+    // only sets it, so a parseMyRules() call reached through one of this
+    // match's own can_/direct_/do_ callbacks correctly sees a parse
+    // already in progress and errors, matching real behavior.
+    ParseInProgressGuard guard;
+    runParseMatch(vm, session, nullptr, verbs());
 
     if (session.bestMatchWeight != 0) {
         doTheCall(vm, session);
         return Value(static_cast<int64_t>(1));
+    }
+    return getTheError(vm, session);
+}
+
+Value ParserPackage::parseMyRules(VM& vm, const std::shared_ptr<LpcObject>& user,
+                                    const std::shared_ptr<LpcObject>& restrictedHandler, const std::string& sentence,
+                                    bool doTheCallFlag) {
+    // real f_parse_my_rules()'s own two "not known by the parser" checks,
+    // in real order: `user` (real (sp-2)->u.ob) first, then the calling
+    // object itself (real current_object, this driver's `restrictedHandler`
+    // -- see this method's own header comment for why it is exactly
+    // real parse_restricted, threaded through as an explicit parameter
+    // instead of a global).
+    if (!user || !user->hasParseInfo()) {
+        throw LpcRuntimeError("parse_my_rules: object is not known by the parser (call parse_init() first)");
+    }
+    if (!restrictedHandler || !restrictedHandler->hasParseInfo()) {
+        throw LpcRuntimeError("parse_my_rules: object is not known by the parser (call parse_init() first)");
+    }
+    // real "if (pi) error(\"Illegal to call parse_sentence()
+    // recursively.\n\");" -- unlike parse_sentence() itself, real
+    // f_parse_my_rules() keeps this guard live (ParseInProgressGuard's
+    // own comment: parse_sentence()'s matching disabled copy of the same
+    // check, still commented out in real source, confirmed directly).
+    if (parseInProgressFlag()) {
+        throw LpcRuntimeError("parse_my_rules: illegal to call parse_sentence() recursively");
+    }
+
+    SentenceSession session;
+    session.rawInput = sentence;
+    session.caller = user;
+
+    ParseInProgressGuard guard;
+    runParseMatch(vm, session, restrictedHandler, verbs());
+
+    if (session.bestMatchWeight != 0) {
+        if (doTheCallFlag) {
+            doTheCall(vm, session);
+            return Value(static_cast<int64_t>(1));
+        }
+        // real "give them the info for the wildcard call" branch: return
+        // the winning match's own res[3] ("verb_rule") argument array
+        // instead of invoking anything.
+        return buildRuleArgsArray(session);
     }
     return getTheError(vm, session);
 }

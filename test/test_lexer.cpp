@@ -19722,6 +19722,178 @@ static void testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched() {
     std::cout << "testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched OK\n";
 }
 
+// --- parse_my_rules(): row 0.13a's item 6 (the 8th and, as of this
+// slice, final still-missing name from the original 8-function
+// `parse_*` list -- parse_init/parse_refresh/parse_sentence/
+// parse_add_rule/parse_add_synonym/parse_dump/parse_remove were each
+// already implemented in earlier sessions). Real f_parse_my_rules()
+// (packages/parser.c) is the same matching engine parse_sentence() uses,
+// restricted two ways: an explicit `user` object stands in for
+// this_player()/parse_user, and matching only considers rule nodes
+// registered by the calling object (real parse_restricted). See
+// ParserPackage::parseMyRules()'s own header comment for the full real
+// derivation.
+
+static void testParseMyRulesRestrictsMatchingToTheCallersOwnRegisteredRulesOnly() {
+    std::string userSrc = "void setup() { parse_init(); }\n";
+    auto user = compileProgramObject(userSrc);
+
+    // objA and objB each register a rule under the exact same verb name,
+    // but with incompatible grammar shapes (STR takes the whole rest of
+    // the sentence; a lone WRD takes exactly one word). Only one of the
+    // two shapes can ever match "hello there" (two leftover words) --
+    // if parse_restricted were not actually enforced, calling from objB
+    // could still reach objA's own STR rule and wrongly succeed.
+    std::string srcA = "string resultA;\n"
+                        "void setup() { parse_init(); parse_add_rule(\"zzzmyrule\", \"STR\"); }\n"
+                        "int can_zzzmyrule_str(string s) { return 1; }\n"
+                        "void do_zzzmyrule_str(string s) { resultA = s; }\n"
+                        "mixed run(object u, string sentence) { return parse_my_rules(u, sentence, 1); }\n"
+                        "string probe() { return resultA; }\n";
+    std::string srcB = "string resultB;\n"
+                        "void setup() { parse_init(); parse_add_rule(\"zzzmyrule\", \"WRD\"); }\n"
+                        "int can_zzzmyrule_wrd(string s) { return 1; }\n"
+                        "void do_zzzmyrule_wrd(string s) { resultB = s; }\n"
+                        "mixed run(object u, string sentence) { return parse_my_rules(u, sentence, 1); }\n"
+                        "string probe() { return resultB; }\n";
+    auto objA = compileProgramObject(srcA);
+    auto objB = compileProgramObject(srcB);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(user, "setup", {});
+    vm.callFunction(objA, "setup", {});
+    vm.callFunction(objB, "setup", {});
+
+    amlp::Value resultAVal = vm.callFunction(
+        objA, "run", std::vector<amlp::Value>{amlp::Value(user), amlp::Value(std::string("zzzmyrule hello there"))});
+    assert(std::get<int64_t>(resultAVal.data) == 1);
+    assert(std::get<std::string>(vm.callFunction(objA, "probe", {}).data) == "hello there");
+    // resultB was never assigned -- an uninitialized object variable
+    // defaults to plain int 0 (LpcObject::LpcObject()'s own
+    // Value(int64_t{0}) fill), not "".
+    assert(std::get<int64_t>(vm.callFunction(objB, "probe", {}).data) == 0);
+
+    amlp::Value resultBVal = vm.callFunction(
+        objB, "run", std::vector<amlp::Value>{amlp::Value(user), amlp::Value(std::string("zzzmyrule hello there"))});
+    assert(std::get<int64_t>(resultBVal.data) != 1);
+    assert(std::get<int64_t>(vm.callFunction(objB, "probe", {}).data) == 0);
+
+    std::cout << "testParseMyRulesRestrictsMatchingToTheCallersOwnRegisteredRulesOnly OK\n";
+}
+
+static void testParseMyRulesDefaultFlagReturnsVerbRuleArgsArrayWithoutCallingAnything() {
+    std::string userSrc = "void setup() { parse_init(); }\n";
+    auto user = compileProgramObject(userSrc);
+
+    std::string handlerSrc =
+        "int callCount;\n"
+        "void setup() { parse_init(); parse_add_rule(\"zzzinspect\", \"STR\"); }\n"
+        "int can_zzzinspect_str(string s) { return 1; }\n"
+        "void do_zzzinspect_str(string s) { callCount++; }\n"
+        // real "int flag = (st_num_arg == 3 ? (sp--)->u.number : 0);" --
+        // the two-argument form's own real default is false, not true.
+        "mixed run(object u, string sentence) { return parse_my_rules(u, sentence); }\n"
+        "int probeCallCount() { return callCount; }\n";
+    auto handler = compileProgramObject(handlerSrc);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(user, "setup", {});
+    vm.callFunction(handler, "setup", {});
+
+    amlp::Value result = vm.callFunction(
+        handler, "run", std::vector<amlp::Value>{amlp::Value(user), amlp::Value(std::string("Zzzinspect the widget"))});
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    // Same real "verb_rule" (try==3) shape already confirmed exactly by
+    // testParseSentenceFallsBackToTheGenericDoVerbRuleNamingWhenTheSimpleNameIsNotDefined
+    // -- make_function()'s own try==3 code path is shared, not
+    // reimplemented per efun.
+    assert(arr->items.size() == 5);
+    assert(std::get<std::string>(arr->items[0].data) == "zzzinspect");
+    assert(std::get<std::string>(arr->items[1].data) == "STR");
+    assert(std::get<std::string>(arr->items[2].data) == "the widget");
+    assert(std::get<std::string>(arr->items[3].data) == "Zzzinspect");
+    assert(std::get<std::string>(arr->items[4].data) == "the widget");
+
+    // Real code's own "give them the info for the wildcard call" branch
+    // never invokes do_the_call() at all.
+    assert(std::get<int64_t>(vm.callFunction(handler, "probeCallCount", {}).data) == 0);
+
+    std::cout << "testParseMyRulesDefaultFlagReturnsVerbRuleArgsArrayWithoutCallingAnything OK\n";
+}
+
+static void testParseMyRulesRequiresParseInitOnBothTheUserAndTheCallingObject() {
+    std::string userSrc = "void setup() { parse_init(); }\n";
+    auto initedUser = compileProgramObject(userSrc);
+    auto uninitUser = compileProgramObject(userSrc); // setup() never called
+
+    std::string handlerSrc = "void setup() { parse_init(); }\n"
+                              "int probe(object u) {\n"
+                              "    if (!catch(parse_my_rules(u, \"whatever\", 1))) return 0;\n"
+                              "    return 1;\n"
+                              "}\n";
+    auto initedHandler = compileProgramObject(handlerSrc);
+    auto uninitHandler = compileProgramObject(handlerSrc); // setup() never called
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(initedUser, "setup", {});
+    vm.callFunction(initedHandler, "setup", {});
+
+    // real "(sp-2)->u.ob->pinfo" check -- the `user` argument itself
+    // never called parse_init().
+    assert(std::get<int64_t>(vm.callFunction(initedHandler, "probe", {amlp::Value(uninitUser)}).data) == 1);
+    // real "current_object->pinfo" check -- the calling object itself
+    // never called parse_init(), even though `user` did.
+    assert(std::get<int64_t>(vm.callFunction(uninitHandler, "probe", {amlp::Value(initedUser)}).data) == 1);
+
+    std::cout << "testParseMyRulesRequiresParseInitOnBothTheUserAndTheCallingObject OK\n";
+}
+
+static void testParseMyRulesRejectsARecursiveCallWhileOneIsAlreadyInProgress() {
+    std::string userSrc = "void setup() { parse_init(); }\n";
+    auto user = compileProgramObject(userSrc);
+
+    std::string handlerSrc =
+        "int nestedThrew;\n"
+        "void setup() { parse_init(); parse_add_rule(\"zzzguard\", \"STR\"); }\n"
+        "int can_zzzguard_str(string s) { return 1; }\n"
+        // real "if (pi) error(\"Illegal to call parse_sentence()
+        // recursively.\n\");" -- a parse_my_rules() call reached from
+        // inside another one's own do_ callback must be rejected, unlike
+        // parse_sentence()'s own matching guard, which real source
+        // leaves commented out (ParseInProgressGuard's own comment).
+        "void do_zzzguard_str(string s) {\n"
+        "    if (catch(parse_my_rules(this_object(), \"zzzguard again\", 1))) nestedThrew = 1;\n"
+        "}\n"
+        "mixed run(object u, string sentence) { return parse_my_rules(u, sentence, 1); }\n"
+        "int probeNestedThrew() { return nestedThrew; }\n";
+    auto handler = compileProgramObject(handlerSrc);
+
+    amlp::Config config;
+    amlp::ObjectManager objects(config);
+    amlp::VM vm(objects, config);
+
+    vm.callFunction(user, "setup", {});
+    vm.callFunction(handler, "setup", {});
+
+    amlp::Value outer = vm.callFunction(
+        handler, "run", std::vector<amlp::Value>{amlp::Value(user), amlp::Value(std::string("zzzguard hi there"))});
+    // The outer call itself succeeds normally -- only the NESTED call
+    // made from within its own do_ callback is rejected.
+    assert(std::get<int64_t>(outer.data) == 1);
+    assert(std::get<int64_t>(vm.callFunction(handler, "probeNestedThrew", {}).data) == 1);
+
+    std::cout << "testParseMyRulesRejectsARecursiveCallWhileOneIsAlreadyInProgress OK\n";
+}
+
 // --- SIGPIPE (src/main.cpp, src/net/instruct.md's own "Known gap"
 // note): a client connection closing at the wrong moment relative to
 // this process's own next write() to that same socket used to be able
@@ -20444,6 +20616,10 @@ int main() {
     testParseObjAllOfPluralResolvesToTheAcceptedCandidatesOnly();
     testParseObjMyAdjectiveResolvesToThePlayersOwnCarriedItem();
     testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched();
+    testParseMyRulesRestrictsMatchingToTheCallersOwnRegisteredRulesOnly();
+    testParseMyRulesDefaultFlagReturnsVerbRuleArgsArrayWithoutCallingAnything();
+    testParseMyRulesRequiresParseInitOnBothTheUserAndTheCallingObject();
+    testParseMyRulesRejectsARecursiveCallWhileOneIsAlreadyInProgress();
     testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess();
     std::cout << "all tests passed\n";
     return 0;

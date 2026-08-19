@@ -453,6 +453,35 @@ public:
     static Value parseSentence(VM& vm, const std::shared_ptr<LpcObject>& caller, const std::string& sentence,
                                 bool debugFlag);
 
+    // real f_parse_my_rules() (packages/parser.c): identical matching
+    // engine to parseSentence() above, restricted two ways real
+    // parse_sentence() never is: `user` (real (sp-2)->u.ob) stands in for
+    // parse_user/this_player() explicitly rather than being implied, and
+    // matching only ever considers rule nodes registered by
+    // `restrictedHandler` (real current_object, i.e. whichever object
+    // called parse_my_rules() -- real "parse_restricted = current_object;",
+    // consumed by parseRulesFor()'s own restrictedHandler parameter).
+    // Requires BOTH `user` and `restrictedHandler` to already have
+    // hasParseInfo() true (real code's own two separate "/%s is not known
+    // by the parser" checks) and throws the real "Illegal to call
+    // parse_sentence() recursively." error if a parse_sentence()/
+    // parse_my_rules() call is already in progress on the call stack --
+    // real code's own live guard here, distinct from parse_sentence()'s
+    // own matching guard, which is commented out in real source (see the
+    // .cpp's own ParseInProgressGuard comment for the real citation).
+    // `doTheCallFlag` (real st_num_arg==3's own explicit third argument,
+    // defaulting to 0/false when omitted -- NOT true, confirmed directly
+    // against real f_parse_my_rules()'s own "int flag = (st_num_arg == 3
+    // ? (sp--)->u.number : 0);") selects between real code's own two
+    // success shapes: true invokes the winning do_* call exactly like
+    // parseSentence() and returns int 1; false (the real two-argument-form
+    // default) returns the winning match's own pre-built "verb_rule"
+    // argument array instead of calling anything at all, letting the
+    // caller inspect or dispatch it itself.
+    static Value parseMyRules(VM& vm, const std::shared_ptr<LpcObject>& user,
+                               const std::shared_ptr<LpcObject>& restrictedHandler, const std::string& sentence,
+                               bool doTheCallFlag);
+
 private:
     static std::unordered_map<std::string, std::vector<VerbEntry>>& verbs();
 };

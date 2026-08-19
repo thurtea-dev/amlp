@@ -4899,6 +4899,32 @@ void registerCoreEfuns() {
         return ParserPackage::parseSentence(vm, ob, std::get<std::string>(args[0].data), debugFlag);
     });
 
+    // mixed parse_my_rules(object user, string sentence, void|int
+    // do_the_call) -- real packages/parser.c's f_parse_my_rules(): the
+    // same matching engine as parse_sentence() above, restricted to rule
+    // nodes registered by the calling object (real current_object) and
+    // matched against `user` explicitly rather than this_player(). See
+    // ParserPackage::parseMyRules()'s own header comment for the real
+    // "flag defaults to false, not true, when the third argument is
+    // omitted" derivation and the real, still-live recursive-call guard
+    // (distinct from parse_sentence()'s own, which real source has
+    // commented out).
+    t.registerEfun("parse_my_rules", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::shared_ptr<LpcObject>>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError(
+                "parse_my_rules: expected (object user, string sentence, void|int do_the_call) arguments");
+        }
+        auto user = std::get<std::shared_ptr<LpcObject>>(args[0].data);
+        bool doTheCallFlag = false;
+        if (args.size() > 2) {
+            if (auto* n = std::get_if<int64_t>(&args[2].data)) doTheCallFlag = (*n != 0);
+        }
+        auto restrictedHandler = vm.currentObject();
+        return ParserPackage::parseMyRules(vm, user, restrictedHandler, std::get<std::string>(args[1].data),
+                                            doTheCallFlag);
+    });
+
     // string query_verb() -- the full typed first word of the line
     // currently being dispatched (real semantics, even for a
     // V_SHORT/V_NOSPACE partial match -- see VM::dispatchCommand()).
