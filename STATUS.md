@@ -3,6 +3,134 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (a further fresh session, same day): row 1.7/1.8's
+`set_driver_hook()` first slice landed -- real storage plus real
+H_MOVE_OBJECT0/1 dispatch wired into `move_object()`'s own real trigger
+point, confirmed live through the real efun call, exercising last
+session's own unbound_lambda()/bind_lambda() machinery through its real
+intended caller for the first time (690 tests, up from 687).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules).
+
+**Real scope confirmed from source before writing anything.** Read real
+`f_set_driver_hook()` (simulate.c:5056-5228) in full: range validation
+(exact "Bad hook number" text), the real privilege_violation() gate
+(this driver has none), real per-hook type-map validation
+(`hook_type_map[]`, prolang.y:195-229), and a real special case --
+`set_driver_hook()` takes ownership of and immediately rebinds an
+unbound_lambda to master_ob for a hook whose type map otherwise
+disallows closures. Re-read hooks.c in full too (not trusted from last
+session's own summary): `addDriverHooks()` makes 14 real
+`set_driver_hook()` calls, 4 via `unbound_lambda()`
+(`H_MOVE_OBJECT0`/`H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS`, exactly
+matching last session's own 4-hit corpus count), the rest plain strings
+or one mapping. Confirmed this driver has zero pre-existing hook
+storage/dispatch scaffolding (the two other grep hits were prose
+comments from last session, not code) -- genuinely greenfield.
+
+Traced `addDriverHooks()`'s own real caller: `inaugurate_master()`
+(`secure/master.c:14-17`), real LDMud's own master-boot apply. Confirmed
+this driver has no `inaugurate_master()` wiring at all (grep, zero
+hits) -- a real, separate, previously-untracked prerequisite this
+investigation surfaced and named explicitly in ROADMAP.md, not silently
+worked around. For this session's own live verification, a real object
+calls `addDriverHooks()`-equivalent explicitly instead.
+
+Read the real trigger point for `H_MOVE_OBJECT0`/`H_MOVE_OBJECT1`
+specifically: object.c's own `move_object()` static function
+(object.c:3920-3948), the shared C implementation behind both the
+`move_object()` and `transfer()` efuns. Two real, distinct bind targets,
+not a guess: `H_MOVE_OBJECT1`'s closure is rebound to the item being
+moved (`put_ref_object`), `H_MOVE_OBJECT0`'s to current_object
+(`assign_current_object`), both via real `call_lambda()` (`interpret.h:
+346`, `bind_ob = NULL` -- the caller mutates the closure's own base.ob
+directly first) rather than `call_lambda_ob()`'s own on-the-fly-bind
+path (confirmed a real, distinct mechanism from `H_LOAD_UIDS`'s own
+`determine_uid()`/`call_lambda_ob()` path, simulate.c:1526-1652, read
+too but not wired this session -- bounded to "at least one" hook number
+per this session's own instructions).
+
+**Built.** `VM` gained a 32-slot `driverHooks_` array (`kNumDriverHooks`,
+matching real `mudlib/sys/driver_hook.h`'s own hook-number defines
+exactly -- this file did not exist anywhere in this driver's own bundled
+`mudlib/sys/` before this session, added as a real, faithful mirror of
+the vendored reference source's own bundled copy). `getDriverHook()`/
+`setDriverHook()` (range-checked, real message; per-hook type-map
+validation and the privilege_violation() gate deliberately not
+replicated, matching this driver's own established permissive-storage
+precedent and its own honest-gap convention for anything needing
+privilege_violation()). `callDriverHookClosure()` unifies real
+`call_lambda()`/`call_lambda_ob()`'s two distinct real mechanisms into
+one helper (both have the same observable effect: the closure's own
+home object is freshly overwritten immediately before each call).
+`VM::moveObject()` now tries `H_MOVE_OBJECT1` then `H_MOVE_OBJECT0`
+before falling back to this driver's own pre-existing hardcoded
+FluffOS-style logic -- a deliberate, flagged multi-dialect divergence
+from real LDMud (which has no fallback at all, "Don't know how to move
+objects."). `set_driver_hook()` registered unconditionally, matching
+this table's own established dialect-neutral-availability convention.
+
+One new real efun needed to make hooks.c's own real `moveHook()` body
+runnable at all: `set_environment(item, env)` (object.c:5152-5230,
+"no calls to init() or such" -- exactly the low-level primitive real
+moveHook() itself calls). 3 new regression tests: out-of-range hook
+rejection; the real end-to-end H_MOVE_OBJECT0 dispatch through the real
+`move_object()` efun (confirmed item/dest/this_object() and the actual
+move -- and confirmed, live and via reasoning from real
+interpret.c's own CLOSURE_LFUN case, that the current_object rebind is
+*not* actually observable through hooks.c's own exact shape, since
+`#'moveHook` is its own separately-bound closure); the no-hook fallback
+still works unchanged.
+
+**One real, latent bug found and fixed along the way, surfaced by this
+same live verification, not assumed safe:** `runPreprocessor()`'s own
+`cpp` invocation never included this driver's own CWD as a `-I` search
+dir, so `rewriteAbsoluteIncludes()`'s real absolute-quoted-`#include`
+rewrite (`"/sys/driver_hook.h"` -> `"mudlib/sys/driver_hook.h"`,
+CWD-relative) had no way to actually resolve -- confirmed by direct
+`cpp` reproduction before and after the fix. This driver's own bundled
+mudlib had never used an absolute quoted `#include` before this
+session's own scratch verification file, so the gap had never been hit
+before. Fixed with one added `-I '.'` flag. Full test suite re-run
+before and after: no regressions either way.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4125, `dialect: ldmud`, a
+plain TCP client, real `eval` calls, a temporary scratch object
+reproducing hooks.c's own real `H_MOVE_OBJECT0` content -- `moveHook()`
+trimmed to just its `set_environment()`-performing core, the
+`living()`/`set_this_player()` legs already covered by the unit test's
+own fuller shape): `set_driver_hook(H_MOVE_OBJECT0, unbound_lambda(...))`
+on a real scratch hook-holder object, then a genuine `move_object(room)`
+efun call (not `funcall()`) from a different real object -- returned
+`({ 0, //tmp_hooks_room, 1 })`: no environment beforehand, the real room
+afterward, confirming the hook (not the hardcoded fallback) performed
+the move. One real, incidental finding along the way: this driver's own
+object-lifetime model keeps a `clone_object()` result alive only via
+genuine live references (matching `LiveObjectRegistry`'s own
+established weak-ref-registry precedent, not a new gap) -- a first
+attempt that left an installed hook referencing an since-unreferenced
+scratch object correctly, faithfully, went "Uncallable"/destructed on
+the next real trigger (a subsequent login's own `move()` call), exactly
+matching this driver's own existing destructed-owner handling; the
+final verification explicitly clears the hook (`set_driver_hook(0, 0)`)
+at the end of the same `eval` call that installed it, and confirms a
+fresh connection/login (itself calling `move()`) works normally
+afterward, and the driver process itself stayed healthy throughout.
+Scratch object files and `tmp_eval_file.c` removed before stopping the
+scratch process, leaving the bundled `mudlib/` tree as found except for
+the new, intentional `mudlib/sys/driver_hook.h`.
+
+Still open: `inaugurate_master()` (the real automatic boot-wiring gap
+this session surfaced and named), `H_LOAD_UIDS`/`H_CLONE_UIDS`/
+`H_INCLUDE_DIRS` dispatch (real trigger points already cited, not wired
+this session), every other real hook number, real per-hook type-map
+validation, and `privilege_violation()`.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (a further fresh session, same day): row 1.9 closed out in
 ROADMAP.md with each remaining sub-item's zero-corpus-usage verdict
 recorded explicitly; then row 1.7/1.8 (LDMud closure kinds) picked next

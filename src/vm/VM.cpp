@@ -986,6 +986,78 @@ const std::string& VM::mudName() const {
     return config_.mudName();
 }
 
+// LDMud driver_hook (ROADMAP.md row 1.7/1.8). Range validation matches
+// real f_set_driver_hook()'s own "Bad hook number" errorf() exactly
+// (simulate.c:5082-5088); everything past that -- real per-hook type
+// validation against hook_type_map[] (prolang.y:195-229), the real
+// privilege_violation("set_driver_hook", ...) authorization gate
+// (simulate.c:5091, this driver has zero privilege_violation() call
+// sites anywhere yet), and the special "take ownership of an unbound
+// lambda even for a hook whose type map doesn't otherwise allow
+// closures, immediately rebinding it to master_ob" case (simulate.c:
+// 5189-5203) -- is deliberately not replicated this slice: real
+// per-hook type mismatches simply misbehave at the point of actual
+// dispatch instead of being rejected up front (the same permissive-
+// storage precedent m_values() used before column validation existed),
+// no caller besides the master object has any real reason to call this
+// efun at all in this mudlib's own confirmed corpus, and the special
+// eager-rebind-to-master case is a pure optimization in real LDMud --
+// H_MOVE_OBJECT0's own real trigger (object.c's move_object(), see
+// moveObject()'s own comment below) unconditionally rebinds to
+// current_object on every single call regardless of what it was bound
+// to at set_driver_hook() time, so skipping the eager bind here changes
+// no observable behavior. Registered unconditionally in EfunTable.cpp,
+// not gated on dialect, matching this table's own established
+// convention (unshadow()'s own comment: efun availability is never
+// withheld by dialect here).
+Value VM::getDriverHook(int what) const {
+    if (what < 0 || what >= kNumDriverHooks) return Value{};
+    return driverHooks_[static_cast<size_t>(what)];
+}
+
+void VM::setDriverHook(int what, Value arg) {
+    if (what < 0 || what >= kNumDriverHooks) {
+        throw LpcRuntimeError(
+            "Bad hook number: " + std::to_string(what) + ", expected 0.." +
+            std::to_string(kNumDriverHooks - 1));
+    }
+    driverHooks_[static_cast<size_t>(what)] = std::move(arg);
+}
+
+// real interpret.h's own "#define call_lambda(lsvp, num_arg)
+// int_call_lambda(lsvp, num_arg, true, NULL)" / "#define
+// call_lambda_ob(lsvp, num_arg, ob) int_call_lambda(lsvp, num_arg, true,
+// ob)" -- both funnel into the same real int_call_lambda(), whose own
+// CLOSURE_UNBOUND_LAMBDA case (interpret.c:21551-21561) either uses the
+// supplied bind_ob to rebind on the fly (call_lambda_ob's own path,
+// real object.c's own determine_uid()/give_uid_to_object(), the real
+// mechanism behind H_LOAD_UIDS/H_CLONE_UIDS) or -- for call_lambda's own
+// NULL-bind_ob callers like object.c's move_object() -- relies on the
+// caller having already mutated the closure's own base.ob field
+// directly first (real move_object(): "assign_current_object(&(l->base.
+// ob), ...)" for H_MOVE_OBJECT0, "put_ref_object(&(l->base.ob), inter_
+// sp[-1].u.ob, ...)" for H_MOVE_OBJECT1). Both real mechanisms have the
+// exact same observable effect -- the closure's own home object is
+// freshly overwritten immediately before each call -- so this driver
+// unifies them into one helper that always mutates owner in place
+// (matching real semantics: driver_hook's own stored lambda_t is a
+// single shared struct, not copied per call) and then reuses
+// callClosure()'s own existing dispatch (tiered resolution or the
+// quoted-code lambdaBody walk, whichever this closure actually is) --
+// safe to call regardless of whether this closure started out
+// unboundUntilBound, since owner is set and unboundUntilBound cleared
+// before callClosure() ever sees it.
+Value VM::callDriverHookClosure(const std::shared_ptr<Closure>& closure,
+                                 const std::shared_ptr<LpcObject>& bindTo,
+                                 std::vector<Value> args) {
+    if (!closure) {
+        throw LpcRuntimeError("driver hook: not a function value");
+    }
+    closure->owner = bindTo;
+    closure->unboundUntilBound = false;
+    return callClosure(closure, std::move(args));
+}
+
 // See VM.hpp's own comment. Implements two of real setup_new_commands()'s
 // (add_action.c) three visitation legs -- the ones this mudlib's own
 // confirmed real usage needs (the destination handing its own verbs to
@@ -1014,8 +1086,63 @@ void VM::moveObject(const std::shared_ptr<LpcObject>& item, const std::shared_pt
     // A destructed item/destination is never a valid move -- without
     // this, an already-destructed-but-still-referenced object could be
     // relinked back into a live room's inventory, undoing the unlink
-    // ObjectManager::destructObject() just did.
+    // ObjectManager::destructObject() just did. Kept ahead of the
+    // driver-hook dispatch just below too (real object.c's own
+    // move_object() has no equivalent guard of its own -- every real
+    // safety check for this lives inside the mudlib-supplied hook
+    // closure itself, e.g. hooks.c's own moveHook()'s "objectp(item) &&
+    // objectp(destination)" -- but skipping it here would let a hook
+    // closure, faithfully ported or not, relink an already-destructed
+    // object the same way the no-hook path below is guarded against).
     if (!item || !dest || item == dest || item->isDestructed() || dest->isDestructed()) return;
+
+    // LDMud H_MOVE_OBJECT0/H_MOVE_OBJECT1 (real object.c:3920-3948's own
+    // move_object() static function, the shared implementation behind
+    // both the move_object() and transfer() efuns): H_MOVE_OBJECT1
+    // checked first, bound to item; only if unset does H_MOVE_OBJECT0
+    // apply, bound to current_object -- both real, distinct bind
+    // targets, not a guess (object.c:3934-3943). Confirmed live
+    // (testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun)
+    // that this current_object rebind, while real and faithfully ported
+    // here, is not actually observable through real hooks.c's own exact
+    // H_MOVE_OBJECT0 body shape: "#'moveHook" inside the quoted-code
+    // body is its own separately-compiled CLOSURE_LFUN closure,
+    // permanently bound to whichever object it was written in (the
+    // master object, in hooks.c's own case) regardless of who calls the
+    // wrapping unbound_lambda -- real interpret.c's own CLOSURE_LFUN
+    // case sets current_object from *that* closure's own base.ob, not
+    // the wrapper's, before running moveHook()'s own body. The rebind
+    // still matters for a hook body that runs its own inline code
+    // directly instead of dispatching to a separately-bound sub-
+    // closure, so it stays here regardless. Real LDMud has no
+    // built-in move logic at all past this point ("errorf(\"Don't know
+    // how to move objects.\\n\")") -- the hardcoded legs below are this
+    // driver's own pre-existing multi-dialect fallback, kept exactly as
+    // it was for every dialect (and every LDMud mudlib that has not
+    // itself called set_driver_hook()) rather than hard-erroring the
+    // way real LDMud would, a deliberate divergence flagged here rather
+    // than silently made.
+    constexpr int kHMoveObject0 = 0;
+    constexpr int kHMoveObject1 = 1;
+    // Named locals, not a temporary bound straight into std::get_if --
+    // getDriverHook() returns Value by value, and an unnamed temporary's
+    // lifetime would end right after the get_if() call that inspects
+    // it, leaving the pointer dangling by the time it is dereferenced
+    // below.
+    Value hook1Val = getDriverHook(kHMoveObject1);
+    if (auto* hook1 = std::get_if<std::shared_ptr<Closure>>(&hook1Val.data)) {
+        if (*hook1) {
+            callDriverHookClosure(*hook1, item, {Value(item), Value(dest)});
+            return;
+        }
+    }
+    Value hook0Val = getDriverHook(kHMoveObject0);
+    if (auto* hook0 = std::get_if<std::shared_ptr<Closure>>(&hook0Val.data)) {
+        if (*hook0) {
+            callDriverHookClosure(*hook0, currentObject(), {Value(item), Value(dest)});
+            return;
+        }
+    }
 
     if (auto oldEnv = item->environment().lock()) {
         auto& oldInv = oldEnv->inventory();

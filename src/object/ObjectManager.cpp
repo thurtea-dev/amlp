@@ -428,7 +428,25 @@ PreprocessResult runPreprocessor(const std::string& sourcePath, const std::vecto
     // \"SimulEfun.h\"") would otherwise resolve against /tmp instead of
     // where the real file lives. Passing the original directory as an
     // extra -I restores that lookup.
-    std::string cmd = "cpp -I '" + originalSourceDir + "'";
+    //
+    // "-I '.'" (the driver's own CWD, never chdir()'d away from anywhere
+    // in this codebase -- resolveMudlibPath() and every other
+    // mudlibRoot()-relative path already assume this implicitly) exists
+    // for a second, distinct reason: rewriteAbsoluteIncludes() above
+    // rewrites a real LPC absolute quoted #include ("#include
+    // \"/sys/driver_hook.h\"") into a path relative to CWD ("mudlib/sys/
+    // driver_hook.h", mudlibRoot prepended onto the original text) --
+    // without CWD itself in the search list, neither of the two -I dirs
+    // already here can resolve it: originalSourceDir is the including
+    // file's own directory (e.g. plain "mudlib" for a top-level file),
+    // giving a doubled "mudlib/mudlib/sys/..." lookup, and every entry in
+    // includeDirs is already mudlibRoot-relative for the same reason.
+    // Found live (mudlib/tmp_hooks_test.c's own real "#include \"/sys/
+    // driver_hook.h\"", ROADMAP.md row 1.7/1.8's own live-verification
+    // scratch file) -- this driver's own bundled mudlib had never
+    // exercised an absolute quoted #include before that file, so this
+    // was a real, latent, never-before-hit gap, not a regression.
+    std::string cmd = "cpp -I '.' -I '" + originalSourceDir + "'";
     for (const auto& dir : includeDirs) {
         cmd += " -I '" + dir + "'";
     }

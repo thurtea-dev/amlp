@@ -17738,6 +17738,147 @@ static void testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError() {
     std::cout << "testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError OK\n";
 }
 
+// ROADMAP.md row 1.7/1.8's own set_driver_hook() investigation: real
+// simulate.c:5082-5088's own "Bad hook number" errorf(), exact real
+// range 0..NUM_DRIVER_HOOKS-1 (NUM_DRIVER_HOOKS == 32, real mudlib/sys/
+// driver_hook.h, mirrored in this driver's own bundled mudlib/sys/
+// driver_hook.h).
+static void testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/sdh_range.c",
+        "mixed tooLow() { set_driver_hook(-1, 0); }\n"
+        "mixed tooHigh() { set_driver_hook(32, 0); }\n");
+    auto ob = harness.objects.cloneObject("/sdh_range");
+    assert(ob != nullptr);
+
+    bool threwLow = false;
+    try {
+        harness.vm.callFunction(ob, "tooLow", {});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threwLow = true;
+        assert(std::string(e.what()).find("Bad hook number") != std::string::npos);
+    }
+    assert(threwLow);
+
+    bool threwHigh = false;
+    try {
+        harness.vm.callFunction(ob, "tooHigh", {});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threwHigh = true;
+        assert(std::string(e.what()).find("Bad hook number") != std::string::npos);
+    }
+    assert(threwHigh);
+
+    std::cout << "testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage OK\n";
+}
+
+// ROADMAP.md row 1.7/1.8's own set_driver_hook() first real slice, the
+// actual point of the whole investigation: real secure/master/hooks.c's
+// own exact H_MOVE_OBJECT0 shape (addDriverHooks()'s own literal
+// source, reproduced here verbatim except for using this driver's own
+// existing efun set moveHook() itself needs -- set_environment(),
+// living(), set_this_player() -- confirmed to already exist except
+// set_environment(), added this same session, see its own EfunTable.cpp
+// comment), triggered through the real move_object() efun -- not a
+// synthetic funcall() the way last session's own tests (necessarily)
+// were, since set_driver_hook() itself did not exist yet then. Confirms
+// the whole chain for real: set_driver_hook() stores the closure,
+// move_object() finds and calls it (real object.c's own move_object()
+// static function, current_object rebinding and all), and the closure's
+// own quoted-code body (built entirely from last session's own
+// unbound_lambda() work) actually runs and performs the move.
+static void testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/mh_room.c", "int isRoom() { return 1; }\n");
+    harness.writeFile("/mh_master.c",
+        "mixed lastItem; mixed lastDest; mixed hookRanAsWhom;\n"
+        "void moveHook(mixed item, mixed dest) {\n"
+        "    hookRanAsWhom = this_object();\n"
+        "    lastItem = item; lastDest = dest;\n"
+        "    set_environment(item, dest);\n"
+        "}\n"
+        "void install() {\n"
+        "    set_driver_hook(0,\n"
+        "        unbound_lambda( ({'item, 'dest}),\n"
+        "            ({#'moveHook, 'item, 'dest }) )\n"
+        "    );\n"
+        "}\n"
+        "mixed getLastItem() { return lastItem; }\n"
+        "mixed getLastDest() { return lastDest; }\n"
+        "mixed getHookRanAsWhom() { return hookRanAsWhom; }\n");
+    harness.writeFile("/mh_mover.c",
+        "void doMove(mixed dest) { move_object(dest); }\n");
+    auto master = harness.objects.cloneObject("/mh_master");
+    auto room = harness.objects.cloneObject("/mh_room");
+    auto mover = harness.objects.cloneObject("/mh_mover");
+    assert(master != nullptr);
+    assert(room != nullptr);
+    assert(mover != nullptr);
+
+    harness.vm.callFunction(master, "install", {});
+
+    // The real trigger: move_object() called from inside /mh_mover.c,
+    // moving current_object() (mover) into room -- exactly the FluffOS-
+    // style implicit-this_object() call shape this driver's own
+    // move_object() efun already has (see its own EfunTable.cpp
+    // comment), now routed through the real H_MOVE_OBJECT0 hook instead
+    // of the hardcoded fallback.
+    harness.vm.callFunction(mover, "doMove", {amlp::Value(room)});
+
+    amlp::Value item = harness.vm.callFunction(master, "getLastItem", {});
+    amlp::Value dest = harness.vm.callFunction(master, "getLastDest", {});
+    amlp::Value whom = harness.vm.callFunction(master, "getHookRanAsWhom", {});
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(item.data) == mover);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(dest.data) == room);
+    // Real object.c's own move_object() rebinds the *outer* unbound_
+    // lambda wrapper's own base.ob to current_object (assign_current_
+    // object()) on every call -- confirmed real, cited in VM::
+    // callDriverHookClosure()'s own comment -- but that rebind is never
+    // actually observed here: "#'moveHook" is its own separately-
+    // compiled CLOSURE_LFUN closure, permanently bound to whichever
+    // object it was written in (master, since install()/moveHook() both
+    // live in /mh_master.c) regardless of who calls it, real
+    // interpret.c's own CLOSURE_LFUN case setting "current_object =
+    // l->base.ob" for exactly that closure kind before running its own
+    // body. So this_object() inside moveHook() is genuinely master, not
+    // mover -- confirmed by reasoning from real source, then verified
+    // against this driver's own actual behavior, not assumed either way.
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(whom.data) == master);
+
+    // The hook's own set_environment() call actually performed the
+    // move -- proof the real hook ran at all, not just that it was
+    // invoked with the right args.
+    assert(mover->environment().lock() == room);
+    auto& roomInv = room->inventory();
+    assert(std::find(roomInv.begin(), roomInv.end(), mover) != roomInv.end());
+
+    std::cout << "testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun OK\n";
+}
+
+// Without any hook set, move_object() must still fall back to this
+// driver's own pre-existing hardcoded logic exactly as before --
+// confirms the new dispatch check at the top of VM::moveObject() did
+// not regress the no-hook case for every dialect that never calls
+// set_driver_hook() at all (FluffOS, DGD, and any LDMud mudlib that
+// simply has not configured this hook).
+static void testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet() {
+    ObjectVarHarness harness; // default dialect, no set_driver_hook() anywhere
+    harness.writeFile("/nh_room.c", "int isRoom() { return 1; }\n");
+    harness.writeFile("/nh_mover.c", "void doMove(mixed dest) { move_object(dest); }\n");
+    auto room = harness.objects.cloneObject("/nh_room");
+    auto mover = harness.objects.cloneObject("/nh_mover");
+    assert(room != nullptr);
+    assert(mover != nullptr);
+
+    harness.vm.callFunction(mover, "doMove", {amlp::Value(room)});
+
+    assert(mover->environment().lock() == room);
+    auto& roomInv = room->inventory();
+    assert(std::find(roomInv.begin(), roomInv.end(), mover) != roomInv.end());
+
+    std::cout << "testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet OK\n";
+}
+
 // ROADMAP.md row 1.9's own first real slice: real LDMud's own names for
 // keys()/values() (see EfunTable.cpp's own comment on "m_indices"/
 // "m_values" for the full real-source citation and corpus-frequency
@@ -21396,6 +21537,9 @@ int main() {
     testUnboundLambdaIsUncallableUntilBoundThenRunsHooksCsOwnQuotedCodeShape();
     testUnboundLambdaNestedQuotedCallMatchesHooksCsLoadUidsShape();
     testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError();
+    testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage();
+    testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun();
+    testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet();
     testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
     testMValuesBareFormReturnsColumnZeroValues();
     testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();

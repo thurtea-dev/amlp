@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <functional>
 #include <memory>
 #include <string>
@@ -295,13 +296,50 @@ public:
     // V_SHORT). Empty when nothing is currently being dispatched.
     std::string currentVerb() const;
 
+    // LDMud driver_hook[NUM_DRIVER_HOOKS] (ROADMAP.md row 1.7/1.8; real
+    // mudlib/sys/driver_hook.h's own real hook-number defines, 0..31 --
+    // mirrored verbatim in this driver's own bundled mudlib/sys/
+    // driver_hook.h). One VM-wide array, matching real semantics
+    // exactly: driver_hook is a genuine process-global in real LDMud,
+    // never object-scoped. Every slot starts void; every dialect's
+    // pre-existing behavior is completely unaffected until a real
+    // mudlib master object actually calls set_driver_hook() itself (see
+    // set_driver_hook()'s own EfunTable.cpp registration and
+    // moveObject()'s own comment for the one real trigger point this
+    // slice wires up, H_MOVE_OBJECT0/1).
+    static constexpr int kNumDriverHooks = 32;
+    Value getDriverHook(int what) const;
+    void setDriverHook(int what, Value arg);
+
+    // Calls a driver-hook closure with an explicit bind object,
+    // bypassing the "Uncallable closure" check callClosure() enforces
+    // for an ordinary LPC-level funcall()/evaluate() call -- matching
+    // real call_lambda()/call_lambda_ob()'s own mechanism (interpret.h:
+    // "#define call_lambda(lsvp, num_arg) int_call_lambda(lsvp, num_arg,
+    // true, NULL)", "#define call_lambda_ob(lsvp, num_arg, ob)
+    // int_call_lambda(lsvp, num_arg, true, ob)"): the driver itself
+    // supplies the missing bind object and mutates the closure's own
+    // base.ob/owner in place immediately before invoking it, real
+    // object.c's own move_object() static function being the exact
+    // citation for the H_MOVE_OBJECT0/1 case this method backs (see
+    // moveObject()'s own comment). See this method's own .cpp comment
+    // for why mutating in place (not copying) matches real semantics.
+    Value callDriverHookClosure(const std::shared_ptr<Closure>& closure,
+                                 const std::shared_ptr<LpcObject>& bindTo,
+                                 std::vector<Value> args);
+
     // real setup_new_commands() (add_action.c), the mechanism that
     // (re)builds the relevant objects' action tables whenever something
     // moves. Called by the move_object() efun with item = the object
     // being moved (current_object at the point of the efun call) and
     // dest = its new environment. See VM.cpp's own comment for exactly
     // which of real setup_new_commands()'s three visitation legs this
-    // implements and why the rest were scoped out.
+    // implements and why the rest were scoped out, and for the
+    // H_MOVE_OBJECT0/1 driver-hook dispatch this method now tries first
+    // (real object.c's own move_object() static function), falling back
+    // to the hardcoded logic below only when neither hook is set -- the
+    // one deliberate multi-dialect divergence from real LDMud, which has
+    // no built-in fallback at all ("Don't know how to move objects.").
     void moveObject(const std::shared_ptr<LpcObject>& item, const std::shared_ptr<LpcObject>& dest);
 
     // real parse_command()/user_parser() (add_action.c): matches line's
@@ -358,6 +396,10 @@ private:
     Config& config_;
     Scheduler* scheduler_ = nullptr;
     std::vector<Value> stack_;
+    // See kNumDriverHooks/getDriverHook()/setDriverHook()'s own comment
+    // just above -- default-constructed (every slot void) until
+    // set_driver_hook() actually stores something.
+    std::array<Value, kNumDriverHooks> driverHooks_;
     // Accumulated instruction count for the current top-level LPC dispatch
     // (one player command, one call_out fire, one heartbeat call). Real
     // FluffOS accumulates across all nested apply/call_other/callClosure

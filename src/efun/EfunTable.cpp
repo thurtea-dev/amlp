@@ -2889,6 +2889,41 @@ void registerCoreEfuns() {
         return Value(closure);
     });
 
+    // void set_driver_hook(int what, closure|string|string*|mapping arg)
+    // -- LDMud-only (real func_spec, `void set_driver_hook(int, closure|
+    // string|string *|mapping);`; real f_set_driver_hook(), simulate.c:
+    // 5056-5228). ROADMAP.md row 1.7/1.8's own real trigger-point
+    // investigation: real secure/master/hooks.c's own 4 real
+    // unbound_lambda() call sites are all passed straight here, all from
+    // its own inaugurate_master()-invoked addDriverHooks() -- confirmed
+    // by reading hooks.c in full again this session, not assumed from
+    // the prior session's own summary. This driver has no
+    // inaugurate_master() boot-apply wiring at all yet (confirmed by
+    // grep -- a separate, still-open gap named in ROADMAP.md, not
+    // silently worked around here), so a real mudlib master object must
+    // still call set_driver_hook() itself from wherever its own boot
+    // path already runs (this driver's own bundled mudlib/single/
+    // master.c's create(), or an explicit eval/apply) rather than
+    // relying on that automatic real wiring. See VM::setDriverHook()'s
+    // own comment for exactly which real validation this deliberately
+    // does not replicate (per-hook type-map checking, the privilege_
+    // violation() authorization gate, the eager unbound-lambda-to-
+    // master rebind optimization) and why each is a safe, flagged
+    // simplification rather than a silent gap. Registered
+    // unconditionally, matching this table's own established
+    // dialect-neutral-availability convention.
+    t.registerEfun("set_driver_hook", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2) {
+            throw LpcRuntimeError("set_driver_hook() requires 2 arguments");
+        }
+        if (!std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("Bad argument 1 to set_driver_hook()");
+        }
+        int64_t what = std::get<int64_t>(args[0].data);
+        vm.setDriverHook(static_cast<int>(what), args[1]);
+        return Value{};
+    });
+
     // int functionp(mixed) -- true only for a real Closure value (real
     // FluffOS's f_functionp() also distinguishes several function-
     // pointer sub-kinds via a bitmask return; this driver has only the
@@ -3778,6 +3813,49 @@ void registerCoreEfuns() {
         auto env = target->environment().lock();
         if (!env) return Value{};
         return Value(env);
+    });
+
+    // void set_environment(object item, object|void env) -- LDMud-only
+    // (real func_spec, `void set_environment(object, object|void);`;
+    // real f_set_environment(), object.c:5152-5230). ROADMAP.md row
+    // 1.7/1.8's own trigger-point investigation: this is the one real
+    // primitive secure/master/hooks.c's own moveHook() actually calls
+    // to perform the move itself ("This efun is to be used in the
+    // H_MOVE_OBJECTx hook, as it does nothing else than moving the item
+    // -- no calls to init() or such", object.c:5159-5161) -- without it,
+    // hooks.c's own real H_MOVE_OBJECT0 body cannot run verbatim at all,
+    // which is why this driver did not have it until this slice
+    // (nothing before now ever needed the low-level move primitive
+    // separated from move_object()'s own init()-calling legs). Pure
+    // reparenting, deliberately not replicating real code's own shadow-
+    // object rejection ("Can't move an object that is shadowing.") or
+    // recursive-move rejection ("Can't move object inside itself.") --
+    // neither is reachable from hooks.c's own real call shape, and this
+    // driver's own pre-existing moveObject() has never enforced either
+    // one for the FluffOS-style fallback path either, so adding it only
+    // here would be a new, uneven restriction rather than a faithful
+    // port. A void/omitted env unlinks item with no new environment,
+    // matching real "env may be 0".
+    t.registerEfun("set_environment", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty()) throw LpcRuntimeError("set_environment() requires at least 1 argument");
+        auto* itemPtr = std::get_if<std::shared_ptr<LpcObject>>(&args[0].data);
+        if (!itemPtr || !*itemPtr) throw LpcRuntimeError("Bad argument 1 to set_environment()");
+        auto item = *itemPtr;
+
+        std::shared_ptr<LpcObject> dest;
+        if (args.size() >= 2 && !args[1].isVoid()) {
+            auto* destPtr = std::get_if<std::shared_ptr<LpcObject>>(&args[1].data);
+            if (!destPtr || !*destPtr) throw LpcRuntimeError("Bad argument 2 to set_environment()");
+            dest = *destPtr;
+        }
+
+        if (auto oldEnv = item->environment().lock()) {
+            auto& oldInv = oldEnv->inventory();
+            oldInv.erase(std::remove(oldInv.begin(), oldInv.end(), item), oldInv.end());
+        }
+        item->setEnvironment(dest);
+        if (dest) dest->inventory().push_back(item);
+        return Value{};
     });
 
     // object *all_inventory(object default: this_object()) -- real
