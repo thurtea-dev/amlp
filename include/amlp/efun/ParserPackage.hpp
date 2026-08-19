@@ -91,18 +91,37 @@ struct VerbRuleNode {
     // noun-phrase word-matching itself (articles/all/my/ordinals/
     // adjective chains/singular-plural) plus the per-candidate can_/
     // direct_/indirect_/do_ disambiguation family for ONE object
-    // (singular_check_functions()/plural_check_functions()). The real
-    // TWO-object ambiguity family (dependent_check_functions()/
+    // (singular_check_functions()/plural_check_functions()).
+    //
+    // **Update, 2026-08-19 (a later session): the real TWO-object
+    // ambiguity family (dependent_check_functions()/
     // check_object_relations(), packages/parser.c:2184-2493 -- deciding
     // which direct/indirect object PAIR is jointly valid when a rule
-    // like "give OBJ to LIV" has two independent candidate sets) is a
-    // genuinely separate, larger piece of real code needing its own
-    // slice, not attempted here -- ParserPackage::parseRulesFor() skips
-    // any node with objectTokenCount >= 2 entirely, the same honest
-    // "not yet supported, not silently wrong" stance already used
-    // elsewhere in this row (m_values()'s own non-zero-column
-    // rejection).
+    // like "give OBJ to LIV" has two independent candidate sets) is now
+    // implemented for the case both object tokens are non-plural
+    // (OBJ/LIV only, real-corpus-confirmed the large majority shape:
+    // 59 of 77 real two-object `parse_add_rule()`/`SetRules()` calls
+    // found across every FluffOS-family corpus vendored in `temp/`,
+    // dead-souls.net's own Dead Souls `lib/verbs/` alone). A node with
+    // TWO object tokens where at least one is plural (OBS/LVS -- real
+    // "give OBS to LIV", `hasPluralObjectToken` below) is still
+    // deferred, same honest "not yet supported, not silently wrong"
+    // stance this row has used throughout (m_values()'s own
+    // non-zero-column rejection) -- see ParserPackage::parseRulesFor()'s
+    // own comment for the exact gating and STATUS.md's own entry for
+    // this slice for the corpus-evidence methodology.
     int objectTokenCount = 0;
+
+    // True if ANY of this node's object-family tokens is plural
+    // (OBS/LVS -- real PLURAL_MODIFIER). Only consulted when
+    // objectTokenCount == 2 (VerbRuleNode::objectTokenCount's own
+    // comment above): a two-object rule where either side is plural
+    // stays deferred; both-singular (OBJ/LIV only) is real and
+    // implemented. Harmless but unused for objectTokenCount <= 1 --
+    // single-object plural rules (a lone OBS/LVS) were already real
+    // before this field existed (pluralCheckFunctions(), item 9's own
+    // single-object slice).
+    bool hasPluralObjectToken = false;
 };
 
 // real verb_t/verb_syn_t (packages/parser.h). A verb *name* can

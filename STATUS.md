@@ -3,6 +3,187 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (a further fresh session, evidence-based re-rank): `parse_*`
+(row 0.13a) eighth real slice -- item 9's own two-object rule family,
+`dependent_check_functions()`/`check_one_relation()`/
+`check_object_relations()`, for the both-object-tokens-singular case
+(676 tests, up from 674).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules), then re-ranked all four
+still-open real candidates the prior session's own report had named
+(item 9's two-object family; row 1.9's LDMud mapping N-width value
+semantics; row 1.7/1.8's LDMud closure kinds; the narrowed row 1.4/1.16
+FluffOS `net_dead()` vs. LDMud `disconnect()` question) against real
+corpus evidence rather than the "obvious architectural next step"
+assumption alone, matching this row's own established methodology
+(`m_indices`/`m_values`'s own real-call-site count from an earlier
+session). Unzipped and searched every FluffOS-family corpus vendored in
+`temp/` (previously-unpacked `dead-souls`/`lima`/`es2_mudlib`/
+`nightmare3` plus five zip archives extracted fresh this session:
+`final_realms_fluffos_v1`, `skylib_fluffos_v3`, `tmi2_fluffos_v3`,
+`lpuni_fluffos_v1`, `merentha_fluffos_v2`) for real two-object
+`parse_add_rule()` usage, and `temp/core-lib` (the one confirmed
+LDMud-targeting corpus vendored here) for real `m_allocate`/`m_entry`/
+`m_reallocate`/`m_add`/`m_contains`/mapping-width-literal/`lambda()`/
+`unbound_lambda()`/`bind_lambda()`/real-signature `disconnect()` usage.
+One real methodology correction caught and fixed before trusting any
+count, the same discipline the `m_indices`/`m_values` session's own
+"naive substring search overcounted" note already established as
+precedent: a first `grep -E` pass combining two `\b...\b` word-boundary
+groups in one pattern silently matched nothing at all (confirmed by
+isolating the exact failing pattern against a known-real hit,
+`dead-souls.net`'s own Dead Souls `lib/verbs/items/give.c`'s
+`SetRules(..., "OBS LIV", ...)` line, and finding it did not match even
+in isolation) -- re-derived with a direct Python scan of every real
+`SetRules()`/`parse_add_rule()` call's own quoted rule strings instead of
+trusting the broken regex's zero-count. Real result: 77 real two-object
+rules found across every corpus (`give`, `put`, `get`, `pour`, `install`,
+and more, dead-souls.net's own Dead Souls `lib/verbs/` alone), 59 of
+which (77%) are both-singular (OBJ/LIV only, no OBS/LVS) -- versus zero
+real usage for row 1.9's own remaining scope, `unbound_lambda()` at only
+4 real call sites (all in one master-hook-configuration file,
+`secure/master/hooks.c`) with `lambda()`/`bind_lambda()` at zero, and
+zero real usage for a genuine per-object `void disconnect(object,
+string)` master apply (every "disconnect" hit found was an unrelated
+same-named database-handle-close local function,
+`secure/dataServices/dataService.c`, confirmed by reading the actual call
+sites, not just counting grep hits). Item 9 won decisively on this
+evidence -- see `ROADMAP.md`'s own updated rows 1.4, 1.7, 1.9, and 1.16
+for the same finding recorded against each of the three candidates not
+picked.
+
+Per this session's own explicit instruction, the real, confirmed latent
+bugs already flagged in real `check_object_relations()` during an
+earlier session's own investigation were treated as a "port faithfully,
+flag clearly, do not silently fix or silently reproduce without a note"
+decision, not a reason to avoid the row -- and the row was explicitly
+bounded into its own first sub-slice rather than attempting the whole
+family at once, the same pattern every other large item in this project
+has used. Scope: both object-family tokens singular (`VerbRuleNode::
+hasPluralObjectToken`, computed at `parse_add_rule()` time) --
+real-corpus-confirmed the large majority shape (59 of the 77 real
+two-object rules found). A genuinely plural two-object rule (`"give OBS
+to LIV"`, 18 of the 77) stays deferred, `ParserPackage::parseRulesFor()`
+skipping any such node outright, the same honest "not yet supported, not
+silently wrong" stance this row has used throughout.
+
+Implemented: `ParserPackage::dependentCheckFunctions()` (real
+`dependent_check_functions()`, the two-object analog of the
+already-real `pluralCheckFunctions()` -- narrows each object match's own
+candidate bitvec independently first), `checkOneRelation()` (real
+`check_one_relation()`, the real which=4/which=5 relational-naming probe
+that tests one specific fixed (direct, indirect) pair jointly), and
+`checkObjectRelations()` (real `check_object_relations()`, the N×M
+cross-product pairing scan that decides which pair actually wins,
+packages/parser.c:2312-2493 read in full this session, not just the
+portion an earlier session's own scoping pass had stopped at). Two new
+small helpers, `cacheLastParallelError()`/`useCachedParallelError()`
+(real `cache_last_parallel_error()`/`use_cached_parallel_error()`,
+distinct from the already-real `saveLastParallelError()`/
+`useLastParallelError()` -- a caller-supplied scratch slot rather than
+the fixed session-wide target). `ParserPackage::makeFunction()` (real
+`make_function()`) generalized from its previous single-object-only
+hardcoding to a genuine `omatch`-counting formula, provably equivalent to
+the old version for every `which` value it used to see (confirmed by
+hand for which in {0, 1, 3}) while correctly adding the two new cases a
+real two-object rule reaches (`which >= 4`, reading the new
+`SentenceSession::directObject`/`indirectObject` scratch fields instead
+of a candidate bitvec; `omatch == 2`, a genuine second object-family
+slot). `parseRulesFor()`'s own skip condition narrowed from "any node
+with two object tokens" to "any node with two object tokens where at
+least one is plural."
+
+Two real, confirmed bugs in real FluffOS 2.9's own
+`check_object_relations()` found while reading the full real source for
+this port (not assumed from an earlier session's own partial read) and
+ported faithfully, flagged inline in `ParserPackage.cpp` with their real
+source citation, per this session's own explicit instruction:
+
+1. A negative-ordinal indirect object (`"give the sword to the last
+   guard"`) scans from the wrong starting bitvec index in real code --
+   real `i` is left at `state->num_matches` (never reset to 0 the way a
+   positive ordinal's own branch does) and indexes bitvec *words*, not
+   individual objects (real `BPI * i + k`, `BPI == 32`,
+   `packages/parser.h:46`), so the real absolute starting object index
+   is `BPI * state->num_matches` -- every candidate below that index is
+   silently skipped in real FluffOS too. Ported as the same real starting
+   index, not object index 0.
+2. The main pairing loop's own early-exit test, `if (found_direct &&
+   (!direct_ordinal || ...))`, uses `found_direct` for plain C
+   truthiness rather than `found_direct >= 0` the way every other use of
+   this exact variable in this same real function tests it (including
+   four lines above, and again at the function's own tail) -- confirmed
+   inert for the ordinary no-ordinal case this sub-slice targets (the
+   loop simply runs to full completion instead of exiting early, which
+   changes nothing about the final accumulated result), but a real,
+   confirmable bug regardless, not silently corrected.
+
+One genuine implementation mistake of this session's own, caught by its
+own new regression test rather than shipped: an early draft mistranslated
+real `!direct_ordinal` (true only when a positive ordinal has counted
+down to exactly 0) as `directOrdinal <= 0` (true whenever there is no
+ordinal at all, `directOrdinal == -1`) in the early-exit check -- this
+made the pairing loop stop after the very first valid direct candidate
+instead of scanning every candidate, silently defeating ambiguity
+detection. Caught immediately by
+`testParseObjTwoSingularObjectTokenRuleWithTwoValidDirectCandidatesProducesErrAmbig`
+(new this session, see below) crashing with an uncaught
+`LpcRuntimeError` (`"parse accepted, but no do_* function found"`) rather
+than silently misresolving, confirmed as a real coding mistake rather
+than a faithfully-ported real bug by re-deriving the exact real
+condition from source, and fixed before this session's own final test
+run.
+
+4 new regression tests (`test/test_lexer.cpp`): the existing
+`testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched` renamed
+and fixed rather than left accidentally green -- its own function names
+(`can_put_obj`/`do_put_obj`) were never the real two-object naming
+convention (`can_put_obj_obj`/`do_put_obj_obj`, one `_obj`/`_liv` suffix
+per object token), so it kept passing after this slice landed for an
+entirely different, accidental reason (the generic can_ gate never found
+a matching name, not because the rule was still skipped) -- corrected to
+the real naming convention and to assert the real, now-supported success
+path, matching this project's own "an accidentally-still-green assertion
+is a bug in the test, not a pass" standard; a genuine relational-pairing
+test (two same-named swords, only one individually compatible with a
+chest per the chest's own `indirect_put_obj_obj` probe, confirming the
+CORRECT pair resolves, not just "any" candidate); a plural-still-deferred
+test (dead-souls.net's own Dead Souls `get.c` real "OBS OBJ" shape,
+confirmed still honestly skipped); and a direct-object ambiguity test
+(two candidates that both individually pass every check, producing a
+real `ERR_AMBIG` with both objects in the same real descending-index
+order the single-object ambiguity test already established, rather than
+an arbitrary "first one wins" pick) -- this last test is what caught this
+session's own implementation mistake above. 676 tests passing (up from
+674), zero regressions.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on a spare port, a real telnet-negotiating
+Python client, real `eval` calls): built a real room/player/two-swords/
+guard scene via `write_file()`/`clone_object()`, registered a real
+`parse_add_rule("give", "OBJ LIV")` (dead-souls.net's own real "OBS LIV"
+shape, narrowed to singular), and confirmed live that `parse_sentence("give
+sword guard")` resolved to the real correct sword (not the other,
+identically-named one the guard's own `indirect_give_obj_liv` rejects)
+and the real guard, invoking `do_give_obj_liv` with exactly those two
+objects -- the same relational-pairing behavior the new regression test
+proves, reproduced against the real running driver end to end, not just
+in the test harness. One live-script-only mistake caught along the way,
+not a driver bug: calling a nonexistent `->move()` method (this
+mudlib's own convention is a `go()` wrapper around `move_object()`,
+confirmed already in this row's own established test fixtures) silently
+did nothing rather than erroring, matching this driver's own real
+"undefined function returns void" contract -- caught when the whole
+scene turned up empty, fixed by calling `->go()` instead. Driver process
+confirmed to stay healthy afterward (`eval return 6*7;` -> 42, `who`),
+and every live test artifact (`/zzzt_*` files) removed before stopping
+the scratch process, leaving the real bundled mudlib tree exactly as
+found (`git status` clean under `mudlib/`).
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (another fresh session): scoped a future account/login/
 character-select mudlib plan (`mudlib/ACCOUNT_LOGIN_PLAN.md`, explicitly
 queued for later, not implementation); `parse_*` (row 0.13a) seventh real

@@ -19668,7 +19668,23 @@ static void testParseObjMyAdjectiveResolvesToThePlayersOwnCarriedItem() {
 // gracefully skipped rather than attempted and mismatched: no do_
 // function fires, and the whole parse falls through exactly as it would
 // if the verb had no interpretation at all (real "-found_level").
-static void testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched() {
+// This test originally proved a two-object rule was skipped outright
+// (real dependent_check_functions()/check_object_relations() were
+// entirely unimplemented at the time). **Updated 2026-08-19 (a later
+// session): both-singular two-object rules are now real** (this row's
+// own item 9 second real slice) -- the OLD fixture's own function names
+// (`can_put_obj`/`do_put_obj`) were never the real two-object naming
+// convention in the first place (real make_function() appends one
+// "_obj"/"_liv" suffix PER object token: `can_put_obj_obj`/
+// `do_put_obj_obj` for an "OBJ OBJ" rule), so the old assertions kept
+// passing after this slice landed for an entirely different, accidental
+// reason -- the generic can_ gate (checkFunctions(), always probed
+// first) never found a function under either name, not because the rule
+// was still being skipped. Fixed to use the real naming convention and
+// to assert the real, now-supported success path instead, matching this
+// project's own "an accidentally-still-green assertion is a bug in the
+// test, not a pass" standard.
+static void testParseObjTwoSingularObjectTokenRuleResolvesTheRealPairEndToEnd() {
     ObjectVarHarness harness;
     harness.writeFile("/po9_room.c",
         "void setup() { parse_init(); }\n"
@@ -19676,50 +19692,216 @@ static void testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched() {
         "int is_living() { return 0; }\n"
         "int inventory_accessible() { return 1; }\n"
         "int inventory_visible() { return 1; }\n");
-    harness.writeFile("/po9_sword.c",
+    // Two swords sharing the exact same noun -- "put sword chest" cannot
+    // distinguish them by text alone. Only the RELATIONAL check (each
+    // candidate pair's own direct_/indirect_ probe, checkObjectRelations()'s
+    // own cross-product scan) can tell them apart -- sword2 rejects
+    // pairing with the chest via its own indirect_ probe below, proving
+    // this is real per-pair resolution, not merely "each side narrows
+    // independently and the first candidate wins."
+    harness.writeFile("/po9_sword1.c",
         "void setup() { parse_init(); }\n"
         "void go(object dest) { move_object(dest); }\n"
         "mixed *parse_command_id_list() { return ({\"sword\"}); }\n"
         "int is_living() { return 0; }\n"
         "int inventory_accessible() { return 1; }\n"
-        "int inventory_visible() { return 1; }\n");
+        "int inventory_visible() { return 1; }\n"
+        "int direct_put_obj_obj(object a, object b) { return 1; }\n");
+    harness.writeFile("/po9_sword2.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"sword\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int direct_put_obj_obj(object a, object b) { return 1; }\n");
     harness.writeFile("/po9_chest.c",
         "void setup() { parse_init(); }\n"
         "void go(object dest) { move_object(dest); }\n"
         "mixed *parse_command_id_list() { return ({\"chest\"}); }\n"
         "int is_living() { return 0; }\n"
         "int inventory_accessible() { return 1; }\n"
-        "int inventory_visible() { return 1; }\n");
+        "int inventory_visible() { return 1; }\n"
+        // Rejects sword2 specifically -- proves the winning pair is
+        // decided by this per-pair relational probe, not just by
+        // whichever sword happened to narrow first.
+        "int indirect_put_obj_obj(object a, object b) { return file_name(a) != \"/po9_sword2\"; }\n");
     harness.writeFile("/po9_player.c",
-        "int doFired;\n"
+        "object gotA, gotB;\n"
         "void setup() { parse_init(); parse_add_rule(\"put\", \"OBJ OBJ\"); }\n"
         "void go(object dest) { move_object(dest); }\n"
         "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
         "int is_living() { return 1; }\n"
         "int inventory_accessible() { return 1; }\n"
         "int inventory_visible() { return 1; }\n"
-        "int can_put_obj(mixed a, mixed b) { return 1; }\n"
-        "void do_put_obj(object a, object b) { doFired = 1; }\n"
+        "int can_put_obj_obj(mixed a, mixed b) { return 1; }\n"
+        "void do_put_obj_obj(object a, object b) { gotA = a; gotB = b; }\n"
         "mixed run(string sentence) { return parse_sentence(sentence); }\n"
-        "int probeFired() { return doFired; }\n");
+        "mixed *probe() { return ({ gotA, gotB }); }\n");
 
     auto room = harness.objects.cloneObject("/po9_room");
     auto player = harness.objects.cloneObject("/po9_player");
-    auto sword = harness.objects.cloneObject("/po9_sword");
+    auto sword1 = harness.objects.cloneObject("/po9_sword1");
+    auto sword2 = harness.objects.cloneObject("/po9_sword2");
     auto chest = harness.objects.cloneObject("/po9_chest");
+    assert(room && player && sword1 && sword2 && chest);
+    for (auto& ob : {room, player, sword1, sword2, chest}) harness.vm.callFunction(ob, "setup", {});
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(sword1, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(sword2, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(chest, "go", std::vector<amlp::Value>{amlp::Value(room)});
+
+    amlp::Value result =
+        harness.vm.callFunction(player, "run", std::vector<amlp::Value>{amlp::Value(std::string("put sword chest"))});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+
+    amlp::Value probe = harness.vm.callFunction(player, "probe", {});
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(probe.data);
+    assert(arr->items.size() == 2);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(arr->items[0].data) == sword1); // NOT sword2
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(arr->items[1].data) == chest);
+
+    std::cout << "testParseObjTwoSingularObjectTokenRuleResolvesTheRealPairEndToEnd OK\n";
+}
+
+// A two-object rule where the SECOND (indirect) object token is plural
+// stays deferred (VerbRuleNode::hasPluralObjectToken's own comment) --
+// the same honest "not yet supported" behavior the old, now-renamed test
+// above originally (if accidentally) demonstrated, kept here as its own
+// real, correctly-targeted regression instead of losing that coverage
+// when the singular case became real.
+static void testParseObjTwoObjectTokenRuleWithAPluralSideStillSkippedNotSilentlyMismatched() {
+    ObjectVarHarness harness;
+    harness.writeFile("/po9b_room.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"room\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/po9b_sword.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"sword\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/po9b_chest.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"chest\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/po9b_player.c",
+        "int doFired;\n"
+        // Real dead-souls.net Dead Souls shape (lib/verbs/items/get.c's
+        // own "OBS OBJ" rule, no literal -- kept literal-free
+        // deliberately, since this harness loads no master object and a
+        // literal token needs one to tokenize at all): a plural direct
+        // slot paired with a singular indirect slot.
+        "void setup() { parse_init(); parse_add_rule(\"get\", \"OBS OBJ\"); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int can_get_obs_obj(mixed a, mixed b) { return 1; }\n"
+        "void do_get_obs_obj(mixed a, object b) { doFired = 1; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n"
+        "int probeFired() { return doFired; }\n");
+
+    auto room = harness.objects.cloneObject("/po9b_room");
+    auto player = harness.objects.cloneObject("/po9b_player");
+    auto sword = harness.objects.cloneObject("/po9b_sword");
+    auto chest = harness.objects.cloneObject("/po9b_chest");
     assert(room && player && sword && chest);
     for (auto& ob : {room, player, sword, chest}) harness.vm.callFunction(ob, "setup", {});
     harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
     harness.vm.callFunction(sword, "go", std::vector<amlp::Value>{amlp::Value(room)});
     harness.vm.callFunction(chest, "go", std::vector<amlp::Value>{amlp::Value(room)});
 
-    amlp::Value result = harness.vm.callFunction(
-        player, "run", std::vector<amlp::Value>{amlp::Value(std::string("put the sword the chest"))});
+    amlp::Value result =
+        harness.vm.callFunction(player, "run", std::vector<amlp::Value>{amlp::Value(std::string("get sword chest"))});
     assert(std::holds_alternative<int64_t>(result.data));
     assert(std::get<int64_t>(result.data) <= 0); // never the success value (1) -- no interpretation was ever attempted
     assert(std::get<int64_t>(harness.vm.callFunction(player, "probeFired", {}).data) == 0);
 
-    std::cout << "testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched OK\n";
+    std::cout << "testParseObjTwoObjectTokenRuleWithAPluralSideStillSkippedNotSilentlyMismatched OK\n";
+}
+
+// Two direct-object candidates that BOTH individually pass every real
+// check (their own dependentCheckFunctions() probe, and checkOneRelation()'s
+// own per-pair relational probe against the one indirect candidate) must
+// still produce a real ERR_AMBIG, not an arbitrary "first one wins" pick
+// -- checkObjectRelations()'s own direct-object ambiguity branch,
+// otherwise unexercised by the positive/negative tests above (both of
+// which have exactly one genuinely valid pairing).
+static void testParseObjTwoSingularObjectTokenRuleWithTwoValidDirectCandidatesProducesErrAmbig() {
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "mixed parser_error_message(int errType, mixed obj, mixed extra) {\n"
+        "    return ({ errType, obj, extra });\n"
+        "}\n");
+    assert(harness.objects.loadMasterObject());
+
+    harness.writeFile("/po9c_room.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"room\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/po9c_sword.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"sword\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int direct_put_obj_obj(object a, object b) { return 1; }\n");
+    harness.writeFile("/po9c_chest.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"chest\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int indirect_put_obj_obj(object a, object b) { return 1; }\n"); // accepts either sword
+    harness.writeFile("/po9c_player.c",
+        "void setup() { parse_init(); parse_add_rule(\"put\", \"OBJ OBJ\"); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int can_put_obj_obj(mixed a, mixed b) { return 1; }\n"
+        "mixed run(string sentence) { return parse_sentence(sentence); }\n");
+
+    auto room = harness.objects.cloneObject("/po9c_room");
+    auto player = harness.objects.cloneObject("/po9c_player");
+    auto sword1 = harness.objects.cloneObject("/po9c_sword");
+    auto sword2 = harness.objects.cloneObject("/po9c_sword");
+    auto chest = harness.objects.cloneObject("/po9c_chest");
+    assert(room && player && sword1 && sword2 && chest);
+    for (auto& ob : {room, player, sword1, sword2, chest}) harness.vm.callFunction(ob, "setup", {});
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(sword1, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(sword2, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(chest, "go", std::vector<amlp::Value>{amlp::Value(room)});
+
+    amlp::Value result =
+        harness.vm.callFunction(player, "run", std::vector<amlp::Value>{amlp::Value(std::string("put sword chest"))});
+    auto* arrPtr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arrPtr && *arrPtr && (*arrPtr)->items.size() == 3);
+    assert(std::get<int64_t>((*arrPtr)->items[0].data) == 4); // ERR_AMBIG
+    assert(std::get<int64_t>((*arrPtr)->items[1].data) == 0); // push_undefined() -> int 0
+    auto* objArr = std::get_if<std::shared_ptr<amlp::Array>>(&(*arrPtr)->items[2].data);
+    assert(objArr && *objArr && (*objArr)->items.size() == 2);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>((*objArr)->items[0].data) == sword2);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>((*objArr)->items[1].data) == sword1);
+
+    std::cout << "testParseObjTwoSingularObjectTokenRuleWithTwoValidDirectCandidatesProducesErrAmbig OK\n";
 }
 
 // --- parse_my_rules(): row 0.13a's item 6 (the 8th and, as of this
@@ -20615,7 +20797,9 @@ int main() {
     testParseObjLivModifierOnlyMatchesLivingCandidates();
     testParseObjAllOfPluralResolvesToTheAcceptedCandidatesOnly();
     testParseObjMyAdjectiveResolvesToThePlayersOwnCarriedItem();
-    testParseObjTwoObjectTokenRuleIsSkippedNotSilentlyMismatched();
+    testParseObjTwoSingularObjectTokenRuleResolvesTheRealPairEndToEnd();
+    testParseObjTwoObjectTokenRuleWithAPluralSideStillSkippedNotSilentlyMismatched();
+    testParseObjTwoSingularObjectTokenRuleWithTwoValidDirectCandidatesProducesErrAmbig();
     testParseMyRulesRestrictsMatchingToTheCallersOwnRegisteredRulesOnly();
     testParseMyRulesDefaultFlagReturnsVerbRuleArgsArrayWithoutCallingAnything();
     testParseMyRulesRequiresParseInitOnBothTheUserAndTheCallingObject();

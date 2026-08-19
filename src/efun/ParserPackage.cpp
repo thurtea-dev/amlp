@@ -260,6 +260,17 @@ int computeObjectTokenCount(const std::vector<int>& tokens) {
     }
     return count;
 }
+
+// See VerbRuleNode::hasPluralObjectToken's own comment.
+bool computeHasPluralObjectToken(const std::vector<int>& tokens) {
+    for (int t : tokens) {
+        if ((t & ~ParserToken::ChooseModifier) >= ParserToken::ObjA &&
+            (t & ParserToken::PluralModifier)) {
+            return true;
+        }
+    }
+    return false;
+}
 } // namespace
 
 void ParserPackage::addRule(const std::string& verb, const std::string& rule,
@@ -285,6 +296,7 @@ void ParserPackage::addRule(const std::string& verb, const std::string& rule,
     node.handler = handler;
     node.hasObjectToken = computeHasObjectToken(tokens);
     node.objectTokenCount = computeObjectTokenCount(tokens);
+    node.hasPluralObjectToken = computeHasPluralObjectToken(tokens);
     fillLitFromTokens(node);
 
     // real "verb_node->next = verb_entry->node; verb_entry->node =
@@ -1189,6 +1201,22 @@ struct SentenceSession {
     ParserErrorInfo parallelError;
     ParserErrorInfo secondParallelError;
     std::vector<SavedError> parallelErrors;
+
+    // real direct_object/indirect_object (packages/parser.c): the
+    // currently-fixed candidate PAIR checkObjectRelations() below is
+    // testing right now, read back only by makeFunction()'s own
+    // `which >= 4` branch (checkOneRelation()'s "is this ONE fixed pair
+    // jointly valid" probe -- the only real call site that ever reads
+    // either global instead of a match's own candidate bitvec). Real
+    // code stores these as process-wide globals; collapsed into
+    // per-session scratch fields here for the same reason every other
+    // "current parse in progress" global already is (this struct's own
+    // header comment) -- both are always set immediately before being
+    // read, entirely within checkObjectRelations()'s own call, so
+    // per-session scope loses nothing real code's own actual usage
+    // pattern depends on.
+    int directObject = -1;
+    int indirectObject = -1;
 };
 
 // real isignore(x) = (!uisprint(x) || x == '\'').
@@ -1860,6 +1888,34 @@ bool saveLastParallelError(SentenceSession& session, int obj) {
     return true;
 }
 
+// real cache_last_parallel_error() (packages/parser.c): moves
+// session.parallelError into a caller-supplied scratch slot instead of
+// useLastParallelError()'s own fixed session.currentError target or
+// saveLastParallelError()'s own persistent session.parallelErrors list --
+// used by dependentCheckFunctions()/checkOneRelation() below to hold a
+// per-candidate error temporarily without yet committing it as the
+// match's own final error, since a later candidate in the same scan
+// might still succeed.
+bool cacheLastParallelError(SentenceSession& session, ParserErrorInfo& storage) {
+    if (session.parallelError.errorType == ParserErrorType::None) return false;
+    storage = session.parallelError;
+    session.parallelError = ParserErrorInfo{};
+    return true;
+}
+
+// real use_cached_parallel_error() (packages/parser.c): the inverse of
+// cacheLastParallelError() above -- commits a previously-cached error
+// into session.currentError, the same "first error for this branch
+// wins" gate useLastParallelError() itself already uses.
+bool useCachedParallelError(SentenceSession& session, MatchState& state, ParserErrorInfo& err) {
+    if (err.errorType == ParserErrorType::None) return false;
+    if (state.numErrors++ == 0) {
+        session.currentError = err;
+        err = ParserErrorInfo{};
+    }
+    return true;
+}
+
 // real prefixes[] (packages/parser.c).
 const char* const kPrefixes[] = {"can_", "direct_", "indirect_", "do_", "direct_", "indirect_"};
 
@@ -1971,26 +2027,26 @@ Value pushBitvecAsArray(VM& vm, SentenceSession& session, const ObjBitset& bv, b
     return Value(arr);
 }
 
-// real make_function() (packages/parser.c). The OBJ-family branch is
-// reduced to the single-object-per-rule case this slice supports
-// (VerbRuleNode::objectTokenCount's own comment keeps a two-object node
-// from ever reaching sentence matching at all) -- confirmed directly
-// from source that real code's own "omatch"/"which" position-matching
-// bookkeeping collapses cleanly under that constraint: omatch is always
-// exactly 1 at the rule's one object-family token (there is only ever
-// one), so "omatch+1 >= which" (deciding the "obj"/"liv" vs "obs"/"lvs"
-// name suffix) is always true -- the plural name spellings only apply
-// to a rule's *second* object slot -- and the value-push decision only
-// ever sees `which` in {0, 1, 3} (checkFunctions()'s generic can_
-// probe, parallelCheckFunctions()'s per-candidate probe, and the final
-// do_ call respectively); the "omatch > which"/"which >= 4" branches
-// (both exclusively about a genuine *second* object slot) are
-// accordingly unreachable here. `target` is the specific candidate
-// object parallelCheckFunctions() is currently probing (which == 1
-// only) -- unused for which == 0 (no candidate chosen yet, real code's
-// own "push_number(0)") and which == 3 (the do_ call reads the
-// already-resolved SentenceMatch::number instead, real code's own
-// literal `target=0` at that one call site).
+// real make_function() (packages/parser.c). The OBJ-family branch
+// (`omatch`/`which` position-matching bookkeeping) is now general --
+// **updated 2026-08-19 (a later session)**: originally reduced to the
+// single-object-per-rule case (omatch implicitly always 1, `which >= 4`
+// unreachable), now generalized to a genuine two-object rule too
+// (VerbRuleNode::objectTokenCount's own comment on when that is
+// reachable). Provably equivalent to the old single-object-only version
+// for every `which` value that version ever saw (0, 1, 3) -- confirmed
+// by hand for each: `omatch` after this position's own increment is 1
+// for a rule's only (or first) object token, so `omatch == which`
+// selects `target` exactly when which == 1, `omatch > which` selects the
+// real "push 0" fallback exactly when which == 0, and which == 3 always
+// falls through to the already-resolved-value chain unchanged -- the
+// naming formula below reduces identically too (see its own comment).
+// `which >= 4` (checkOneRelation()'s own relational probe, real
+// `direct_object`/`indirect_object` read instead of a candidate bitvec)
+// and `omatch == 2` (a genuine second object-family token) are the two
+// new cases a two-object rule actually reaches. `target` is the specific
+// candidate object parallelCheckFunctions() is currently probing
+// (which == 1 or 2) -- unused for which == 0/3 exactly as before.
 BuiltFunction makeFunction(VM& vm, SentenceSession& session, int which, int tryIdx,
                             const std::shared_ptr<LpcObject>& target = nullptr) {
     BuiltFunction result;
@@ -2018,6 +2074,7 @@ BuiltFunction makeFunction(VM& vm, SentenceSession& session, int which, int tryI
     }
 
     int match = 0;
+    int omatch = 0; // real omatch, pre-increment-checked (see the naming/value logic below)
     const auto& literals = ParserPackage::currentLiterals();
     for (int tok : session.currentNode->tokens) {
         if (!nameTruncated) name += '_';
@@ -2028,44 +2085,73 @@ BuiltFunction makeFunction(VM& vm, SentenceSession& session, int which, int tryI
             bool isLiving = (masked & ParserToken::LivModifier) != 0;
             // real "if (omatch+1 >= which || !(matches[match].token &
             // PLURAL_MODIFIER) || which >= 4) buf += obj/liv; else buf
-            // += obs/lvs;" -- `omatch` here is its PRE-increment value
-            // (the OBS/LVS case's own check runs before the shared
-            // `omatch++` at real code's own "put_obj_value:" label), 0
-            // for the one object-family token a single-object rule can
-            // have, so "omatch+1 >= which" is 1 >= which: true for
-            // which in {0, 1} (this slice's only reachable can_/direct_
-            // probes), always giving "obj"/"liv" there regardless of
-            // plurality -- but FALSE for which == 3 (the do_ call), so
-            // a genuinely plural match there falls through to the
-            // "obs"/"lvs" spelling instead. Confirmed directly from
-            // source -- easy to mis-derive using omatch's post-
-            // increment value instead, which does not match real code.
-            bool useShortPluralSpelling = (which == 3) && (m.token & ParserToken::PluralModifier);
+            // += obs/lvs;" -- ported as the direct negation instead:
+            // plural spelling only when omatch+1 < which AND this
+            // match is genuinely plural AND which < 4. `omatch` here is
+            // its PRE-increment value (the OBS/LVS case's own check runs
+            // before the shared `omatch++` below, matching real code's
+            // own "put_obj_value:" label ordering exactly) -- 0 for a
+            // rule's first object token, 1 for its second. For a
+            // single-object rule (omatch always 0 here) this reduces
+            // to "(1 < which) && plural && (which < 4)", identical to
+            // the old hardcoded "(which == 3) && plural" for every
+            // which in {0, 1, 3} -- confirmed by hand, not just by
+            // construction: which=0/1 always give 1<which==false either
+            // way; which=3 gives 1<3==true and which<4==true, leaving
+            // exactly "plural" in both versions.
+            bool usePluralSpelling =
+                (omatch + 1 < which) && (m.token & ParserToken::PluralModifier) && (which < 4);
             if (!nameTruncated) {
                 if (isLiving) {
-                    name += useShortPluralSpelling ? "lvs" : "liv";
+                    name += usePluralSpelling ? "lvs" : "liv";
                 } else {
-                    name += useShortPluralSpelling ? "obs" : "obj";
+                    name += usePluralSpelling ? "obs" : "obj";
                 }
             }
 
-            if (which == 0) {
-                result.args.push_back(Value(static_cast<int64_t>(0)));
-            } else if (which == 3) {
-                if (m.token == ParserToken::Error) {
-                    result.args.push_back(Value(static_cast<int64_t>(0)));
-                } else if (m.token & ParserToken::PluralModifier) {
-                    result.args.push_back(pushBitvecAsArray(vm, session, m.obs, which == 3));
-                } else if (m.number < 0) {
-                    result.args.push_back(Value(static_cast<int64_t>(0)));
-                } else {
-                    auto ob = session.loaded.objects[static_cast<size_t>(m.number)];
+            omatch++;
+            if (which >= 4) {
+                // real "if (omatch == 1) push_object(loaded_objects[
+                // direct_object >= 0 ? direct_object : 0]); else
+                // push_object(loaded_objects[indirect_object >= 0 ?
+                // indirect_object : 0]);" -- checkOneRelation()'s own
+                // relational probe, the only place either global is
+                // read. Real code indexes loaded_objects[] unconditionally
+                // (no upper-bound check); this port keeps the same real
+                // "-1 falls back to index 0" defensive floor but adds an
+                // upper-bound guard too, since an out-of-range index
+                // would be memory-unsafe here in a way real C's own
+                // array-of-pointers is not -- not a behavior difference
+                // in any reachable case, since checkObjectRelations()
+                // below only ever sets these to a valid loaded-object
+                // index before this branch can run.
+                int idx = (omatch == 1) ? session.directObject : session.indirectObject;
+                if (idx < 0) idx = 0;
+                if (idx >= 0 && static_cast<size_t>(idx) < session.loaded.objects.size()) {
+                    auto ob = session.loaded.objects[static_cast<size_t>(idx)];
                     result.args.push_back((!ob || ob->isDestructed()) ? Value(static_cast<int64_t>(0)) : Value(ob));
+                } else {
+                    result.args.push_back(Value(static_cast<int64_t>(0)));
                 }
-            } else {
-                // which == 1: parallelCheckFunctions()'s own per-
-                // candidate probe -- push the specific candidate.
+            } else if (omatch == which) {
+                // parallelCheckFunctions()'s own per-candidate probe --
+                // push the specific candidate currently being tested.
                 result.args.push_back(target ? Value(target) : Value(static_cast<int64_t>(0)));
+            } else if (omatch > which) {
+                // real "push_number(0)" -- a later object-family slot
+                // than the one currently being probed (which == 0's own
+                // "no candidate chosen yet" case falls here too, since
+                // omatch is always >= 1 by this point).
+                result.args.push_back(Value(static_cast<int64_t>(0)));
+            } else if (m.token == ParserToken::Error) {
+                result.args.push_back(Value(static_cast<int64_t>(0)));
+            } else if (m.token & ParserToken::PluralModifier) {
+                result.args.push_back(pushBitvecAsArray(vm, session, m.obs, which == 3));
+            } else if (m.number < 0) {
+                result.args.push_back(Value(static_cast<int64_t>(0)));
+            } else {
+                auto ob = session.loaded.objects[static_cast<size_t>(m.number)];
+                result.args.push_back((!ob || ob->isDestructed()) ? Value(static_cast<int64_t>(0)) : Value(ob));
             }
             match++;
             continue;
@@ -2295,15 +2381,327 @@ void pluralCheckFunctions(VM& vm, SentenceSession& session, MatchState& state, i
     }
 }
 
+// real dependent_check_functions() (packages/parser.c) -- item 9's own
+// two-object family, first real piece. The two-object analog of
+// pluralCheckFunctions() above: narrows `m`'s own candidate bitvec down
+// to objects that individually pass the generic per-object can_ check
+// (parallelCheckFunctions(), the same `which` -- 1 for the direct slot,
+// 2 for the indirect -- weAreFinished() below already threads through
+// singularCheckFunctions()/pluralCheckFunctions() for the one-object
+// case), remembering the FIRST surviving candidate's own index in
+// m.number. That index is NOT yet the final answer -- it is only a
+// placeholder real make_function()'s own "which == 1/2, omatch does not
+// match which" fallback branch (makeFunction()'s own comment) reads
+// while the OTHER object slot's candidate is being probed, before
+// checkObjectRelations() below has actually decided the real winning
+// pair. checkObjectRelations() is what performs the real cross-product
+// pairing test and overwrites m.number with the true final answer.
+void dependentCheckFunctions(VM& vm, SentenceSession& session, MatchState& state, int which, SentenceMatch& m) {
+    bool foundOne = false;
+    ParserErrorInfo errinfo;
+    for (size_t i = 0; i < m.obs.size(); i++) {
+        if (!m.obs[i]) continue;
+        int ret = parallelCheckFunctions(vm, session, state, session.loaded.objects[i], which);
+        if (!ret || cacheLastParallelError(session, errinfo)) {
+            m.obs[i] = false;
+        } else {
+            if (!foundOne) m.number = static_cast<int>(i);
+            foundOne = true;
+        }
+    }
+    if (!foundOne && (useCachedParallelError(session, state, errinfo) || useLastParallelError(session, state))) {
+        m.token = ParserToken::Error;
+    }
+}
+
+namespace CheckRelation {
+constexpr int DirectOk = 1;
+constexpr int IndirectOk = 2;
+constexpr int ErrorRelation = 4;
+constexpr int RelationComplete = 8;
+} // namespace CheckRelation
+
+// real check_one_relation() (packages/parser.c): tests whether ONE
+// specific (direct, indirect) candidate PAIR -- both already fixed in
+// session.directObject/session.indirectObject by the caller,
+// checkObjectRelations() below -- is jointly valid, via the real
+// which=4/which=5 relational naming convention (makeFunction()'s own
+// `which >= 4` branch, the only place either global is ever read
+// instead of a match's own candidate bitvec: real can_give_obj_to_liv()-
+// style names, exactly the naming convention dead-souls.net's own Dead
+// Souls `lib/verbs/items/give.c` genuinely defines, confirmed against
+// real source). `directFirst` selects which of the pair is probed with
+// which=4 first (real code's own `direct_first` parameter -- driven by
+// `indirect_unique` at checkObjectRelations()'s own one real call site
+// below, not simply "always probe direct first").
+//
+// **Real, confirmed-inert quirk ported faithfully, not silently fixed:**
+// the second `parallel_check_functions()` call below plainly
+// *reassigns* `res` in real code ("res = parallel_check_functions(...)"),
+// discarding whatever CHECK_DIRECT_OK/CHECK_INDIRECT_OK bit the FIRST
+// call already OR'd in, if that second call itself returns 0 -- the
+// early "if (!res) return res | CHECK_ERROR_RELATION;" then reports
+// neither OK bit even though the first probe genuinely succeeded.
+// Confirmed harmless: checkObjectRelations() below, the only real
+// caller, never actually reads CHECK_DIRECT_OK/CHECK_INDIRECT_OK at
+// all, only CHECK_RELATION_COMPLETE -- so this loses nothing observable
+// through this one real call path, but is reproduced exactly (plain
+// reassignment, not `|=`) rather than "corrected," per this row's own
+// standing fidelity-first practice.
+int checkOneRelation(VM& vm, SentenceSession& session, MatchState& state, bool directFirst,
+                      ParserErrorInfo& errinfo) {
+    ParserErrorInfo err;
+    size_t firstIdx = static_cast<size_t>(directFirst ? session.directObject : session.indirectObject);
+    int res = parallelCheckFunctions(vm, session, state, session.loaded.objects[firstIdx], directFirst ? 4 : 5) ? 1 : 0;
+    if (!res) {
+        return CheckRelation::ErrorRelation;
+    }
+    res |= directFirst ? CheckRelation::DirectOk : CheckRelation::IndirectOk;
+    if (cacheLastParallelError(session, err)) {
+        res |= CheckRelation::ErrorRelation;
+    }
+    size_t secondIdx = static_cast<size_t>(directFirst ? session.indirectObject : session.directObject);
+    res = parallelCheckFunctions(vm, session, state, session.loaded.objects[secondIdx], directFirst ? 5 : 4) ? 1 : 0;
+    if (!res) {
+        if (err.errorType != ParserErrorType::None) errinfo = err;
+        return res | CheckRelation::ErrorRelation;
+    }
+    res |= directFirst ? CheckRelation::IndirectOk : CheckRelation::DirectOk;
+    if (err.errorType == ParserErrorType::None && cacheLastParallelError(session, err)) {
+        res |= CheckRelation::ErrorRelation;
+    }
+    res |= CheckRelation::RelationComplete;
+    if (err.errorType != ParserErrorType::None) errinfo = err;
+    return res;
+}
+
+// real check_object_relations() (packages/parser.c:2312-2493) -- item 9's
+// own two-object family, second and final piece for this slice. Real
+// source read in full (not just the portion an earlier session's own
+// scoping pass had stopped at) before writing this port; two genuine,
+// confirmed real bugs found are ported faithfully and flagged inline
+// below rather than silently fixed or silently reproduced without a
+// note, per this session's own explicit instruction. Restricted, for
+// this first real sub-slice, to the case neither object-family token is
+// plural (VerbRuleNode::hasPluralObjectToken's own comment --
+// parseRulesFor() below never attempts this function at all for a node
+// with a plural object slot) -- real-corpus-confirmed the large
+// majority shape (59 of 77 real two-object rules found across every
+// FluffOS-family corpus vendored in `temp/`, dead-souls.net's own Dead
+// Souls `lib/verbs/` alone), not an arbitrary restriction. A genuinely
+// plural two-object rule ("give OBS to LIV") stays deferred to a future
+// slice, the exact same honest "not yet supported, not silently wrong"
+// stance this row has used throughout.
+void checkObjectRelations(VM& vm, SentenceSession& session, MatchState& state) {
+    int direct = -1, indirect = -1;
+    for (int i = 0; i < state.numMatches; i++) {
+        if (session.matches[i].token & ParserToken::ObjA) {
+            if (direct < 0) direct = i; else indirect = i;
+        } else if (session.matches[i].token == ParserToken::Error) {
+            return;
+        }
+    }
+
+    ObjBitset& dirObjs = session.matches[direct].obs;
+    ObjBitset& indirObjs = session.matches[indirect].obs;
+
+    if (session.matches[indirect].ordinal) {
+        // real "if the indirect object is used with ordinal number,
+        // choose only that single indirect object" -- "give the sword
+        // to the second guard" must not silently consider every guard.
+        //
+        // **Real, confirmed bug ported faithfully, flagged, not
+        // silently fixed:** real code's own scan starts at whatever `i`
+        // was left at by the OBJ_A_TOKEN-scan loop just above (real
+        // "if (ord > 0) i = 0;" -- `i` is reset to 0 only for a
+        // POSITIVE ordinal; for a negative one -- real code's own "-1
+        // means the last candidate" convention, matching
+        // singularCheckFunctions()'s own identical convention elsewhere
+        // in this file -- `i` is left at whatever the earlier loop's own
+        // exit value was, `state->num_matches` (always 2 here, since
+        // this function is only ever reached with exactly two
+        // object-family matches)). Real `i` indexes bitvec_t *words*,
+        // not individual objects (real "BPI * i + k" -- BPI ==
+        // sizeof(int)*8 == 32 bits per word, packages/parser.h:46,
+        // confirmed directly), so the real absolute starting OBJECT
+        // index this bug produces is `BPI * state->num_matches` == 64,
+        // not object index 0 -- silently skipping every candidate below
+        // index 64 for a negative-ordinal indirect object. Confirmed
+        // directly against source, not a porting slip: a real, if
+        // narrow, bug in real FluffOS 2.9's own
+        // check_object_relations() -- "give the sword to the last
+        // guard" would wrongly miss every guard loaded before index 64
+        // in real FluffOS too. This driver's own ObjBitset is already a
+        // flat one-bool-per-object vector (HashEntry's own comment: the
+        // real bitvec_t word/bit split is a pure sizing/perf detail with
+        // no LPC-visible contract on its own), so the real "BPI * i + k"
+        // formula's own absolute-index RESULT is what is ported here
+        // directly -- the same starting object index real code's own
+        // bug actually produces, not a re-derivation of the word-chunk
+        // mechanics that produced it.
+        constexpr int kBpi = 32; // real BPI, packages/parser.h:46
+        int ord = session.matches[indirect].ordinal;
+        int i = (ord > 0) ? 0 : (state.numMatches * kBpi);
+        ObjBitset& bv = indirObjs;
+        bool found = false;
+        for (; static_cast<size_t>(i) < bv.size(); i++) {
+            if (!bv[static_cast<size_t>(i)]) continue;
+            if (--ord == 0) {
+                int chosen = i;
+                bv.assign(bv.size(), false);
+                bv[static_cast<size_t>(chosen)] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            session.matches[indirect].token = ParserToken::Error;
+            if (state.numErrors++ == 0) {
+                session.currentError = ParserErrorInfo{};
+                session.currentError.errorType = ParserErrorType::Ordinal;
+                session.currentError.ordError = static_cast<int>(bitsetCount(bv)) + 1;
+            }
+            return;
+        }
+    }
+
+    bool directUnique = !(session.matches[direct].token & ParserToken::PluralModifier);
+    bool indirectUnique = !(session.matches[indirect].token & ParserToken::PluralModifier);
+    int directOrdinal = session.matches[direct].ordinal;
+    if (!directOrdinal) directOrdinal = -1;
+
+    // real `directs`/`indirects` (bitvec_t, zero-initialized once at the
+    // very top of the real function, declared here instead since this
+    // port's own ERR_MANY_PATHS check below and the main pairing loop
+    // are the only two real readers/writers and both need the exact
+    // same variables, not two independently-zeroed copies).
+    ObjBitset directsAccum(session.loaded.objects.size(), false);
+    ObjBitset indirectsAccum(session.loaded.objects.size(), false);
+
+    if (!session.matches[indirect].ordinal) {
+        // real "check if there's not SO much possibilities" --
+        // ERR_MANY_PATHS guard against a combinatorial-explosion N*M
+        // scan. **Real, confirmed bug ported faithfully, flagged, not
+        // silently fixed:** real code counts `directs`/`indirects` here
+        // (the two ACCUMULATOR bitvecs the main scan below fills in,
+        // still empty at this point -- always 0*0==0, never >= 80), not
+        // `dir_objs`/`indir_objs` (the two CANDIDATE bitvecs that
+        // actually hold this rule's real candidate counts) -- so this
+        // guard can never fire at all in real FluffOS 2.9, regardless of
+        // how many real candidates either side has. Ported exactly: the
+        // same always-empty accumulators are counted here, not the real
+        // candidate sets, so this guard stays real-faithfully inert.
+        int directCount = static_cast<int>(bitsetCount(directsAccum));
+        int indirectCount = static_cast<int>(bitsetCount(indirectsAccum));
+        if (directCount * indirectCount >= 80) {
+            state.numErrors++;
+            session.currentError = ParserErrorInfo{};
+            session.currentError.errorType = ParserErrorType::ManyPaths;
+            return;
+        }
+    }
+
+    // real local `parser_error_t err` (declared at the top of the real
+    // function, initialized to error_type 0/None there) -- distinct from
+    // session.currentError/session.parallelError: a scratch slot passed
+    // by reference into every checkOneRelation() call across the whole
+    // double loop below, only ever committed into session.currentError
+    // at this function's own tail, via useCachedParallelError().
+    ParserErrorInfo err;
+    int foundDirect = -1, foundIndirect = -1;
+    bool finished = false;
+
+    for (size_t i = 0; !finished && i < dirObjs.size(); i++) {
+        if (!dirObjs[i]) continue;
+        session.directObject = static_cast<int>(i);
+        for (size_t l = 0; l < indirObjs.size(); l++) {
+            if (!indirObjs[l]) continue;
+            session.indirectObject = static_cast<int>(l);
+
+            int ret = checkOneRelation(vm, session, state, indirectUnique, err);
+            if (!(ret & CheckRelation::RelationComplete)) continue;
+
+            if (indirectUnique && foundIndirect >= 0 && foundIndirect != session.indirectObject) {
+                session.matches[indirect].token = ParserToken::Error;
+                if (state.numErrors++ == 0) {
+                    session.currentError = ParserErrorInfo{};
+                    session.currentError.errorType = ParserErrorType::Ambig;
+                    session.currentError.ambigObs = session.matches[indirect].obs;
+                }
+                return;
+            }
+            if (directOrdinal > 0) directOrdinal--;
+            if (directOrdinal <= 0 && directUnique && foundDirect >= 0 && foundDirect != session.directObject) {
+                session.matches[indirect].token = ParserToken::Error;
+                if (state.numErrors++ == 0) {
+                    session.currentError = ParserErrorInfo{};
+                    session.currentError.errorType = ParserErrorType::Ambig;
+                    session.currentError.ambigObs = session.matches[direct].obs;
+                }
+                return;
+            }
+            if (!(ret & CheckRelation::ErrorRelation)) {
+                if (directOrdinal <= 0) directsAccum[static_cast<size_t>(session.directObject)] = true;
+                indirectsAccum[static_cast<size_t>(session.indirectObject)] = true;
+            }
+            if (directOrdinal <= 0) foundDirect = session.directObject;
+            foundIndirect = session.indirectObject;
+        }
+        // **Real, confirmed bug ported faithfully, flagged, not silently
+        // fixed:** real code's own early-exit test is
+        // "if (found_direct && (!direct_ordinal || (direct_unique &&
+        // CHOOSE_MODIFIER)))" -- `found_direct` tested for plain C
+        // truthiness, not `found_direct >= 0` the way every OTHER use of
+        // this exact variable in this same real function tests it
+        // (including four lines above, and again at this function's own
+        // tail). Since found_direct's real sentinel is -1 (itself
+        // truthy in C) and a real object index of 0 is the one value
+        // this test cannot distinguish from "not found yet", the
+        // condition is almost always true whenever anything has been
+        // found (regardless of index), and would be FALSE for the one
+        // legitimate case (found_direct == 0) where a real early exit
+        // was actually earned. Confirmed via the surrounding gate,
+        // though, that this bug is inert for the ordinary case this
+        // sub-slice targets: directOrdinal defaults to -1 (real
+        // "!direct_ordinal" is then false, since -1 is truthy) and
+        // CHOOSE_MODIFIER is rare, so the whole condition is FALSE for
+        // an ordinary no-ordinal rule regardless of foundDirect's value
+        // either way -- the loop simply runs to full completion instead
+        // of exiting early, which changes nothing about the final
+        // accumulated directsAccum/indirectsAccum result, only whether
+        // every candidate pair gets visited. Ported exactly (the real
+        // truthy test, not `>= 0`) rather than silently corrected.
+        if (foundDirect && (directOrdinal == 0 ||
+                             (directUnique && (session.matches[direct].token & ParserToken::ChooseModifier)))) {
+            finished = true;
+        }
+    }
+
+    dirObjs = directsAccum;
+    indirObjs = indirectsAccum;
+    session.matches[direct].number = directUnique ? foundDirect : 0;
+    session.matches[indirect].number = indirectUnique ? foundIndirect : 0;
+
+    if (foundDirect < 0) {
+        if (useCachedParallelError(session, state, err) || useLastParallelError(session, state)) {
+            session.matches[direct].token = ParserToken::Error;
+        }
+    } else if (foundIndirect < 0) {
+        if (useCachedParallelError(session, state, err) || useLastParallelError(session, state)) {
+            session.matches[indirect].token = ParserToken::Error;
+        }
+    }
+}
+
 // real we_are_finished() (packages/parser.c): once the generic can_
 // check passes, resolves every object-family match in turn
-// (singularCheckFunctions()/pluralCheckFunctions() -- the
-// dependent_check_functions()/check_object_relations() two-object
-// branch is unreachable, since a node needing two objects never reaches
-// sentence matching at all, VerbRuleNode::objectTokenCount's own
-// comment), then either records the best error seen so far or commits
-// this node as the new best match and pre-builds all four real do_
-// naming variants.
+// (singularCheckFunctions()/pluralCheckFunctions() for a one-object
+// node; dependentCheckFunctions()+checkObjectRelations() below for a
+// real two-object, both-singular node -- VerbRuleNode::objectTokenCount/
+// hasPluralObjectToken's own comments on exactly which two-object shape
+// reaches this point at all), then either records the best error seen so
+// far or commits this node as the new best match and pre-builds all four
+// real do_ naming variants.
 void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
     if (session.foundLevel < 2) session.foundLevel = 2;
     if (session.bestMatchWeight >= session.currentNode->weight) return;
@@ -2328,15 +2726,20 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
         if (tok & ParserToken::PluralModifier) {
             pluralCheckFunctions(vm, session, state, which, m);
         } else if (state.numObjs == 2) {
-            // dependent_check_functions(): unreachable, see this
-            // function's own header comment.
+            dependentCheckFunctions(vm, session, state, which, m);
         } else {
             singularCheckFunctions(vm, session, state, which, m);
         }
         which++;
     }
-    // state.numObjs == 2 -> check_object_relations(): same reasoning,
-    // unreachable here.
+    // real "if (state->num_objs == 2 && !state->num_errors)
+    // check_object_relations(state);" -- only attempted once BOTH
+    // matches independently survived dependentCheckFunctions() above
+    // (a state.numErrors from either side's own rejection means there is
+    // no valid pair to even look for).
+    if (state.numObjs == 2 && !state.numErrors) {
+        checkObjectRelations(vm, session, state);
+    }
 
     if (state.numErrors) {
         int weight = session.currentNode->weight;
@@ -2372,9 +2775,12 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
 
 // real parse_rules() (packages/parser.c): tries every rule node
 // registered under the matched verb, skipping any node needing two
-// object tokens (VerbRuleNode::objectTokenCount's own comment -- not
-// yet supported), any node whose weight cannot beat the current best
-// match, and any node whose own lit[0]/lit[1] prefilter fails.
+// object tokens where at least one is plural (VerbRuleNode::
+// objectTokenCount/hasPluralObjectToken's own comments -- a plural-
+// involving two-object rule, e.g. "give OBS to LIV", is not yet
+// supported; both-singular, e.g. "give OBJ to LIV", is real as of
+// 2026-08-19), any node whose weight cannot beat the current best match,
+// and any node whose own lit[0]/lit[1] prefilter fails.
 // `restrictedHandler` is real parse_restricted (set only by
 // parse_my_rules(), always null for parse_sentence() itself) -- real
 // "(!parse_restricted || parse_vn->handler == parse_restricted)",
@@ -2383,7 +2789,7 @@ void weAreFinished(VM& vm, SentenceSession& session, MatchState& state) {
 // object.
 void parseRulesFor(VM& vm, SentenceSession& session, const std::shared_ptr<LpcObject>& restrictedHandler) {
     for (const VerbRuleNode& node : session.matchedVerb->nodes) {
-        if (node.objectTokenCount >= 2) continue;
+        if (node.objectTokenCount >= 2 && node.hasPluralObjectToken) continue;
         if (restrictedHandler && node.handler.lock() != restrictedHandler) continue;
         if (session.bestMatchWeight > node.weight) continue;
 
