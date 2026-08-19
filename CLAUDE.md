@@ -23,8 +23,9 @@ must continue unchanged.
   authoritative signal for what is actually done.
 - `STATUS.md` is the dated development log, most recent entries first.
   Older entries are archived in `STATUS-ARCHIVE.md`.
-- `prompt.md` is a menu of ready-to-run task prompts for specific rows.
-  It has a track record of describing some subsystems incorrectly, so
+- `PROMPT-ARCHIVE.md` is the archived former `prompt.md` menu of
+  ready-to-run task prompts for specific rows. It is not active. It
+  has a track record of describing some subsystems incorrectly, so
   verify anything it says against `temp/reference/fluffos-2.9-ds2.08` (the
   vendored real FluffOS 2.9 source) before implementing anything it
   describes.

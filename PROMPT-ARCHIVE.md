@@ -1,3 +1,12 @@
+# PROMPT ARCHIVE
+
+Ready-to-paste task prompts originally kept in `prompt.md` at the
+repository root. Archived on 2026-08-18 rather than deleted, matching
+the archival convention `STATUS-ARCHIVE.md` already established for
+this project: keep the content, move it out of the active working
+set. This file is not an active task menu. Everything below is the
+original `prompt.md` content, verbatim.
+
 # AMLP - Claude Code Prompts
 
 Ready-to-paste prompts for continuing the world-class LPC driver development.
