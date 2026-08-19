@@ -3,6 +3,164 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (a further fresh session, same day): row 1.7/1.8 updated to
+accurately reflect its current real state (H_MOVE_OBJECT0/1 fully wired
+end to end, concrete remaining list), a full fresh Phase 1 re-ranking
+sweep across every open row, and a real `H_MODIFY_COMMAND` slice picked
+from that sweep and verified live with a real raw typed command, not
+`eval` (694 tests, up from 692).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules).
+
+**Step 1: row 1.7/1.8 accuracy update.** The row's own opening summary
+still said "see the update at the end of this cell for the full
+scoping, including the still-open `inaugurate_master()` boot-wiring
+gap" -- stale, since last session closed that gap. Rewrote the opening
+to state plainly that H_MOVE_OBJECT0/H_MOVE_OBJECT1 are wired fully end
+to end (storage, dispatch, boot install, real trigger, all confirmed
+live together), and to list the concrete remaining scope explicitly:
+the other three real `unbound_lambda()` hook trigger points from
+hooks.c (`H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS`), every other
+real hook hooks.c sets that is not `unbound_lambda()`-based (the
+plain-string hooks and the one mapping hook), real per-hook type-map
+validation, `privilege_violation()`, plain dialect-agnostic `lambda()`,
+the rest of real `lambda()`'s own grammar, and `inaugurate_master()`'s
+own arg=1/2/3 cases. Did not close the row -- stays `[x] (partial)`
+with an accurate, itemized remaining list, per this session's own
+explicit instruction.
+
+**A second, unrelated staleness bug found and fixed while reading
+nearby rows for the sweep:** row 1.16's own inline cell text still said
+"No implementation this pass: all three blocked, none forced...
+`valid_read`/`valid_write` is recommended as its own future row...
+whenever it gets an explicit go-ahead" -- but `valid_read`/`valid_write`
+were in fact implemented later that same 2026-08-18 session
+(`checkValidPath()`, confirmed directly against the current
+`EfunTable.cpp`, wired into all 11 real file efuns), a reversal the
+below-table bullet list already recorded accurately but the row's own
+inline summary was never updated to reflect. Added an explicit
+correction note rather than silently rewriting history.
+
+**Step 2: full Phase 1 re-ranking sweep.** Enumerated every Phase 1 row
+(1.1 through 1.16) and its current checkbox state directly from the
+file rather than from memory. DGD rows (1.11-1.15) confirmed still
+comparison-only, not Phase 1 blockers, per the Phase 1 header's own
+2026-08-18 scope clarification -- excluded from real-priority ranking,
+each already has its own real, cited "confirmed genuinely bigger" note
+on record, nothing new to add. Rows 1.1/1.5/1.6/1.10 are done. Row
+1.2/1.3: everything LDMud-relevant either already implemented or now
+owned by a more specific row (1.7/1.8/1.9); the row's own remaining
+open item, `rlimits`, is DGD's own (row 1.3's own title: "DGD
+`atomic`/`rlimits`/`nil`"), already covered under the DGD-comparison-
+only umbrella -- nothing independently open here. Row 1.4: the
+connect/disconnect design question, re-confirmed zero real LDMud
+`disconnect()` usage multiple sessions running now, stays closed. Row
+1.9: remaining sub-items (`([:width])`, the `m_allocate` efun family,
+mapping range index, save/restore) already confirmed zero real corpus
+usage two sessions ago, no new evidence to gather. Row 1.16: `get_bb_uid`
+stays dead/unimplementable against this exact vendored source;
+`make_path_absolute` stays blocked behind `ed()`, itself unimplemented.
+
+**Two rows got genuinely fresh investigation this pass, not just a
+status re-read:**
+
+Row 1.8 (`#'symbol` references baked at construction, a bare, wholly
+uninvestigated stub before this session): real corpus check --
+re-derived the full 32-hit `#'` corpus count fresh (the same fixed-
+string search methodology established two sessions ago) and read every
+single one of the 32 real hits directly, not just counted them. Every
+one is either passed straight into `filter()`/`map()`/`apply()`/
+`regreplace()` as an argument, or lives inside `secure/master/hooks.c`'s
+own already-covered `unbound_lambda()` bodies -- not one real hit stores
+a `#'name` closure into a persistent object variable for later use,
+which is the one shape where this driver's own existing "lazy
+re-resolve by name at call time" simplification (`Value.hpp`'s own
+`Closure` comment) could actually diverge observably from real LDMud's
+eager construction-time binding. Confirmed genuinely zero real-world
+impact for the one corpus this repo has real LDMud evidence for, not
+merely "still open, not yet checked."
+
+Row 1.7's own remaining hooks.c hook numbers: re-read hooks.c's own 10
+non-`unbound_lambda()` `set_driver_hook()` calls against what this
+driver already hardcodes, rather than assuming they all need fresh
+plumbing. `H_CREATE_SUPER`/`H_CREATE_OB`/`H_CREATE_CLONE` (real value:
+`"create"`) and `H_NOTIFY_FAIL` (real value: `"What?\n"`) both already
+match this driver's own pre-existing hardcoded defaults exactly
+(`ObjectManager.cpp`'s own `callFunction(obj, "create", {})`,
+`Server.cpp`'s own hardcoded `"What?\n"` fallback, both confirmed by
+direct grep this session) -- wiring the actual hook mechanism for
+either would be a zero-observable-behavior-change formality for this
+specific real corpus, not a live gap. `H_RESET`/`H_CLEAN_UP`, by
+contrast, are genuinely unimplemented: this driver calls `heart_beat`
+periodically but never calls `reset`/`clean_up` on anything at all
+(confirmed by grep -- `clean_up` is only listed in `ApplyTable::known()`
+as a recognized name, never actually invoked anywhere). `H_MODIFY_COMMAND`
+(a mapping of single-letter direction abbreviations to full verbs) was
+the standout: real `actions.c` (`call_modify_command()`,
+`actions.c:514-611`, called from `parse_command()`, `actions.c:792`)
+confirmed this fires on *every* typed command, before verb parsing,
+directly gating whether a player can type "n" instead of "north" --
+genuine everyday gameplay impact, not object-creation-time bookkeeping,
+and its storage already existed for free (`driverHooks_` is generic
+across all 32 slots already).
+
+**Step 3: picked `H_MODIFY_COMMAND`.** Highest real, moment-to-moment
+gameplay impact among everything the sweep surfaced, and a small,
+well-bounded slice: `VM::dispatchCommand()` now checks
+`driverHooks_[9]` (`H_MODIFY_COMMAND`) for a `Mapping` before the
+existing verb/arg split, substituting the whole line when it exactly
+matches a key whose value is a string (real semantics: only *trailing*
+whitespace is stripped first, and the *entire* line is the lookup key,
+not just the first word -- confirmed directly from `actions.c:576-785`
+before writing anything), then falling through to the pre-existing
+dispatch logic unchanged. Only the real `T_MAPPING` hook form is
+implemented, matching hooks.c's own actual real usage precisely -- the
+`T_CLOSURE`/`T_STRING` forms and the separate per-interactive-object
+override (`set_modify_command()`) are real but have zero confirmed
+corpus usage, left honestly unimplemented. 2 new regression tests.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4128, `dialect: ldmud`, a
+persistent plain TCP client kept open across multiple sends -- unlike
+the one-shot `eval`-per-connection pattern earlier sessions used, this
+needed a single connection surviving from login through the actual
+raw-command test -- a scratch `master_file: /tmp_sweep_master`
+installing the real hook via the real `inaugurate_master(0)` boot
+sequence, no manual `set_driver_hook()` call anywhere in the live
+session itself): typing the real raw command `n` -- not wrapped in
+`eval`, the actual shape a real player types -- correctly rewrote to
+`north` and ran a scratch `/command/north.c` (leveraging this bundled
+mudlib's own pre-existing "unknown verb falls back to
+`/command/<verb>.c`" catch-all, confirmed live and pre-existing, not
+built this session) with the output `"You went north! (real
+H_MODIFY_COMMAND rewrite fired)"`; `n ` (trailing space) produced the
+identical result, confirming the trailing-whitespace-only trim; `n foo`
+and an unmapped `x` both correctly did not rewrite, confirmed via the
+driver's own log showing it looking for `/command/n.c`/`/command/x.c`,
+never `/command/north.c`, for either. One real methodology detour along
+the way: an initial attempt tried to prove the rewrite by registering a
+custom `add_action()` handler in a scratch room the player was moved
+into, which never fired because this bundled mudlib already has its
+own catch-all command-loader intercepting first -- rather than fighting
+that pre-existing mechanism, the test was redirected to use it directly
+(supplying the `/command/north.c` file it was already trying to load),
+a cleaner and more direct confirmation than the original approach would
+have given anyway. Driver stayed healthy throughout (`eval return
+300+1;` -> 301, `who`). Scratch master/command files and
+`tmp_eval_file.c` removed before stopping the scratch process, leaving
+the bundled `mudlib/` tree as found.
+
+Still open on row 1.7/1.8: `H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS`
+dispatch, the remaining plain-string hooks (`H_RESET`/`H_CLEAN_UP`
+genuinely so; `H_CREATE_*`/`H_NOTIFY_FAIL` only formally so, already
+matching this driver's own hardcoded defaults for this corpus), real
+per-hook type-map validation, `privilege_violation()`, and
+`inaugurate_master()`'s own arg=1/2/3 cases.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (a further fresh session, same day): row 1.7/1.8's
 `inaugurate_master()` boot-sequence slice landed -- real LDMud master
 boot now calls `inaugurate_master(0)` automatically, wiring last

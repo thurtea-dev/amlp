@@ -1212,7 +1212,56 @@ std::pair<std::string, std::optional<std::string>> splitVerbAndArg(const std::st
 // one returns falsy.
 bool VM::dispatchCommand(const std::shared_ptr<LpcObject>& giver, const std::string& line) {
     if (!giver || giver->isDestructed()) return false;
-    auto [verb, arg] = splitVerbAndArg(line);
+
+    // LDMud H_MODIFY_COMMAND (ROADMAP.md row 1.7/1.8's own hooks.c stock-
+    // take: real hooks.c's own actual configured value for this hook is
+    // a plain mapping of single-letter/two-letter direction abbreviations
+    // to their full verb -- "([ \"e\": \"east\", \"w\": \"west\", ... ])"
+    // -- picked as this session's real build over the other still-open
+    // hook trigger points specifically because it is the one with an
+    // everyday, moment-to-moment gameplay impact (players typing "n"
+    // instead of "north") rather than object-creation-time bookkeeping.
+    // Real trigger point: actions.c's own call_modify_command()
+    // (actions.c:514-611), called exactly once from parse_command()
+    // (actions.c:792), before verb/arg splitting, with no re-check of
+    // the (possibly now-rewritten) line afterward -- real semantics only
+    // strip *trailing* spaces first (actions.c:777-785, "for (p = buff +
+    // strlen(buff) - 1; ...)", leading whitespace is deliberately left
+    // alone), then look the *entire* trimmed line up as one mapping key
+    // (find_tabled_str(buff, ...), actions.c:576) -- not just the first
+    // word -- meaning a bare "n" matches but "n foo" does not, exactly
+    // matching real direction commands' own no-argument shape. Only the
+    // real T_MAPPING form is implemented here, matching hooks.c's own
+    // actual real usage precisely -- the T_CLOSURE and T_STRING hook
+    // forms (a mudlib-supplied rewrite function) and the separate
+    // per-interactive-object override (H_MODIFY_COMMAND_FNAME/
+    // set_modify_command()) are real but have zero confirmed real corpus
+    // usage, honestly left unimplemented rather than guessed at.
+    std::string effectiveLine = line;
+    {
+        constexpr int kHModifyCommand = 9;
+        Value hookVal = getDriverHook(kHModifyCommand);
+        if (auto* map = std::get_if<std::shared_ptr<Mapping>>(&hookVal.data)) {
+            if (*map) {
+                size_t end = line.find_last_not_of(' ');
+                std::string trimmed = (end == std::string::npos) ? std::string() : line.substr(0, end + 1);
+                if (!trimmed.empty()) {
+                    for (const auto& entry : (*map)->entries) {
+                        if (auto* key = std::get_if<std::string>(&entry.first.data)) {
+                            if (*key == trimmed) {
+                                if (auto* replacement = std::get_if<std::string>(&entry.second.data)) {
+                                    effectiveLine = *replacement;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    auto [verb, arg] = splitVerbAndArg(effectiveLine);
     if (verb.empty()) return false;
 
     // Snapshot: a handler is free to call add_action()/remove_action()

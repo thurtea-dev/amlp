@@ -17880,6 +17880,79 @@ static void testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet() {
     std::cout << "testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet OK\n";
 }
 
+// ROADMAP.md row 1.7/1.8's own full Phase 1 stock-take sweep: real
+// hooks.c's own actual H_MODIFY_COMMAND value is a plain mapping of
+// direction abbreviations to full verbs -- picked as this session's
+// real build for real everyday gameplay impact (see VM::dispatchCommand()'s
+// own comment for the full citation, real actions.c:514-611/792). Real
+// semantics: the *entire* trimmed command line is looked up as one
+// mapping key, not just the first word -- a bare "n" matches, "n foo"
+// does not (matching real direction commands' own no-argument shape).
+static void testHModifyCommandRewritesBareAbbreviationToTheMappedFullVerb() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/hmc_room.c",
+        "void init() { add_action(\"cmd_north\", \"north\"); }\n"
+        "int cmd_north(string arg) { return 1; }\n");
+    harness.writeFile("/hmc_mover.c",
+        "void go(object dest) { enable_commands(); move_object(dest); }\n"
+        "void install() {\n"
+        "    set_driver_hook(9,\n" // H_MODIFY_COMMAND, real mudlib/sys/driver_hook.h
+        "        ([ \"e\": \"east\", \"w\": \"west\", \"s\": \"south\",\n"
+        "           \"n\": \"north\", \"d\": \"down\", \"u\": \"up\",\n"
+        "           \"nw\": \"northwest\", \"ne\": \"northeast\",\n"
+        "           \"sw\": \"southwest\", \"se\": \"southeast\" ])\n"
+        "    );\n"
+        "}\n");
+    auto room = harness.objects.cloneObject("/hmc_room");
+    auto mover = harness.objects.cloneObject("/hmc_mover");
+    assert(room != nullptr);
+    assert(mover != nullptr);
+    harness.vm.callFunction(mover, "go", {amlp::Value(room)});
+    harness.vm.callFunction(mover, "install", {});
+
+    // Bare "n" is not itself a registered action (only "north" is) --
+    // without the hook this would fail; with it, real semantics rewrite
+    // the whole line to "north" before verb matching.
+    assert(harness.vm.dispatchCommand(mover, "n") == true);
+
+    // Real semantics only strip trailing whitespace before the mapping
+    // lookup, so a bare "n " (trailing space) still matches...
+    assert(harness.vm.dispatchCommand(mover, "n ") == true);
+
+    // ...but "n foo" (real content after the abbreviation) does not --
+    // the whole trimmed line "n foo" is not itself a mapping key, so
+    // this falls through to ordinary verb parsing, where the typed verb
+    // "n" still does not match the registered "north" action.
+    assert(harness.vm.dispatchCommand(mover, "n foo") == false);
+
+    // An abbreviation with no corresponding hook entry (or no hook at
+    // all) is untouched, falling through normally -- confirms this is a
+    // real lookup, not a blanket "anything short gets accepted" rule.
+    assert(harness.vm.dispatchCommand(mover, "x") == false);
+
+    std::cout << "testHModifyCommandRewritesBareAbbreviationToTheMappedFullVerb OK\n";
+}
+
+static void testHModifyCommandIsANoOpWhenNoHookIsSetOrTheValueIsNotAMapping() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/hmc2_room.c",
+        "void init() { add_action(\"cmd_north\", \"north\"); }\n"
+        "int cmd_north(string arg) { return 1; }\n");
+    harness.writeFile("/hmc2_mover.c", "void go(object dest) { enable_commands(); move_object(dest); }\n");
+    auto room = harness.objects.cloneObject("/hmc2_room");
+    auto mover = harness.objects.cloneObject("/hmc2_mover");
+    assert(room != nullptr);
+    assert(mover != nullptr);
+    harness.vm.callFunction(mover, "go", {amlp::Value(room)});
+
+    // No set_driver_hook() call at all -- "n" stays unmatched, same as
+    // this driver's own pre-existing behavior before this slice.
+    assert(harness.vm.dispatchCommand(mover, "n") == false);
+    assert(harness.vm.dispatchCommand(mover, "north") == true);
+
+    std::cout << "testHModifyCommandIsANoOpWhenNoHookIsSetOrTheValueIsNotAMapping OK\n";
+}
+
 // ROADMAP.md row 1.9's own first real slice: real LDMud's own names for
 // keys()/values() (see EfunTable.cpp's own comment on "m_indices"/
 // "m_values" for the full real-source citation and corpus-frequency
@@ -21652,6 +21725,8 @@ int main() {
     testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage();
     testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun();
     testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet();
+    testHModifyCommandRewritesBareAbbreviationToTheMappedFullVerb();
+    testHModifyCommandIsANoOpWhenNoHookIsSetOrTheValueIsNotAMapping();
     testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
     testMValuesBareFormReturnsColumnZeroValues();
     testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();
