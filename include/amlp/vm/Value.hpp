@@ -31,12 +31,32 @@ struct Closure;
 // never gets used.
 struct Nil {};
 
+// LDMud's own "'name" symbol literal (ROADMAP.md row 1.2/1.3's own
+// "new Value variant member needed" note, and row 1.7/1.8's own
+// unbound_lambda() investigation, which is what actually greenlit
+// building it: real LDMud's own quoted-code lambda() bodies -- see
+// Closure::lambdaBody below -- use a symbol to mean "substitute this
+// lambda parameter's own bound value here", distinct from an ordinary
+// string. Confirmed as a real, separate runtime value in real LDMud,
+// not just lexer trivia: temp/ldmud/src/lex.c:6216-6266 is the real
+// lexer rule (see Lexer::lexQuote()'s own comment for the char-literal-
+// vs-symbol disambiguation it ports), and interpret.h's own svalue_t
+// carries a dedicated T_SYMBOL type tag for it. Only the plain "one
+// leading quote, bare identifier" shape is supported here -- real
+// LDMud's own multi-quote symbols ("''name", quotes > 1) and the
+// separate "'({" quoted-aggregate literal are both unimplemented,
+// matching zero confirmed real corpus usage for either.
+struct Symbol {
+    std::string name;
+};
+
 using ValueVariant = std::variant<
     std::monostate,
     Nil,
     int64_t,
     double,
     std::string,
+    Symbol,
     std::shared_ptr<LpcObject>,
     std::shared_ptr<Array>,
     std::shared_ptr<Mapping>,
@@ -191,6 +211,36 @@ struct Closure {
     // constructs (both "(: name :)" and bare "#'name"), which keep the
     // existing tiered resolution unchanged.
     bool forceEfun = false;
+
+    // LDMud's own unbound_lambda()/bind_lambda() (ROADMAP.md row 1.7/1.8,
+    // real closure.c's f_unbound_lambda()/v_bind_lambda()). Real corpus
+    // evidence for this: secure/master/hooks.c's own 4 real
+    // unbound_lambda() call sites, each handed straight to
+    // set_driver_hook() (itself still unimplemented -- see this row's
+    // own ROADMAP.md note for the full prerequisite chain this
+    // investigation surfaced). A Closure built by unbound_lambda() (see
+    // EfunTable.cpp's own registration) has no owner at all yet -- real
+    // f_unbound_lambda(): "l->base.ob = const0" (closure.c:6928) -- and
+    // carries the real efun's own two arguments verbatim instead of an
+    // ordinary functionName: lambdaParams is the declared argument-
+    // symbol array (({'item, 'dest}), already resolved to plain names
+    // rather than kept as Symbol values -- nothing needs them as
+    // anything but a lookup key), lambdaBody is the second argument (the
+    // quoted-code call tree, kept as the raw Value exactly as passed,
+    // unevaluated until call time -- see VM::evalQuotedLambdaNode()'s
+    // own comment for exactly which real quoted-code shapes are walked).
+    // unboundUntilBound stays true (real CLOSURE_UNBOUND_LAMBDA) until
+    // bind_lambda() flips it false and sets owner (real CLOSURE_
+    // BOUND_LAMBDA) -- VM::callClosure() throws real interpret.c's own
+    // "Uncallable closure" (interpret.c:21818) for any call attempt
+    // while it is still true, exactly matching real int_call_lambda()'s
+    // own "no bind_ob and still CLOSURE_UNBOUND_LAMBDA" path. Every
+    // other closure kind this driver constructs leaves lambdaBody void
+    // and unboundUntilBound false, so callClosure()'s existing tiered-
+    // resolution path is completely unaffected.
+    bool unboundUntilBound = false;
+    std::vector<std::string> lambdaParams;
+    Value lambdaBody;
 };
 
 } // namespace amlp

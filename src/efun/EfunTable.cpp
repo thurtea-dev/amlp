@@ -2793,6 +2793,102 @@ void registerCoreEfuns() {
     t.registerEfun("evaluate", evaluateImpl);
     t.registerEfun("funcall", evaluateImpl);
 
+    // closure unbound_lambda(mixed *args, mixed) -- LDMud-only (real
+    // func_spec:500's own declaration; ROADMAP.md row 1.7/1.8, greenlit
+    // by real corpus evidence: secure/master/hooks.c's own 4 real call
+    // sites, each handed straight to set_driver_hook(), itself still
+    // unimplemented -- see this row's own ROADMAP.md note). Real
+    // f_unbound_lambda() (closure.c:6889-6941): builds a closure with no
+    // home object at all ("l->base.ob = const0") from a declared-
+    // parameter-symbol array and a quoted-code body -- see VM.cpp's own
+    // callUnboundLambdaBody()/evalQuotedLambdaNode() for exactly which
+    // real quoted-code shapes this driver's own body walker supports.
+    // Registered unconditionally rather than dialect-gated, matching
+    // this table's own established convention (unshadow()'s own comment:
+    // efun *availability* is never withheld by dialect here).
+    t.registerEfun("unbound_lambda", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2) {
+            throw LpcRuntimeError("unbound_lambda() requires 2 arguments");
+        }
+        auto closure = std::make_shared<Closure>();
+        closure->unboundUntilBound = true;
+        // real f_unbound_lambda(): "if (sp[-1].type != T_POINTER) { if
+        // (sp[-1].type != T_NUMBER || sp[-1].u.number) efun_gen_arg_error;
+        // args = ref_array(&null_vector); }" -- int 0 (or void) is
+        // accepted as shorthand for "no parameters", anything else that
+        // is not an array is a real argument-type error.
+        if (auto* arr = std::get_if<std::shared_ptr<Array>>(&args[0].data)) {
+            if (*arr) {
+                for (const auto& item : (*arr)->items) {
+                    auto* sym = std::get_if<Symbol>(&item.data);
+                    if (!sym) {
+                        throw LpcRuntimeError(
+                            "Bad argument 1 to unbound_lambda(): parameter array must "
+                            "contain only 'name symbols");
+                    }
+                    closure->lambdaParams.push_back(sym->name);
+                }
+            }
+        } else if (!args[0].isVoid() &&
+                   !(std::holds_alternative<int64_t>(args[0].data) &&
+                     std::get<int64_t>(args[0].data) == 0)) {
+            throw LpcRuntimeError("Bad argument 1 to unbound_lambda()");
+        }
+        closure->lambdaBody = args[1];
+        return Value(closure);
+    });
+
+    // closure bind_lambda(closure cl [, object|lwobject ob]) -- LDMud-
+    // only (real func_spec:496). Real v_bind_lambda() (closure.c:6368-
+    // 6519) is a real, general "rebind any closure kind's own owner"
+    // efun (CLOSURE_LFUN/CLOSURE_BOUND_LAMBDA get rebound in place;
+    // CLOSURE_UNBOUND_LAMBDA becomes bound for the first time, real
+    // CLOSURE_BOUND_LAMBDA), not something unbound_lambda()-specific --
+    // ported that generally here too rather than narrowly to just the
+    // one real corpus shape, since the real efun itself is not narrower.
+    // The 1-argument form (bind to this_object(), what every real
+    // corpus-adjacent use of unbound_lambda()/bind_lambda() anywhere in
+    // temp/'s vendored corpora would need, though bind_lambda() itself
+    // has zero real corpus call sites at all -- hooks.c's own real usage
+    // never calls it directly, real driver-hook dispatch auto-binds
+    // internally, see VM.cpp's own callClosure() comment) needs no
+    // privilege check at all (real v_bind_lambda(): "If the argument ob
+    // is omitted, the closure is bound to this_object()"). The 2-
+    // argument cross-object form gates on a real privilege_violation()
+    // call in real LDMud (closure.c:6394-6396) that this driver does not
+    // implement at all yet (confirmed by grep, zero call sites anywhere)
+    // -- honestly rejected here rather than silently allowing an
+    // unauthorized cross-object bind or silently pretending the
+    // privilege check always passes.
+    t.registerEfun("bind_lambda", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty()) {
+            throw LpcRuntimeError("bind_lambda() requires at least 1 argument");
+        }
+        auto* closurePtr = std::get_if<std::shared_ptr<Closure>>(&args[0].data);
+        if (!closurePtr || !*closurePtr) {
+            throw LpcRuntimeError("Bad argument 1 to bind_lambda()");
+        }
+        auto closure = *closurePtr;
+        std::shared_ptr<LpcObject> target;
+        if (args.size() >= 2 && !args[1].isVoid()) {
+            auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&args[1].data);
+            if (!obPtr || !*obPtr) {
+                throw LpcRuntimeError("Bad argument 2 to bind_lambda()");
+            }
+            if (*obPtr != vm.currentObject()) {
+                throw LpcRuntimeError(
+                    "bind_lambda(): binding to another object requires "
+                    "privilege_violation(), not implemented in this driver");
+            }
+            target = *obPtr;
+        } else {
+            target = vm.currentObject();
+        }
+        closure->owner = target;
+        closure->unboundUntilBound = false;
+        return Value(closure);
+    });
+
     // int functionp(mixed) -- true only for a real Closure value (real
     // FluffOS's f_functionp() also distinguishes several function-
     // pointer sub-kinds via a bitmask return; this driver has only the

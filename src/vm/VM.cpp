@@ -788,6 +788,21 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
     if (!closure) {
         throw LpcRuntimeError("evaluate(): not a function value");
     }
+
+    // LDMud unbound_lambda() (ROADMAP.md row 1.7/1.8): real
+    // int_call_lambda() (interpret.c:21313) errors "Uncallable closure"
+    // (interpret.c:21818-21819) for a still-CLOSURE_UNBOUND_LAMBDA
+    // closure called with no bind_ob -- checked here, before the
+    // ordinary destructed-owner check just below, because an unbound
+    // closure's owner being unset is its normal, expected state (real
+    // f_unbound_lambda(): "l->base.ob = const0"), not the "was bound
+    // then the object got destructed" case that check exists to catch.
+    // See EfunTable.cpp's own bind_lambda() registration for the one
+    // real way unboundUntilBound ever flips false.
+    if (closure->unboundUntilBound) {
+        throw LpcRuntimeError("Uncallable closure");
+    }
+
     auto owner = closure->owner.lock();
     // Previously only checked whether the weak_ptr had actually expired
     // (the owner's last shared_ptr reference dropped) -- a real gap for
@@ -803,6 +818,20 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
     args.reserve(closure->boundArgs.size() + extraArgs.size());
     for (const auto& a : closure->boundArgs) args.push_back(a);
     for (auto& a : extraArgs) args.push_back(std::move(a));
+
+    // LDMud unbound_lambda() closure, now bound (ROADMAP.md row 1.7/1.8):
+    // real int_call_lambda()'s own CLOSURE_UNBOUND_LAMBDA/CLOSURE_
+    // BOUND_LAMBDA cases both fall into running the lambda's own compiled
+    // program (interpret.c:21551-21622); this driver never compiles one
+    // to bytecode at all (see Value.hpp's Closure::lambdaBody comment),
+    // so it is walked directly here instead. Checked after the owner/
+    // destructed checks above (an ordinary closure's own owner.lock()
+    // never engages this branch since lambdaBody stays void for every
+    // other closure kind), and before every tiered-resolution branch
+    // below, none of which apply to it.
+    if (!closure->lambdaBody.isVoid()) {
+        return callUnboundLambdaBody(*closure, std::move(args));
+    }
 
     // "#'efun::name" (Closure::forceEfun) -- real LDMud semantics skip
     // straight to the core efun table, deliberately bypassing this
@@ -875,6 +904,78 @@ Value VM::callClosure(const std::shared_ptr<Closure>& closure, std::vector<Value
     }
 
     throw LpcRuntimeError("evaluate(): undefined function or efun: " + closure->functionName);
+}
+
+// LDMud unbound_lambda() (ROADMAP.md row 1.7/1.8). Binds this closure's
+// own declared parameter symbols (lambdaParams, from unbound_lambda()'s
+// first argument) positionally to argValues, then evaluates lambdaBody
+// (the second argument, real LDMud's own quoted-code call tree) against
+// that binding -- real f_unbound_lambda()'s own comment: "The first
+// argument is an array describing the arguments (symbols) passed to the
+// closure upon evaluation by funcall() or apply(), the second arg forms
+// the code of the closure." (closure.c:6907-6909). Extra call-time
+// arguments beyond lambdaParams' own count are silently dropped and a
+// short call is padded with void, matching this driver's own existing
+// "missing/extra args" convention for an ordinary function call (real
+// LPC's own default-0-for-missing-arg rule) rather than erroring.
+Value VM::callUnboundLambdaBody(const Closure& closure, std::vector<Value> argValues) {
+    argValues.resize(closure.lambdaParams.size());
+    return evalQuotedLambdaNode(closure.lambdaBody, closure.lambdaParams, argValues);
+}
+
+// Walks one node of a real LDMud quoted-code lambda body (closure.c's
+// own lambda(), the C function f_unbound_lambda() calls to compile the
+// array-of-arrays "LISP-style" quoted code real LPC's lambda()/
+// unbound_lambda() efuns take as their body argument -- LDMud doc/LPC/
+// closures's own description). Real lambda() supports a genuinely large
+// grammar: operator closures as a call's own head (#'+, #'?, ...),
+// control-flow closures (#'if, #'while, #'foreach, ...), quoted
+// aggregates, symbols referring to the bound object's own global
+// variables in addition to the lambda's own declared parameters, and
+// more. This driver implements none of that -- only the one real shape
+// confirmed live in this mudlib's own corpus, secure/master/hooks.c's
+// four unbound_lambda() driver-hook bodies (still unreachable end to end
+// without set_driver_hook(), itself still unimplemented -- see
+// ROADMAP.md row 1.7/1.8's own note): a plain closure-headed call
+// (real LDMud's F_CLOSURE-headed quoted expression, the ordinary case
+// lambda() compiles to a straightforward CALL bytecode), each argument
+// either a nested call of the same shape or a bare 'name symbol
+// referencing one of this same lambda's own declared parameters, and a
+// bare literal (int/string/...) standing for itself. Anything past that
+// -- an operator/control-flow closure as the head, a symbol that is not
+// one of the declared parameters -- honestly errors rather than
+// silently misevaluating or guessing at a real LDMud semantic this
+// driver does not actually implement.
+Value VM::evalQuotedLambdaNode(const Value& node, const std::vector<std::string>& params,
+                                const std::vector<Value>& argValues) {
+    if (auto* sym = std::get_if<Symbol>(&node.data)) {
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (params[i] == sym->name) return argValues[i];
+        }
+        throw LpcRuntimeError(
+            "unbound_lambda: symbol '" + sym->name + " is not one of this lambda's own "
+            "declared parameters (global-variable symbol references are not supported)");
+    }
+    if (auto* arr = std::get_if<std::shared_ptr<Array>>(&node.data)) {
+        if (!*arr || (*arr)->items.empty()) {
+            throw LpcRuntimeError("unbound_lambda: empty quoted-code call expression");
+        }
+        auto* headClosure = std::get_if<std::shared_ptr<Closure>>(&(*arr)->items[0].data);
+        if (!headClosure || !*headClosure) {
+            throw LpcRuntimeError(
+                "unbound_lambda: quoted-code call expression must start with a closure "
+                "(operator/control-flow closures as the call head are not supported)");
+        }
+        std::vector<Value> callArgs;
+        callArgs.reserve((*arr)->items.size() - 1);
+        for (size_t i = 1; i < (*arr)->items.size(); ++i) {
+            callArgs.push_back(evalQuotedLambdaNode((*arr)->items[i], params, argValues));
+        }
+        return callClosure(*headClosure, std::move(callArgs));
+    }
+    // A plain literal (int, string, ...) inside quoted code stands for
+    // itself -- real lambda()'s own "constant" node kind.
+    return node;
 }
 
 std::string VM::resolveMudlibPath(const std::string& lpcPath) const {
@@ -1193,6 +1294,16 @@ Value VM::run(const CompiledProgram& program, const FunctionEntry& fn,
 
             case OpCode::PushNil: {
                 localStack.emplace_back(Value(Nil{}));
+                ++ip;
+                break;
+            }
+
+            case OpCode::PushSymbol: {
+                if (instr.operand < 0 ||
+                    static_cast<size_t>(instr.operand) >= program.stringPool.size()) {
+                    throw LpcRuntimeError("PushSymbol: bad symbol name index");
+                }
+                localStack.emplace_back(Value(Symbol{program.stringPool[instr.operand]}));
                 ++ip;
                 break;
             }

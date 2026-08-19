@@ -3,6 +3,140 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (a further fresh session, same day): row 1.9 closed out in
+ROADMAP.md with each remaining sub-item's zero-corpus-usage verdict
+recorded explicitly; then row 1.7/1.8 (LDMud closure kinds) picked next
+on a fresh corpus re-check, and a bounded `unbound_lambda()`/
+`bind_lambda()` first slice landed, including a new `Symbol` `Value`
+type and a small quoted-code call-tree evaluator (687 tests, up from
+683).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules).
+
+**Row 1.9 close-out.** The prior session's own corpus re-check (five
+sub-items, all zero real usage) was already recorded in ROADMAP.md, but
+buried inside one long paragraph rather than named individually where a
+future session would actually look. Added an explicit, itemized
+close-out to row 1.9's own cell: each of `([:width])`, the
+`m_allocate`/`m_entry`/`m_reallocate`/`m_add`/`m_contains` efun family,
+mapping range index, and save/restore of extra columns now has its own
+named "zero real hits, confirmed" line, plus an explicit note that a
+"zero" from one pass is not permanent and should be re-checked, not
+trusted forever (the width-2 literal itself was a real example of an
+earlier "zero" turning out wrong on closer reading). No new code this
+half -- documentation only, per this session's own explicit instruction.
+
+**Fresh corpus re-check, row 1.7/1.8 vs row 1.4/1.16.** Re-ran both
+from scratch rather than trusting the numbers already on record.
+`unbound_lambda`: still exactly 4 real hits, all in
+`secure/master/hooks.c`, all handed straight to `set_driver_hook()`.
+`bind_lambda`/bare `lambda(`: still 0 (the earlier "lambda( has hits"
+reading was always just the substring inside `unbound_lambda(`,
+re-confirmed directly). A broader `#'` sweep this pass first
+over-counted at 311, then 194 hits before narrowing to true fixed-string
+matches -- all false positives, `##Name##'s`-shaped template-string
+noise, not real closure syntax; the real bare-name/`efun::` forms are
+already fully covered by row 1.2/1.3's own prior slice, and every other
+`#'` form (operators, `#'[`, `#'({`, `#'sefun::`/`#'lfun::`/`#'var::`)
+stayed at 0. `disconnect(` (row 1.4/1.16) re-checked too: still
+exclusively the unrelated database-handle-close local function pattern
+found before, confirming that row stays closed. `unbound_lambda`'s 4
+real hits, still the strongest live evidence of the two, won this round.
+
+**What hooks.c's real usage actually needs, confirmed by reading it in
+full first.** All 4 real call sites are
+`unbound_lambda( ({params...}), ({#'targetFn, params...}) )` passed
+straight into `set_driver_hook()` -- itself entirely unimplemented in
+this driver (confirmed by grep: no `set_driver_hook()` efun, no
+driver-hook dispatch table anywhere). This means the task's own starting
+frame -- "just tag `Closure` with a kind so it can tell `unbound_lambda`
+apart from an ordinary closure" -- undersold the real gap: `Closure`
+already *has* one field's worth of "kind" information trivially
+(`owner` set vs. unset), but `unbound_lambda()`'s own second argument is
+real LDMud's own quoted-code lambda-body language (`closure.c`'s own
+`lambda()`, the real C function `f_unbound_lambda()` itself calls to
+compile that array-of-arrays "LISP-style" quoted code) -- there is
+nothing meaningful to *do* with an unbound closure once constructed
+without also being able to evaluate that body. Read `temp/ldmud/src/
+lex.c:6186-6266` (the real `'`-vs-char-literal lexer disambiguation),
+`closure.c:6889-6941`/`6368-6519` (`f_unbound_lambda()`/
+`v_bind_lambda()`), and `interpret.c:21313-21823`
+(`int_call_lambda()`'s own real `CLOSURE_UNBOUND_LAMBDA` handling,
+including the exact real `"Uncallable closure"` text at
+`interpret.c:21818`) before writing anything, not assumed from the
+task's own framing.
+
+**Bounded first slice, scoped to exactly what real usage needs and no
+further** (this session's own explicit instruction: "not a full
+`lambda`/`unbound_lambda`/`bind_lambda` rework"). New `Symbol` `Value`
+variant member for LDMud's own `'name` literal (`Value.hpp`) -- row
+1.2/1.3's own long-standing "new Value variant member needed" note,
+greenlit by this investigation, not a scope-creep addition of its own.
+`Lexer::lexQuote()` (gated to `LpcDialect::LdMud`) disambiguates it from
+an ordinary character constant the same way real `lex.c` does, scoped
+to a single leading quote and a bare identifier -- real corpus's own
+only shape (no `''name` multi-quote, no `'({` quoted-aggregate). New
+`SymbolLiteralExpr` AST node, `PushSymbol` opcode, `TokenType::
+QuotedSymbol`. `unbound_lambda(args, body)`/`bind_lambda(cl [, ob])`
+registered as real efuns (`EfunTable.cpp`, unconditionally, matching
+this table's own dialect-neutral-availability convention).
+`Closure` gained `unboundUntilBound`/`lambdaParams`/`lambdaBody`.
+`VM::callClosure()` throws the real `"Uncallable closure"` text
+(checked before the pre-existing destructed-owner check, since an
+unbound closure's own unset owner is its normal state, not the "was
+bound then died" case that check exists to catch) for a still-unbound
+one, and otherwise dispatches to two new methods,
+`callUnboundLambdaBody()`/`evalQuotedLambdaNode()` -- a small recursive
+quoted-code walker deliberately bounded to the one real shape confirmed
+live: a closure-headed call, each argument either a nested call of the
+same shape or a bare `'name` symbol substituting one of the lambda's own
+declared parameters, or a literal standing for itself. Real `lambda()`'s
+much larger grammar (operator/control-flow closures as a call's own
+head, quoted aggregates, global-variable symbol references) honestly
+errors rather than silently misevaluating or guessing. `bind_lambda()`'s
+cross-object form honestly rejects too, rather than silently allowing an
+unauthorized cross-object bind or silently pretending a
+`privilege_violation()` check passed -- this driver has zero
+`privilege_violation()` call sites at all.
+
+4 new regression tests: symbol-vs-char-literal lexing across all three
+dialects; hooks.c's own exact `H_MOVE_OBJECT0` shape end to end
+(uncallable until bound, correct result and correct side effect once
+bound); hooks.c's own exact `H_LOAD_UIDS` shape (a nested quoted call,
+plus the already-implemented `previous_object()` efun as its own inner
+closure); a symbol not among the lambda's own declared parameters
+throwing a clear error rather than silently misevaluating.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4124, `dialect: ldmud`, a
+plain TCP client, real `eval` calls, a temporary scratch object file
+mirroring hooks.c's own two real shapes): calling the still-unbound
+`makeHook()` result directly threw the real `"Uncallable closure"` text
+exactly (via `catch()`); after `bind_lambda()`, `funcall()` on the bound
+closure correctly ran `moveHook(3, 4)`, confirmed via the object's own
+now-set `lastItem`/`lastDest` (3 and 4); the nested `H_LOAD_UIDS` shape
+returned `({ "/std/thing", //tmp_eval_file })`, the second element a
+real, correct `previous_object()` result (the eval object itself, the
+real caller at that point in the real call stack), not an error. Driver
+stayed healthy after both the genuine "Uncallable closure" dispatch
+error (drops only that one connection, matching this row's own
+already-confirmed prior finding, not re-investigated fresh) and every
+successful call afterward (`eval return 100+1;` -> 101, `who`). Scratch
+object file and `tmp_eval_file.c` both removed before stopping the
+scratch process, leaving the bundled `mudlib/` tree as found.
+
+Still open on this row: `set_driver_hook()` itself (the actual real
+caller of hooks.c's own 4 real call sites -- a separate,
+currently-untracked prerequisite this investigation surfaced, now named
+in ROADMAP.md rather than left implicit), plain dialect-agnostic
+`lambda()`, the rest of real `lambda()`'s own quoted-code grammar,
+`bind_lambda()`'s cross-object form (blocked on `privilege_violation()`),
+and multi-quote/`quoted-aggregate` symbol forms.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (a further fresh session, same day): row 1.9 (LDMud mapping
 N-width) remaining sub-items re-checked against real corpus evidence
 fresh; none showed real usage; picked and fixed a real, live, silently-

@@ -177,6 +177,19 @@ AstPtr Parser::parsePrimary() {
         return std::make_unique<NilLiteral>();
     }
 
+    // LDMud "'name" symbol literal (see Ast.hpp's SymbolLiteralExpr and
+    // Lexer::lexQuote()'s own comment). Lexer::tokenize() only ever
+    // produces a QuotedSymbol token under LpcDialect::LdMud (a bare "'"
+    // stays lexChar()'s ordinary char-literal token under FluffOS/DGD),
+    // so no extra dialect_ gate is needed here the way "#'"/"nil" double-
+    // gate themselves against their own Lexer -- there is no token for
+    // this branch to even see under the other two dialects.
+    if (check(TokenType::QuotedSymbol)) {
+        auto sym = std::make_unique<SymbolLiteralExpr>();
+        sym->name = advance().text;
+        return sym;
+    }
+
     if (checkText("(") && peekAt(1).text == "[") {
         advance(); // (
         advance(); // [

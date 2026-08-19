@@ -29,6 +29,13 @@ struct FloatLiteral : AstNode {
 // beyond a constant 0 placeholder).
 struct NilLiteral : AstNode {};
 
+// LDMud "'name" symbol literal (ROADMAP.md row 1.7/1.8's own
+// unbound_lambda() investigation; see Value.hpp's Symbol comment and
+// Lexer::lexQuote() for the real-source citation and lexing detail).
+struct SymbolLiteralExpr : AstNode {
+    std::string name;
+};
+
 struct VarRefExpr : AstNode {
     std::string name;
 };

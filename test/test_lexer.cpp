@@ -17559,6 +17559,185 @@ static void testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBare
     std::cout << "testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm OK\n";
 }
 
+// ROADMAP.md row 1.7/1.8's own unbound_lambda() investigation: real
+// LDMud's own "'name" symbol literal (see Value.hpp's Symbol and
+// Lexer::lexQuote() for the real-source citation). Confirms the
+// disambiguation from an ordinary character constant, and that "'name"
+// stays a plain (unimplemented-as-a-symbol, still just a char literal)
+// lexing outside LpcDialect::LdMud -- neither FluffOS nor DGD has a
+// symbol-literal concept at all.
+static void testSymbolLiteralLexesDistinctFromCharLiteralUnderLdmudDialectOnly() {
+    {
+        amlp::Lexer lexer("'item", amlp::LpcDialect::LdMud);
+        auto tokens = lexer.tokenize();
+        assert(tokens.size() == 2); // symbol, End
+        assert(tokens[0].type == amlp::TokenType::QuotedSymbol);
+        assert(tokens[0].text == "item");
+    }
+    {
+        // Ordinary single-character constant stays a char literal (Number
+        // token, real LPC's own int-encoding-of-a-char), not a symbol --
+        // real lex.c's own "'x'" case, see Lexer::lexQuote()'s comment.
+        amlp::Lexer lexer("'a'", amlp::LpcDialect::LdMud);
+        auto tokens = lexer.tokenize();
+        assert(tokens.size() == 2); // number, End
+        assert(tokens[0].type == amlp::TokenType::Number);
+        assert(tokens[0].text == "97"); // 'a' == 97
+    }
+    {
+        // Under FluffOS, "'item" is not a symbol at all -- lexChar()'s
+        // pre-existing behavior (a char literal must contain exactly one
+        // character) is completely unchanged, so this throws exactly as
+        // it always did.
+        amlp::Lexer lexer("'item", amlp::LpcDialect::FluffOS);
+        bool threw = false;
+        try {
+            lexer.tokenize();
+        } catch (const amlp::LpcRuntimeError&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    std::cout << "testSymbolLiteralLexesDistinctFromCharLiteralUnderLdmudDialectOnly OK\n";
+}
+
+// ROADMAP.md row 1.7/1.8's own bounded first sub-slice, picked via a
+// fresh corpus re-check that session (see this session's own STATUS.md
+// entry): real secure/master/hooks.c has exactly 4 real unbound_lambda()
+// call sites (lambda(), bind_lambda() alone: 0 real hits anywhere in
+// temp/'s vendored corpora), all handed straight to set_driver_hook()
+// (itself still unimplemented -- this test cannot exercise that half at
+// all, and does not try to). What this test does confirm end to end,
+// mirroring hooks.c's own H_MOVE_OBJECT0 hook body shape
+// ("unbound_lambda( ({'item, 'dest}), ({#'moveHook, 'item, 'dest }) )")
+// as closely as this driver's own eval surface allows: the closure is
+// genuinely uncallable until bound (real interpret.c's own "Uncallable
+// closure", int_call_lambda()), and once bound (via bind_lambda(), the
+// same real LDMud efun -- real driver-hook dispatch itself auto-binds
+// internally at call time instead, see VM.cpp's own callClosure()
+// comment) it runs the real quoted-code call tree correctly, positional
+// symbol substitution and all.
+static void testUnboundLambdaIsUncallableUntilBoundThenRunsHooksCsOwnQuotedCodeShape() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unbound_move.c",
+        "mixed lastItem; mixed lastDest;\n"
+        "mixed moveHook(mixed item, mixed dest) {\n"
+        "    lastItem = item; lastDest = dest;\n"
+        "    return item + dest;\n"
+        "}\n"
+        "mixed makeHook() {\n"
+        "    return unbound_lambda( ({'item, 'dest}),\n"
+        "        ({#'moveHook, 'item, 'dest }) );\n"
+        "}\n"
+        "mixed callDirect(mixed c) { return funcall(c, 3, 4); }\n"
+        "mixed bindIt(mixed c) { return bind_lambda(c); }\n"
+        "mixed getLastItem() { return lastItem; }\n"
+        "mixed getLastDest() { return lastDest; }\n");
+    auto ob = harness.objects.cloneObject("/unbound_move");
+    assert(ob != nullptr);
+
+    amlp::Value hookVal = harness.vm.callFunction(ob, "makeHook", {});
+    auto hookClosure = std::get<std::shared_ptr<amlp::Closure>>(hookVal.data);
+    assert(hookClosure != nullptr);
+    assert(hookClosure->unboundUntilBound);
+
+    // Real "Uncallable closure" -- calling it before bind_lambda() must
+    // fail exactly the way real int_call_lambda() does with no bind_ob.
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "callDirect", {hookVal});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        // run()'s own object/function-name error-context prefix (same
+        // convention every other in-VM LpcRuntimeError already gets),
+        // hence find() rather than an exact match -- the real message
+        // text itself is still the exact real "Uncallable closure".
+        assert(std::string(e.what()).find("Uncallable closure") != std::string::npos);
+    }
+    assert(threw);
+
+    amlp::Value boundVal = harness.vm.callFunction(ob, "bindIt", {hookVal});
+    auto boundClosure = std::get<std::shared_ptr<amlp::Closure>>(boundVal.data);
+    assert(boundClosure != nullptr);
+    assert(!boundClosure->unboundUntilBound);
+
+    amlp::Value result = harness.vm.callFunction(ob, "callDirect", {boundVal});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 7); // moveHook(3, 4) -> 3 + 4
+
+    amlp::Value item = harness.vm.callFunction(ob, "getLastItem", {});
+    amlp::Value dest = harness.vm.callFunction(ob, "getLastDest", {});
+    assert(std::get<int64_t>(item.data) == 3);
+    assert(std::get<int64_t>(dest.data) == 4);
+
+    std::cout << "testUnboundLambdaIsUncallableUntilBoundThenRunsHooksCsOwnQuotedCodeShape OK\n";
+}
+
+// The H_LOAD_UIDS hook body shape (real hooks.c: "unbound_lambda(
+// ({'object_name}), ({ #'loadUIDs, 'object_name, ({#'previous_object})
+// }) )") is a *nested* quoted call -- one call tree inside another, the
+// inner one taking no lambda-parameter arguments at all, only a plain
+// already-implemented efun closure. Confirms VM::evalQuotedLambdaNode()'s
+// own recursion handles that correctly, not just the single flat call
+// H_MOVE_OBJECT0's own shape already covers above.
+static void testUnboundLambdaNestedQuotedCallMatchesHooksCsLoadUidsShape() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unbound_nested.c",
+        "mixed loadUIDs(mixed objectName, mixed prev) { return ({ objectName, prev }); }\n"
+        "mixed makeHook() {\n"
+        "    return unbound_lambda( ({'object_name}), ({\n"
+        "        #'loadUIDs, 'object_name, ({#'previous_object}) }) );\n"
+        "}\n"
+        "mixed run(mixed c) { return funcall(bind_lambda(c), \"/std/thing\"); }\n");
+    auto ob = harness.objects.cloneObject("/unbound_nested");
+    assert(ob != nullptr);
+
+    amlp::Value hookVal = harness.vm.callFunction(ob, "makeHook", {});
+    amlp::Value result = harness.vm.callFunction(ob, "run", {hookVal});
+    auto arr = std::get<std::shared_ptr<amlp::Array>>(result.data);
+    assert(arr->items.size() == 2);
+    assert(std::get<std::string>(arr->items[0].data) == "/std/thing");
+    // previous_object() with no call_other() in progress: this driver's
+    // own existing previous_object() returns void here (not new to this
+    // slice, see its own EfunTable.cpp registration) -- the point of
+    // this assertion is confirming the *nested* quoted call ran at all
+    // (arr has both elements, not that it threw partway through), not
+    // previous_object()'s own already-tested return-value convention.
+    assert(arr->items[1].isVoid());
+
+    std::cout << "testUnboundLambdaNestedQuotedCallMatchesHooksCsLoadUidsShape OK\n";
+}
+
+// A symbol inside the quoted body that is not one of the lambda's own
+// declared parameters honestly errors (real LDMud also lets a symbol
+// reference the bound object's own global variables, a distinct real
+// form this driver does not implement -- see VM::evalQuotedLambdaNode()'s
+// own comment) rather than silently returning void/0 for a name the
+// caller very likely meant to bind correctly.
+static void testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unbound_badsym.c",
+        "mixed target(mixed x) { return x; }\n"
+        "mixed run() {\n"
+        "    mixed c = unbound_lambda( ({'item}), ({#'target, 'notAParam}) );\n"
+        "    return funcall(bind_lambda(c), 5);\n"
+        "}\n");
+    auto ob = harness.objects.cloneObject("/unbound_badsym");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "run", {});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        assert(std::string(e.what()).find("notAParam") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError OK\n";
+}
+
 // ROADMAP.md row 1.9's own first real slice: real LDMud's own names for
 // keys()/values() (see EfunTable.cpp's own comment on "m_indices"/
 // "m_values" for the full real-source citation and corpus-frequency
@@ -21213,6 +21392,10 @@ int main() {
     testCompileHashQuoteClosureAcceptedOnlyUnderLdmudDialectAndEvaluatesCorrectly();
     testHashQuoteEfunPrefixParsesToClosureLiteralExprWithForceEfun();
     testHashQuoteEfunPrefixBypassesALocalFunctionOfTheSameNameUnlikeBareForm();
+    testSymbolLiteralLexesDistinctFromCharLiteralUnderLdmudDialectOnly();
+    testUnboundLambdaIsUncallableUntilBoundThenRunsHooksCsOwnQuotedCodeShape();
+    testUnboundLambdaNestedQuotedCallMatchesHooksCsLoadUidsShape();
+    testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError();
     testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
     testMValuesBareFormReturnsColumnZeroValues();
     testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();

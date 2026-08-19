@@ -5,7 +5,12 @@
 
 namespace amlp {
 
-enum class TokenType { Ident, Number, String, Symbol, Keyword, End };
+// QuotedSymbol: LDMud's own "'name" symbol literal (see Value.hpp's
+// Symbol comment, ROADMAP.md row 1.7/1.8). Kept distinct from Symbol
+// (this Lexer's existing name for punctuation/operator tokens like
+// "->"/"::") to avoid confusing the two -- Token::text is the bare
+// identifier with the leading quote already stripped.
+enum class TokenType { Ident, Number, String, Symbol, QuotedSymbol, Keyword, End };
 
 struct Token {
     TokenType type;
@@ -34,6 +39,7 @@ private:
     Token lexNumber();
     Token lexString();
     Token lexChar();
+    Token lexQuote();
     Token lexSymbol();
     Token lexHashQuote();
     Token lexHeredoc();

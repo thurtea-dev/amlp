@@ -356,6 +356,53 @@ Token Lexer::lexSymbol() {
     return Token{TokenType::Symbol, std::string(1, c), startLine};
 }
 
+// Disambiguates real LDMud's own two "'"-prefixed forms (lex.c:6186-6266,
+// "--- ': Character constant or lambda symbol ---"): an ordinary
+// character constant ('a', '\n', ..., already handled by lexChar()
+// before this method existed) and LDMud's own "'name" symbol literal
+// (see Value.hpp's Symbol comment, ROADMAP.md row 1.7/1.8's own
+// unbound_lambda() investigation -- symbols are what its quoted-code
+// bodies use to mean "substitute this lambda parameter's own value
+// here"). Real lex.c's own rule (paraphrased): read the char after the
+// quote and the char after that; if the second one is anything but a
+// closing quote, or the whole thing is a lone quote followed by another
+// quote/alnum/'(' (the "'''x" and "'({" cases), it is a symbol or
+// quoted-aggregate, not a character constant. This driver's own scope
+// is narrower, matching zero confirmed real corpus usage for either of
+// those two edge forms: a single leading quote (no "''name" multi-quote
+// symbols) followed by a bare alnum/underscore identifier of length > 1
+// (no "'({" quoted-aggregate literal, and a length-1 identifier
+// followed immediately by a closing quote stays an ordinary character
+// constant exactly as before -- real lex.c resolves that same
+// length-1-then-quote case as a char constant too, "the test rejects
+// all sequences of the form 'x'"). Only reached under LpcDialect::LdMud
+// (see tokenize()'s own dispatch below) -- FluffOS/DGD source keeps
+// lexChar()'s pre-existing behavior for every bare "'" unchanged, since
+// neither real dialect has a symbol-literal concept at all.
+Token Lexer::lexQuote() {
+    size_t p = pos_ + 1;
+    if (p < src_.size() &&
+        (std::isalpha(static_cast<unsigned char>(src_[p])) || src_[p] == '_')) {
+        size_t identStart = p;
+        while (p < src_.size() &&
+               (std::isalnum(static_cast<unsigned char>(src_[p])) || src_[p] == '_')) {
+            ++p;
+        }
+        bool singleCharThenQuote = (p - identStart == 1) && p < src_.size() && src_[p] == '\'';
+        if (!singleCharThenQuote) {
+            int startLine = line_;
+            advance(); // '
+            std::string name;
+            while (!atEnd() &&
+                   (std::isalnum(static_cast<unsigned char>(peek())) || peek() == '_')) {
+                name += advance();
+            }
+            return Token{TokenType::QuotedSymbol, name, startLine};
+        }
+    }
+    return lexChar();
+}
+
 // LDMud's own closure-literal prefix, "#'name" (ROADMAP.md row 1.2/1.3's
 // own scoping note; confirmed against temp/ldmud/src/lex.c's own
 // closure() function, "case '#': if (*yyp == '\'') return closure(yyp);"
@@ -407,7 +454,15 @@ std::vector<Token> Lexer::tokenize() {
         } else if (c == '"') {
             tokens.push_back(lexString());
         } else if (c == '\'') {
-            tokens.push_back(lexChar());
+            // Gated on dialect_ the same way "#'" is just below: neither
+            // FluffOS nor DGD has a symbol-literal concept (this is an
+            // LDMud-only closure-body feature, unbound_lambda()'s own
+            // quoted-code bodies -- see Value.hpp's Symbol comment), so a
+            // bare "'" there keeps lexChar()'s pre-existing, unconditional
+            // char-literal behavior exactly as before -- only under
+            // LpcDialect::LdMud does lexQuote()'s own disambiguation
+            // apply (see its own comment).
+            tokens.push_back(dialect_ == LpcDialect::LdMud ? lexQuote() : lexChar());
         } else if (c == '#' && dialect_ == LpcDialect::LdMud && peekNext() == '\'') {
             // Gated the same way "atomic"/"nil" are gated for DGD above:
             // reserving "#" for anything under FluffOS/DGD would risk

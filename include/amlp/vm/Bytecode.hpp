@@ -24,6 +24,14 @@ enum class OpCode : uint8_t {
     // being a stateless singleton too. Only ever emitted under
     // LpcDialect::DGD (see CodeGen::generate()'s own NilLiteral case).
     PushNil,
+    // LDMud "'name" symbol literal (ROADMAP.md row 1.7/1.8, see
+    // Value.hpp's Symbol and Ast.hpp's SymbolLiteralExpr). operand
+    // indexes into CompiledProgram::stringPool for the bare name, the
+    // same pool PushConst/PushClosure already use -- a symbol's name is
+    // always available at compile time (it is written literally in the
+    // source), so there is nothing to compute at run time the way
+    // PushNil's stateless singleton has nothing to index at all.
+    PushSymbol,
     PushLocal,
     StoreLocal,
     PushObjectVar,

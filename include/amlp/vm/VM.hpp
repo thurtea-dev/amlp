@@ -345,6 +345,15 @@ private:
     Value run(const CompiledProgram& program, const FunctionEntry& fn,
               std::vector<Value> args, const std::shared_ptr<LpcObject>& obj);
 
+    // LDMud unbound_lambda() (ROADMAP.md row 1.7/1.8). callClosure()'s own
+    // "this closure carries a quoted-code body" branch -- see Value.hpp's
+    // Closure::lambdaBody comment and these two methods' own .cpp comments
+    // for the real-source citations and exactly what quoted-code shape is
+    // (and is not) supported.
+    Value callUnboundLambdaBody(const Closure& closure, std::vector<Value> argValues);
+    Value evalQuotedLambdaNode(const Value& node, const std::vector<std::string>& params,
+                                const std::vector<Value>& argValues);
+
     ObjectManager& objects_;
     Config& config_;
     Scheduler* scheduler_ = nullptr;

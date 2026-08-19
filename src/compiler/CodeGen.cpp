@@ -312,6 +312,13 @@ void CodeGen::emitExpr(const AstNode& expr) {
         out_->code.push_back(Instruction{OpCode::PushNil, 0, 0});
         return;
     }
+    if (auto* sym = dynamic_cast<const SymbolLiteralExpr*>(&expr)) {
+        // LDMud "'name" symbol literal (ROADMAP.md row 1.7/1.8) -- see
+        // Bytecode.hpp's own PushSymbol comment.
+        int idx = internString(sym->name);
+        out_->code.push_back(Instruction{OpCode::PushSymbol, idx, 0});
+        return;
+    }
     if (auto* ref = dynamic_cast<const VarRefExpr*>(&expr)) {
         ResolvedVar var = resolveVariable(ref->name);
         OpCode op = (var.kind == VarKind::Local) ? OpCode::PushLocal : OpCode::PushObjectVar;
