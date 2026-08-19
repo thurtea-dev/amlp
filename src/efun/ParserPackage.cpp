@@ -496,6 +496,460 @@ void ParserPackage::onObjectDestroyed(const std::shared_ptr<LpcObject>& destruct
 const std::vector<std::string>& ParserPackage::currentLiterals() { return cachedLiterals(); }
 
 // ============================================================================
+// Noun-phrase-to-object resolution engine, pieces 1-4 (ROADMAP.md row
+// 0.13a item 8): the real per-object noun/adjective/plural cache
+// (interrogate_object()), the rest of interrogate_master() (the USERS/
+// SPECIALS halves), environment-based object collection
+// (rec_add_object()/find_uninited_objects()/add_objects_from_array()/
+// get_objects_from_array()), and the word -> object-index hash table
+// (add_hash_entry()/add_to_hash_table()) -- together, real load_objects()
+// in full. Not yet called by parseSentence() itself: item 8 piece 5
+// (parse_obj(), the real word-matching logic that would actually consume
+// LoadedObjectSet) is the next slice. See LoadedObjectSet's own header
+// comment for why this is a real, complete, independently testable
+// pipeline on its own rather than a partial stand-in.
+// ============================================================================
+
+namespace {
+
+constexpr size_t kMaxNumObjects = 1024; // real MAX_NUM_OBJECTS (packages/parser.h)
+constexpr int kRaoInReach = 1;          // real RAO_INREACH
+constexpr int kRaoMy = 2;               // real RAO_MY
+
+// real parse_copy_array(): copies only the T_STRING elements of `v` (if
+// it is even an array at all), silently skipping and compacting past
+// any non-string element -- not every noun()/plural()/adjective() lfun
+// in a real mudlib is guaranteed well-behaved.
+std::vector<std::string> arrayOfStringsFrom(const Value& v) {
+    std::vector<std::string> out;
+    auto* arrPtr = std::get_if<std::shared_ptr<Array>>(&v.data);
+    if (!arrPtr || !*arrPtr) return out;
+    for (const Value& item : (*arrPtr)->items) {
+        if (auto* s = std::get_if<std::string>(&item.data)) out.push_back(*s);
+    }
+    return out;
+}
+
+// real NEED_REFRESH(ob): "(ob->pinfo && ((ob->pinfo->flags &
+// (PI_SETUP|PI_REFRESH)) != PI_SETUP))" -- note the real short-circuit:
+// an object that never called parse_init() at all (no pinfo) is never
+// "in need of refresh" by this macro's own definition, which is exactly
+// why real rec_add_object()/add_objects_from_array() also gate on
+// ob->pinfo separately before ever adding an object to the numbered
+// universe at all -- an object invisible to the parser stays invisible
+// to it, it is never silently auto-registered.
+bool needRefresh(const std::shared_ptr<LpcObject>& ob) {
+    if (!ob->hasParseInfo()) return false;
+    int flags = ob->parseInfoFlags();
+    return (flags & (ParserInfoFlag::Setup | ParserInfoFlag::Refresh)) != ParserInfoFlag::Setup;
+}
+
+// real find_uninited_objects() (packages/parser.c): the default (no
+// explicit parse_env) discovery-pass environment walk, item 8 piece 3.
+void findUninitedObjects(std::vector<std::shared_ptr<LpcObject>>& discovered, const std::shared_ptr<LpcObject>& ob) {
+    if (!ob || ob->isDestructed()) return;
+    if (needRefresh(ob)) {
+        if (discovered.size() >= kMaxNumObjects) return;
+        discovered.push_back(ob);
+    }
+    for (auto& child : ob->inventory()) findUninitedObjects(discovered, child);
+}
+
+// real get_objects_from_array() (packages/parser.c): the explicit-
+// parse_env discovery-pass equivalent of findUninitedObjects() above,
+// item 8 piece 3.
+void getObjectsFromArray(std::vector<std::shared_ptr<LpcObject>>& discovered, const std::vector<Value>& arr) {
+    for (const Value& item : arr) {
+        if (auto* nestedPtr = std::get_if<std::shared_ptr<Array>>(&item.data); nestedPtr && *nestedPtr) {
+            getObjectsFromArray(discovered, (*nestedPtr)->items);
+        }
+        auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&item.data);
+        if (!obPtr || !*obPtr || (*obPtr)->isDestructed()) continue;
+        if (needRefresh(*obPtr)) {
+            if (discovered.size() >= kMaxNumObjects) return;
+            discovered.push_back(*obPtr);
+        }
+    }
+}
+
+// real init_users() (packages/parser.c): the discovery-pass half of
+// interrogate_master()'s own USERS handling, item 8 piece 2 -- any
+// master-user-list object that already has pinfo and needs refreshing.
+void initUsersDiscovery(std::vector<std::shared_ptr<LpcObject>>& discovered, const std::vector<Value>& users) {
+    for (const Value& item : users) {
+        auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&item.data);
+        if (!obPtr || !*obPtr || !(*obPtr)->hasParseInfo()) continue;
+        if (needRefresh(*obPtr)) {
+            if (discovered.size() >= kMaxNumObjects) return;
+            discovered.push_back(*obPtr);
+        }
+    }
+}
+
+// real rec_add_object() (packages/parser.c): the default (no explicit
+// parse_env) object-index-assignment pass, item 8 piece 3. Walks
+// `ob->inventory()` directly rather than reimplementing real code's own
+// first_inv()/next_inv() pointer-chase -- this driver's own inventory_
+// vector already preserves the same real traversal order, the same
+// intrusive-list-to-container simplification already used elsewhere in
+// this class (e.g. the verb registry's own hash-bucket-to-map collapse).
+void recAddObject(LoadedObjectSet& result, std::vector<bool>& myObjects, const std::shared_ptr<LpcObject>& parseUser,
+                   const std::shared_ptr<LpcObject>& ob, int flags) {
+    if (!ob || ob->isDestructed()) return;
+    if (ob->hasParseInfo()) {
+        if (result.objects.size() >= kMaxNumObjects) return;
+        size_t index = result.objects.size();
+        if (flags & kRaoMy) {
+            if (myObjects.size() <= index) myObjects.resize(index + 1);
+            myObjects[index] = true;
+        }
+        if (ob == parseUser) {
+            result.meObject = static_cast<int>(index);
+            flags |= kRaoMy;
+        }
+        result.inReach.push_back((flags & kRaoInReach) != 0);
+        result.objects.push_back(ob);
+        int obFlags = ob->parseInfoFlags();
+        if (!(obFlags & ParserInfoFlag::InvVisible)) return;
+        if (!(obFlags & ParserInfoFlag::InvAccessible)) flags &= ~kRaoInReach;
+    }
+    for (auto& child : ob->inventory()) recAddObject(result, myObjects, parseUser, child, flags);
+}
+
+// real add_objects_from_array() (packages/parser.c): the explicit-
+// parse_env object-index-assignment pass, item 8 piece 3. Unlike
+// recAddObject() above, a nested array is only descended into when the
+// immediately preceding (non-array) element's own PI_INV_VISIBLE flag
+// was set -- real code's own caller-supplied "object, then its own
+// contents as a nested array" convention -- and reaching parseUser here
+// does not propagate RAO_MY onto that same element's own recorded
+// flags, only onto a nested array immediately following it (real
+// last_was_me, confirmed a genuine, deliberate asymmetry with
+// rec_add_object() above, not a porting slip).
+void addObjectsFromArray(LoadedObjectSet& result, std::vector<bool>& myObjects,
+                          const std::shared_ptr<LpcObject>& parseUser, const std::vector<Value>& arr, int flags) {
+    int lastFlags = 0;
+    bool lastWasMe = false;
+    for (const Value& item : arr) {
+        if (auto* nestedPtr = std::get_if<std::shared_ptr<Array>>(&item.data); nestedPtr && *nestedPtr) {
+            if (lastFlags & ParserInfoFlag::InvVisible) {
+                int f = flags;
+                if (!(lastFlags & ParserInfoFlag::InvAccessible)) f &= ~kRaoInReach;
+                if (lastWasMe) f |= kRaoMy;
+                addObjectsFromArray(result, myObjects, parseUser, (*nestedPtr)->items, f);
+            }
+        }
+        lastFlags = 0;
+        lastWasMe = false;
+        auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&item.data);
+        if (!obPtr || !*obPtr || (*obPtr)->isDestructed()) continue;
+        const auto& ob = *obPtr;
+        if (!ob->hasParseInfo()) continue;
+        if (result.objects.size() >= kMaxNumObjects) return;
+        size_t index = result.objects.size();
+        if (flags & kRaoMy) {
+            if (myObjects.size() <= index) myObjects.resize(index + 1);
+            myObjects[index] = true;
+        }
+        if (ob == parseUser) {
+            result.meObject = static_cast<int>(index);
+            lastWasMe = true;
+        }
+        result.inReach.push_back((flags & kRaoInReach) != 0);
+        result.objects.push_back(ob);
+        lastFlags = ob->parseInfoFlags();
+    }
+}
+
+// real add_hash_entry() (packages/parser.c), item 8 piece 4: find or
+// create `word`'s own HashEntry, its three bool vectors pre-sized to
+// `objectCount` -- safe because, exactly like real code's own
+// add_to_hash_table() (the only real caller of add_hash_entry() outside
+// mark_hash_entry(), which this driver does not port -- see
+// LoadedObjectSet::hashTable's own header comment on real add_nicknames()
+// not being ported either), this only ever runs once the numbered
+// object universe has already stopped growing.
+HashEntry& addHashEntry(LoadedObjectSet& result, const std::string& word, size_t objectCount) {
+    auto [it, inserted] = result.hashTable.try_emplace(word);
+    if (inserted) {
+        it->second.nounObjs.assign(objectCount, false);
+        it->second.pluralObjs.assign(objectCount, false);
+        it->second.adjObjs.assign(objectCount, false);
+    }
+    return it->second;
+}
+
+// real add_to_hash_table() (packages/parser.c), item 8 piece 4: folds
+// object index `index`'s own cached noun/plural/adjective ids (piece 1)
+// into the shared word hash table.
+void addToHashTable(LoadedObjectSet& result, const std::shared_ptr<LpcObject>& ob, size_t index) {
+    if (!ob->hasParseInfo()) return; // real "if (!pi) return;"
+    for (const auto& id : ob->parseNounIds()) {
+        HashEntry& he = addHashEntry(result, id, result.objects.size());
+        he.isNoun = true;
+        he.nounObjs[index] = true;
+    }
+    for (const auto& pl : ob->parsePluralIds()) {
+        HashEntry& he = addHashEntry(result, pl, result.objects.size());
+        he.isPlural = true;
+        he.pluralObjs[index] = true;
+    }
+    for (const auto& adj : ob->parseAdjIds()) {
+        HashEntry& he = addHashEntry(result, adj, result.objects.size());
+        he.isAdj = true;
+        he.adjObjs[index] = true;
+    }
+}
+
+// real master_user_list (packages/parser.c) -- cached the same real way
+// literals[] already is (cachedLiterals(), above). See
+// ParserPackage::invalidateMasterUsersCache()'s own header comment
+// (ParserPackage.hpp) for why this stays real process-wide state,
+// invalidated only by an explicit parse_refresh() on master, rather than
+// folding into LoadedObjectSet the way SentenceSession folded
+// parse_sentence()'s own globals.
+struct MasterUsersCache {
+    bool valid = false;
+    std::vector<Value> users; // real master_user_list's own item array, unfiltered
+};
+MasterUsersCache& masterUsersCache() {
+    static MasterUsersCache cache;
+    return cache;
+}
+
+// real interrogate_master()'s MS_HAS_USERS branch (packages/parser.c),
+// item 8 piece 2.
+const std::vector<Value>& fetchMasterUsers(VM& vm) {
+    auto& cache = masterUsersCache();
+    if (!cache.valid) {
+        cache.users.clear();
+        if (auto master = vm.masterObject()) {
+            Value ret = vm.callFunction(master, "parse_command_users", {});
+            if (auto* arrPtr = std::get_if<std::shared_ptr<Array>>(&ret.data); arrPtr && *arrPtr) {
+                cache.users = (*arrPtr)->items;
+            }
+        }
+        cache.valid = true;
+    }
+    return cache.users;
+}
+
+} // namespace
+
+SpecialWordResult ParserPackage::checkSpecialWord(const std::string& word) {
+    // real special_table[] (packages/parser.c's MS_HAS_SPECIALS branch)
+    // -- see this method's own header comment (ParserPackage.hpp) for
+    // why this is a plain static table rather than a cached/invalidated
+    // one the way literals[]/master_user_list are.
+    static const std::unordered_map<std::string, SpecialWordResult> kTable = {
+        {"the", {SpecialWordKind::Article, 0}},
+        {"me", {SpecialWordKind::Self, 0}},
+        {"myself", {SpecialWordKind::Self, 0}},
+        {"all", {SpecialWordKind::All, 0}},
+        {"of", {SpecialWordKind::Of, 0}},
+        {"and", {SpecialWordKind::And, 0}},
+        {"a", {SpecialWordKind::Ordinal, 1}},
+        {"an", {SpecialWordKind::Ordinal, 1}},
+        {"any", {SpecialWordKind::Ordinal, 1}},
+        {"first", {SpecialWordKind::Ordinal, 1}},
+        {"second", {SpecialWordKind::Ordinal, 2}},
+        {"other", {SpecialWordKind::Ordinal, 2}},
+        {"third", {SpecialWordKind::Ordinal, 3}},
+        {"fourth", {SpecialWordKind::Ordinal, 4}},
+        {"fifth", {SpecialWordKind::Ordinal, 5}},
+        {"sixth", {SpecialWordKind::Ordinal, 6}},
+        {"seventh", {SpecialWordKind::Ordinal, 7}},
+        {"eighth", {SpecialWordKind::Ordinal, 8}},
+        {"ninth", {SpecialWordKind::Ordinal, 9}},
+    };
+    if (auto it = kTable.find(word); it != kTable.end()) return it->second;
+
+    // real check_special_word()'s own numeric-ordinal fallback ("3rd",
+    // "21st", ...): digits followed by exactly the right suffix for
+    // that number, with real code's own "a teen is always 'th'" rule --
+    // if the digit two before the end is '1', the suffix is always
+    // "th" regardless of the last digit.
+    if (!word.empty() && std::isdigit(static_cast<unsigned char>(word[0]))) {
+        size_t digits = 0;
+        while (digits < word.size() && std::isdigit(static_cast<unsigned char>(word[digits]))) digits++;
+        if (digits > 0 && digits < word.size()) {
+            long n = std::stol(word.substr(0, digits));
+            std::string suffix = word.substr(digits);
+            std::string ending = "th";
+            if (!(digits >= 2 && word[digits - 2] == '1')) {
+                switch (word[digits - 1]) {
+                    case '1':
+                        ending = "st";
+                        break;
+                    case '2':
+                        ending = "nd";
+                        break;
+                    case '3':
+                        ending = "rd";
+                        break;
+                }
+            }
+            if (suffix == ending) return SpecialWordResult{SpecialWordKind::Ordinal, n};
+        }
+    }
+    return SpecialWordResult{};
+}
+
+void ParserPackage::interrogateObject(VM& vm, const std::shared_ptr<LpcObject>& ob) {
+    // real "if (ob->pinfo->flags & PI_REFRESH) remove_ids(ob->pinfo);" --
+    // a deliberate no-op here: C++ vectors self-manage the memory real
+    // remove_ids() exists to free, and real remove_ids()'s own guard
+    // ("if (pinfo->flags & PI_SETUP)") is provably always false at this
+    // exact point in real code anyway -- real f_parse_refresh() clears
+    // PI_SETUP in the same bitwise AND that sets PI_REFRESH ("pi->flags
+    // &= PI_VERB_HANDLER; pi->flags |= PI_REFRESH;"), so by the time
+    // interrogate_object() ever observes PI_REFRESH set, PI_SETUP is
+    // already unset -- meaning real remove_ids() never actually frees
+    // anything here either, confirmed directly from source, not assumed.
+    int flags = ob->parseInfoFlags();
+    if ((flags & ParserInfoFlag::Setup) && !(flags & ParserInfoFlag::Refresh)) {
+        return; // real cache hit: "if (pinfo->flags & PI_SETUP && !(pinfo->flags & PI_REFRESH)) return;"
+    }
+
+    ob->setParseNounIds(arrayOfStringsFrom(vm.callFunction(ob, "parse_command_id_list", {})));
+    if (ob->isDestructed()) return;
+
+    // real "/* in case of an error */ ob->pinfo->flags |= PI_SETUP;
+    // ob->pinfo->flags &= ~(PI_LIVING|PI_INV_ACCESSIBLE|PI_INV_VISIBLE);"
+    // -- set right after the first apply succeeds, not at the end of
+    // this function, so an object destructed by a later apply below
+    // still ends up marked SETUP (avoiding it looking permanently
+    // "not yet interrogated" to NEED_REFRESH() from here on).
+    flags = ob->parseInfoFlags() | ParserInfoFlag::Setup;
+    flags &= ~(ParserInfoFlag::Living | ParserInfoFlag::InvAccessible | ParserInfoFlag::InvVisible);
+    ob->setParseInfoFlags(flags);
+
+    ob->setParsePluralIds(arrayOfStringsFrom(vm.callFunction(ob, "parse_command_plural_id_list", {})));
+    if (ob->isDestructed()) return;
+
+    ob->setParseAdjIds(arrayOfStringsFrom(vm.callFunction(ob, "parse_command_adjectiv_id_list", {})));
+    if (ob->isDestructed()) return;
+
+    if (isTruthy(vm.callFunction(ob, "is_living", {}))) {
+        ob->setParseInfoFlags(ob->parseInfoFlags() | ParserInfoFlag::Living);
+    }
+    if (ob->isDestructed()) return;
+
+    if (isTruthy(vm.callFunction(ob, "inventory_accessible", {}))) {
+        ob->setParseInfoFlags(ob->parseInfoFlags() | ParserInfoFlag::InvAccessible);
+    }
+    if (ob->isDestructed()) return;
+
+    if (isTruthy(vm.callFunction(ob, "inventory_visible", {}))) {
+        ob->setParseInfoFlags(ob->parseInfoFlags() | ParserInfoFlag::InvVisible);
+    }
+}
+
+void ParserPackage::invalidateMasterUsersCache() { masterUsersCache().valid = false; }
+
+LoadedObjectSet ParserPackage::loadObjects(VM& vm, const std::shared_ptr<LpcObject>& parseUser,
+                                            const Value* envArray) {
+    LoadedObjectSet result;
+
+    // Step 1 (real load_objects()'s own comment: LPC code run during
+    // interrogation can move objects, so the environment must not be
+    // walked live while walking it for object-index-assignment
+    // purposes -- discover first, interrogate, only then assign
+    // indices in a second, separate pass below).
+    std::vector<std::shared_ptr<LpcObject>> discovered;
+    const std::vector<Value>* envItems = nullptr;
+    if (envArray) {
+        if (auto* arrPtr = std::get_if<std::shared_ptr<Array>>(&envArray->data); arrPtr && *arrPtr) {
+            envItems = &(*arrPtr)->items;
+        }
+        if (envItems) getObjectsFromArray(discovered, *envItems);
+    } else {
+        if (!parseUser || parseUser->isDestructed()) {
+            throw LpcRuntimeError("parse_sentence: no this_player() to parse from");
+        }
+        findUninitedObjects(discovered, parseUser->environment().lock());
+    }
+
+    const std::vector<Value>& masterUsers = fetchMasterUsers(vm);
+    initUsersDiscovery(discovered, masterUsers);
+
+    // Step 2: interrogate every discovered object (piece 1).
+    for (auto& ob : discovered) interrogateObject(vm, ob);
+
+    // Step 3: the real object-index-assignment pass.
+    std::vector<bool> myObjects;
+    if (envItems) {
+        addObjectsFromArray(result, myObjects, parseUser, *envItems, kRaoInReach);
+    } else {
+        recAddObject(result, myObjects, parseUser, parseUser->environment().lock(), kRaoInReach);
+    }
+
+    // real "he = add_hash_entry(my_string); he->flags |= HV_ADJ;
+    // bitvec_copy(&he->pv.adj, &my_objects);" -- the fixed "my"
+    // adjective, covering exactly the objects the RAO_MY walk above
+    // marked. Real add_nicknames(parse_nicks) is not ported here --
+    // nothing in this driver's own parseSentence() signature consumes a
+    // `nicks` argument yet either (see that method's own comment), so
+    // there is nothing real for it to be exercised with.
+    {
+        HashEntry& myEntry = addHashEntry(result, "my", result.objects.size());
+        myEntry.isAdj = true;
+        for (size_t i = 0; i < myObjects.size() && i < result.objects.size(); i++) {
+            if (myObjects[i]) myEntry.adjObjs[i] = true;
+        }
+    }
+
+    // real load_objects()'s own final "num_people" loop, unconditional
+    // regardless of whether an explicit parse_env was given (confirmed
+    // directly -- real code has no "if (!parse_env)" guard around it,
+    // and parse_user is always current_object for parse_sentence(),
+    // never influenced by parse_env either -- see f_parse_sentence(),
+    // packages/parser.c:3070, "parse_user = current_object;"
+    // unconditionally): any master-user-list object not already
+    // reachable within parseUser's own environment tree, provided their
+    // own environment chain never crosses an inventory_visible()==false
+    // link before (if ever) reaching parseUser's own environment.
+    if (parseUser && !parseUser->isDestructed()) {
+        auto parseUserEnv = parseUser->environment().lock();
+        for (const Value& item : masterUsers) {
+            auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&item.data);
+            if (!obPtr || !*obPtr || !(*obPtr)->hasParseInfo()) continue;
+            const auto& ob = *obPtr;
+
+            std::shared_ptr<LpcObject> env = ob;
+            bool reachedParseUserEnv = false;
+            while (env) {
+                if (env == parseUserEnv) {
+                    reachedParseUserEnv = true;
+                    break;
+                }
+                env = env->environment().lock();
+                if (env && env->hasParseInfo() && !(env->parseInfoFlags() & ParserInfoFlag::InvVisible)) {
+                    env = nullptr;
+                }
+            }
+            if (reachedParseUserEnv) continue;
+            if (result.objects.size() >= kMaxNumObjects) break;
+            result.inReach.push_back(true); // real "object_flags[num_objects + num_people] = 1;"
+            result.objects.push_back(ob);
+        }
+    }
+
+    // Step 4 (piece 4): cur_livings/cur_accessible plus the word hash
+    // table, all built in the same final index-ordered pass real
+    // load_objects()'s own "for (i...) add_to_hash_table(...)" loop is.
+    result.isLiving.assign(result.objects.size(), false);
+    result.isAccessible.assign(result.objects.size(), false);
+    for (size_t i = 0; i < result.objects.size(); i++) {
+        addToHashTable(result, result.objects[i], i);
+        if (result.objects[i]->parseInfoFlags() & ParserInfoFlag::Living) result.isLiving[i] = true;
+        if (result.inReach[i]) result.isAccessible[i] = true;
+    }
+
+    return result;
+}
+
+// ============================================================================
 // Sentence matching (real f_parse_sentence() and everything it calls:
 // parse_sentence()/parse_recurse() (the sentence tokenizer, ROADMAP.md
 // row 0.13a item 6), parse_rules()/parse_rule()/we_are_finished() (the

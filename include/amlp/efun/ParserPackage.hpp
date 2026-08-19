@@ -144,6 +144,57 @@ constexpr int ManyPaths = 9;    // ERR_MANY_PATHS (not yet reachable)
 // parseSentence() call ever needs to see them, so there is no reason
 // for them to be part of this class's own public shape.
 
+// real special_word_t's own SW_* kinds (packages/parser.h) -- the fixed
+// article/self/all/of/and/ordinal word table real interrogate_master()'s
+// MS_HAS_SPECIALS branch populates once and check_special_word() reads
+// (ROADMAP.md row 0.13a item 8, piece 2). Real code guards this behind a
+// master_state cache-once bit even though the table is hardcoded and
+// never invalidated by anything (not even parse_refresh()) -- this port
+// skips modeling that flag entirely (ParserPackage::checkSpecialWord()
+// is a pure function over a static local table), a legitimate
+// simplification with no observable difference, the same category as
+// the verb registry's own hash-bucket-to-map collapse.
+enum class SpecialWordKind { None, Article, Self, All, Of, And, Ordinal };
+struct SpecialWordResult {
+    SpecialWordKind kind = SpecialWordKind::None;
+    long arg = 0; // real *arg: the ordinal number for SW_ORDINAL, unused otherwise
+};
+
+// real hash_entry_t (packages/parser.h): one word's own noun/plural/
+// adjective membership across the current parse's numbered object
+// universe. Real code's own fixed-size bitvec_t (a MAX_NUM_OBJECTS==1024
+// -bit C array) is a pure sizing/perf detail with no LPC-visible
+// contract -- represented here as a plain std::vector<bool> per real
+// bitvec_t field, sized to LoadedObjectSet::objects, the same
+// hash-bucket-chaining-to-map simplification already used for the verb
+// registry (ParserPackage's own class comment).
+struct HashEntry {
+    bool isNoun = false;     // real HV_NOUN
+    bool isPlural = false;   // real HV_PLURAL
+    bool isAdj = false;      // real HV_ADJ
+    bool isNickname = false; // real HV_NICKNAME (not yet set by anything -- see loadObjects()'s own comment)
+    std::vector<bool> nounObjs;   // real pv.noun
+    std::vector<bool> pluralObjs; // real pv.plural
+    std::vector<bool> adjObjs;    // real pv.adj
+};
+
+// real loaded_objects[]/object_flags[]/cur_livings/cur_accessible/
+// me_object/hash_table[] (packages/parser.c) -- the whole numbered
+// object universe one load_objects() call builds, collected into one
+// object constructed fresh per call and returned by value instead of
+// real code's own process-wide statics. The same deliberate
+// architecture improvement already made for parse_sentence()'s own
+// SentenceSession (see that struct's own comment for why this is not a
+// fidelity loss -- nothing here is reentrant-sensitive either).
+struct LoadedObjectSet {
+    std::vector<std::shared_ptr<LpcObject>> objects; // real loaded_objects[]
+    std::vector<bool> inReach;      // real object_flags[i] & RAO_INREACH
+    std::vector<bool> isLiving;     // real cur_livings (from each object's own PI_LIVING)
+    std::vector<bool> isAccessible; // real cur_accessible (copied from inReach at add_to_hash_table() time -- see .cpp)
+    int meObject = -1;              // real me_object: index of parseUser itself, or -1
+    std::unordered_map<std::string, HashEntry> hashTable; // real hash_table[HASH_SIZE], keyed by word text
+};
+
 // The real parser package's rule-string tokenizer plus its verb/rule
 // registry (packages/parser.c's static verbs[VERB_HASH_SIZE] hash
 // table). Real code's own hash-bucket chaining is an implementation
@@ -272,6 +323,77 @@ public:
     // for literal-token matching that rule registration already
     // maintains, matching real code's own single shared array.
     static const std::vector<std::string>& currentLiterals();
+
+    // real check_special_word() (packages/parser.c): looks `word` up in
+    // the fixed article/self/all/of/and/ordinal table, falling back to
+    // real code's own numeric-ordinal parsing ("3rd", "21st", ... --
+    // including its own "a teen is always 'th'" rule: a two-or-more
+    // digit number whose second-to-last digit is '1' always takes "th",
+    // regardless of its last digit) before returning SpecialWordKind::
+    // None. Not yet called by anything in this driver (only the
+    // noun-phrase matcher itself, item 8 piece 5, reads this) -- real
+    // and independently testable now, same reasoning as tokenizeRule()'s
+    // own standalone testability before parse_add_rule() existed to
+    // call it.
+    static SpecialWordResult checkSpecialWord(const std::string& word);
+
+    // real interrogate_object() (packages/parser.c), ROADMAP.md row
+    // 0.13a item 8 piece 1: populates `ob`'s own real
+    // LpcObject::parseNounIds()/parsePluralIds()/parseAdjIds() (the
+    // parse_command_id_list()/parse_command_plural_id_list()/
+    // parse_command_adjectiv_id_list() applies) and the real PI_LIVING/
+    // PI_INV_ACCESSIBLE/PI_INV_VISIBLE flags (is_living()/
+    // inventory_accessible()/inventory_visible()), in the exact real
+    // order and with the exact real early-return-on-destruct checkpoint
+    // after each apply. A no-op cache hit if `ob` already has
+    // ParserInfoFlag::Setup and not ParserInfoFlag::Refresh (real
+    // "if (pinfo->flags & PI_SETUP && !(pinfo->flags & PI_REFRESH))
+    // return;"). Throws nothing -- `ob` must already have
+    // hasParseInfo() true (real code dereferences ob->pinfo
+    // unconditionally; this is the caller's responsibility, matching
+    // every other pinfo-gated real function in this class).
+    static void interrogateObject(VM& vm, const std::shared_ptr<LpcObject>& ob);
+
+    // real "master_state &= ~MS_HAS_USERS" (f_parse_refresh()'s own
+    // master_ob special case, packages/parser.c) -- invalidates the
+    // cached master()->users() result loadObjects() below otherwise
+    // reuses across separate calls (real interrogate_master()'s own
+    // MS_HAS_USERS caching, ROADMAP.md row 0.13a item 8 piece 2, kept
+    // as real process-wide state rather than folded into the fresh-
+    // per-call LoadedObjectSet: unlike SentenceSession's own state,
+    // this cache's real lifetime genuinely spans multiple separate
+    // parse_sentence() calls until something explicitly invalidates it,
+    // a real observable contract mudlib code can depend on, not an
+    // internal-only implementation detail safe to simplify away). Wired
+    // into the parse_refresh efun's own master-object branch,
+    // EfunTable.cpp.
+    static void invalidateMasterUsersCache();
+
+    // real load_objects() (packages/parser.c), ROADMAP.md row 0.13a
+    // item 8 pieces 2 (the USERS half)+3+4: builds the full numbered
+    // object universe for one parse, either from `envArray` (real
+    // `parse_env`, when non-null -- add_objects_from_array()/
+    // get_objects_from_array()) or from `parseUser`'s own environment
+    // (the default path -- rec_add_object()/find_uninited_objects()),
+    // interrogates every newly-discovered object (piece 1, above) plus
+    // every stale-cached master()->users() entry (init_users()), then
+    // walks the whole master user list once more to add any visible-
+    // but-not-already-reachable user (real load_objects()'s own final
+    // "num_people" loop), and finally builds the word -> object-index
+    // hash table (piece 4, add_to_hash_table()). Real add_nicknames()
+    // (a caller-supplied object -> nickname mapping) is not ported here
+    // -- nothing in this driver's own parseSentence() signature
+    // consumes a `nicks` argument yet either (see that method's own
+    // comment), so there is nothing real for it to be exercised with;
+    // HashEntry::isNickname stays false for every entry this method
+    // produces. Not yet called by parseSentence() itself -- the
+    // noun-phrase matcher that would actually consume this (item 8
+    // piece 5, parse_obj()) is the next slice; this is a real, complete,
+    // independently testable pipeline on its own, the same "half the
+    // group, cleanly bounded" shape already used for item 7's own
+    // parse_free()/parse_refresh() slice.
+    static LoadedObjectSet loadObjects(VM& vm, const std::shared_ptr<LpcObject>& parseUser,
+                                        const Value* envArray = nullptr);
 
     // real f_parse_sentence() (packages/parser.c) restricted to rules
     // built entirely from STR/WRD tokens and literal words -- no

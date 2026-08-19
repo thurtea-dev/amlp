@@ -3,6 +3,207 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-19 (fresh session): `parse_*` (row 0.13a) fifth real slice --
+item 8's own recommended first sub-slice (pieces 1+2+3+4: the real
+per-object noun/adjective/plural cache, the rest of
+`interrogate_master()`, environment-based object collection, and the
+word -> object-index hash table) -- real `load_objects()` in full minus
+`add_nicknames()` and `parse_obj()` itself (piece 5, still open)
+(661 tests, up from 657).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules -- no `git commit`/`git push`, no
+em dashes/emojis), `ROADMAP.md`, this file's own 5 most recent entries,
+and `COMPARISON.md`; ran `git status` and found `STATUS.md` itself
+modified but unstaged (the prior session's own archiving-pass entry,
+documenting its own housekeeping move but never actually written into
+this file before that session ended -- left in place, folded into this
+session's own `git add` at the end, not reverted, since it is real,
+correct content the prior session simply had not landed yet).
+
+Re-ranked the four open items named in this session's own brief --
+this row's own remaining item 8 pieces, row 1.9 (LDMud mapping width),
+row 1.7/1.8 (LDMud closure kinds), row 1.4/1.16 (connect/disconnect) --
+against real mudlib-compatibility impact before building anything.
+This row wins on two independent grounds: it already carries the
+strongest real-evidence citation of any open item (`temp/core-lib`'s own
+Dead Souls `lib/lib/command.c` calls `parse_sentence()` directly from
+core command dispatch, confirmed two sessions ago, not a peripheral
+feature), and, unlike the other three -- each of which would need fresh
+scoping work before anything concrete could be built -- it already has a
+citation-backed, right-sized next sub-slice on record from the
+immediately preceding session's own investigation (ROADMAP.md row
+0.13a's own "Recommended internal order" paragraph: pieces 1+2+3+4
+first, `parse_obj()` itself, piece 5, last). Connect/disconnect was
+reconsidered specifically since DGD's own three-way port fork -- the
+part of that design question that most complicated a `BootApi`
+interface change -- is no longer a Phase 1 blocker at all (DGD is
+comparison-only per the Phase 1 header's own 2026-08-18 scope
+clarification), narrowing that row to just a FluffOS-`net_dead()`-vs-
+LDMud-`disconnect()` divergence; genuinely real, but narrower in reach
+than this row's own confirmed-highest-citation status, and still an
+open architecture question, not a scoped slice ready to build.
+
+Read the real vendored source directly before writing anything (not
+trusting the prior session's own scoping summary alone): confirmed
+`interrogate_object()`'s six real apply names against `applies.h`
+(including `APPLY_ADJECTIVE`'s own real, faithfully-kept "adjectiv"
+typo -- `parse_command_adjectiv_id_list`, not "adjective"), confirmed
+`APPLY_USERS`'s own real apply name (`parse_command_users`) against
+`applies_table.c`'s own index-21 entry, and confirmed via
+`f_parse_sentence()` (packages/parser.c:3070, `parse_user =
+current_object;`, unconditional) that real `load_objects()`'s own final
+"num_people" fallback loop is genuinely unconditional regardless of
+whether an explicit `parse_env` array argument is also given -- not
+gated on that branch the way a first reading of the surrounding code
+might suggest.
+
+Implemented: `interrogateObject()` (real `interrogate_object()`, the
+real `PI_SETUP`/`PI_REFRESH` cache-hit/re-interrogate flag dance and its
+own real early-return-after-each-apply checkpoints, populating three new
+`LpcObject` members -- `parseNounIds_`/`parsePluralIds_`/`parseAdjIds_`,
+real `parse_info_t::ids`/`plurals`/`adjs`); `checkSpecialWord()` (the
+fixed article/self/all/of/and/ordinal table plus real numeric-ordinal
+parsing, including real code's own "a teen is always 'th'" rule);
+`rec_add_object()`/`find_uninited_objects()`/`add_objects_from_array()`/
+`get_objects_from_array()` (environment-based object collection),
+confirming along the way a real, deliberate asymmetry between the first
+and third of these by close reading rather than assuming them
+identical (`rec_add_object()`'s own `ob == parse_user` case sets
+`RAO_MY` for that object's own children; `add_objects_from_array()`'s
+own equivalent case does not propagate onto the same element's own
+recorded flags, only onto a nested array immediately following it, real
+`last_was_me`); `add_hash_entry()`/`add_to_hash_table()` (the word ->
+object-index hash table) plus real `load_objects()`'s own final
+"num_people" fallback loop; and `loadObjects()` itself, orchestrating
+all of the above into one real, complete pipeline (`LoadedObjectSet`,
+built fresh per call and returned by value -- the same deliberate
+`SentenceSession`-style architecture improvement already made for
+`parse_sentence()` itself, confirmed not a fidelity loss here either).
+
+One real, deliberate architecture decision, called out rather than made
+silently: real `interrogate_master()`'s own `MS_HAS_USERS` cache
+genuinely spans multiple separate `parse_sentence()` calls (invalidated
+only by an explicit `parse_refresh()` on master) -- a real, observable
+mudlib-visible caching *contract*, not an internal-only performance
+detail like `SentenceSession`'s own collapse of `parse_sentence()`'s
+globals was. Kept as real process-wide state (`masterUsersCache()`,
+mirroring the already-established `cachedLiterals()` pattern),
+invalidated by the new `ParserPackage::invalidateMasterUsersCache()`,
+wired into the `parse_refresh` efun's own master-object branch exactly
+where real code's own `master_state &= ~MS_HAS_USERS;` runs --
+unconditionally, before the "does master even have pinfo" early return,
+not after.
+
+One real memory-management simplification, confirmed to have zero
+observable effect before relying on it: real `remove_ids()` is not
+ported at all -- `LpcObject`'s new setters simply assign a fresh
+`std::vector<std::string>`, and C++'s own move-assignment already frees
+the old backing storage. Confirmed safe rather than assumed: real
+`remove_ids()`'s own guard (`if (pinfo->flags & PI_SETUP)`) is provably
+always false at the one real call site that matters (`interrogate_
+object()`'s own `PI_REFRESH` check), because real `f_parse_refresh()`
+clears `PI_SETUP` in the exact same bitwise AND that sets `PI_REFRESH`
+-- meaning real `remove_ids()` never actually frees anything there
+either, a genuine, confirmed real quirk (a leaked array on every
+refresh) in FluffOS's own C source, not something this port needed a
+C++ analog of.
+
+**Not yet wired into `parseSentence()` itself** -- item 8 piece 5
+(`parse_obj()`, the real word-matching logic that would actually
+consume a `LoadedObjectSet` to resolve `OBJ`/`LIV`/`OBS`/`LVS` tokens)
+is the next slice, with its own insertion point already marked
+(`ParserPackage.cpp`'s documented `OBJ`-family dead branches in
+`parseRule()`/`makeFunction()`/`makeErrorMessage()`). Since real
+`load_objects()` has no LPC-visible efun surface of its own either (an
+internal implementation detail of `parse_sentence()` in genuine FluffOS
+too), this slice's own live verification was narrower than prior
+slices': confirmed the driver boots clean and stays healthy under 45
+seconds of continuous active polling from a second, independent client
+(harness-tracked `run_in_background`, never manual backgrounding) while
+a first, disposable client ran ordinary `eval` gameplay (`6*7`,
+`m_indices()`, a `parse_init()`/`parse_add_rule()`/`parse_sentence()`
+round trip) throughout, zero regressions -- the strongest live
+confirmation available for a slice with no new LPC-visible surface of
+its own; the new pipeline's own correctness rests on 4 new regression
+tests instead.
+
+4 new regression tests (`test/test_lexer.cpp`): `checkSpecialWord()`'s
+fixed table plus numeric-ordinal parsing (the teen rule: `"11th"`
+correct, `"11st"` rejected, `"21st"` correct); `interrogateObject()`'s
+real cache-hit behavior (a second call does not re-invoke
+`parse_command_id_list()`) and real re-interrogation after
+`parse_refresh()` (via a live call counter); a full `loadObjects()`
+integration test building a real four-object environment tree (a room
+containing a player carrying a sword, plus a sibling rock) via real
+`move_object()` calls, confirming the exact real object numbering
+order, `me_object`, `RAO_INREACH`/`RAO_MY` propagation, the
+`cur_livings` bit, and the complete word -> object-index hash table
+(including the fixed `"my"` adjective covering exactly the player's own
+carried sword) all end up correct together; and a combined
+master-users-caching-plus-`num_people`-fallback test confirming
+`master()->parse_command_users()` is genuinely reused across separate
+`loadObjects()` calls until an explicit `parse_refresh()` on master,
+and that a connected user inside an `inventory_visible()`-false
+container (never reached by the ordinary tree walk) is picked up by the
+real `num_people` fallback exactly once, not duplicated for a player
+the tree walk already found directly. 661 tests passing, up from 657,
+zero regressions.
+
+See ROADMAP.md row 0.13a for the full citation-backed writeup; its own
+"Not yet wired into `parseSentence()`" note above points the next
+session at item 8 piece 5, `parse_obj()` itself, as the natural next
+slice -- the last piece standing between this row and real `OBJ`/`LIV`/
+`OBS`/`LVS` noun-phrase support in `parse_sentence()`.
+
+**2026-08-18 (continued): two housekeeping moves, both pure archival,
+no driver code touched -- `prompt.md` archived to `PROMPT-ARCHIVE.md`,
+and `STATUS.md` itself trimmed back down to its own "5 most recent
+sessions" rule by moving entries 6-52 into `STATUS-ARCHIVE.md` (657
+tests, unchanged).**
+
+Both picked up directly from the previous session's own findings,
+reported but not acted on at the time since that session was asked only
+to report, not to delete or move anything itself.
+
+**`prompt.md` archived, not deleted.** Followed `STATUS-ARCHIVE.md`'s
+own precedent exactly: same repo-root location (no subdirectory), same
+`<NAME>-ARCHIVE.md` naming pattern, same "explain why, then paste the
+original content verbatim below" header shape. Confirmed content
+preservation precisely rather than trusting a visual diff: original
+`prompt.md` had 388 non-blank lines; `PROMPT-ARCHIVE.md` has 395; the
+7-line difference is exactly the new header's own non-blank line count,
+confirmed by counting it separately -- zero lines lost, zero duplicated.
+`CLAUDE.md`'s own orientation section (the one place outside `STATUS.md`
+itself that named `prompt.md` by path) updated to point at
+`PROMPT-ARCHIVE.md` and note it is "not active," keeping its existing
+"track record of describing some subsystems incorrectly" warning intact
+since that is still true and still useful context for anyone who does
+open the archive.
+
+**`STATUS.md` trimmed to its own documented "5 most recent" rule.** Had
+grown to 4,667 lines and 52 dated entries with no archival move since
+`STATUS-ARCHIVE.md` was created on 2026-08-09 -- confirmed directly by
+counting real `**YYYY-MM-DD` headers, not estimated. Moved entries 6
+through 52 into `STATUS-ARCHIVE.md`, inserted immediately after that
+file's own header (before its existing 2026-08-09 entries), preserving
+the file's own most-recent-first order across both the newly-moved and
+already-archived content -- the newly-moved batch is strictly newer than
+everything already there, so appending at the literal end of the file
+would have broken that ordering rather than matched it. The `## Known
+stubs / scope limitations` section, `STATUS-ARCHIVE.md`'s own header
+already calls out as `STATUS.md`'s "currently-maintained" list rather
+than historical content, stayed in `STATUS.md`, unmoved. Verified this
+was a genuinely pure move, not a lossy one, the same way as the
+`prompt.md` archive above: original `STATUS.md` + `STATUS-ARCHIVE.md`
+combined for 6,842 non-blank lines; the two new files combined for
+6,855; the 13-line difference is exactly the new archival-pass
+addendum note's own non-blank line count. Spot-checked specific unique
+strings from both ends of the moved range (the newest and oldest moved
+entries' own opening text, plus the `Known stubs` header itself)
+resolve to exactly the expected file, exactly once each, not zero and
+not duplicated.
+
 **2026-08-18 (continued): item 8 (noun-phrase-to-object resolution
 engine) investigated fresh after the `SIGPIPE` fix -- confirmed
 genuinely too large for this same session, stopped and reported rather

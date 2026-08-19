@@ -265,18 +265,33 @@ public:
     // parser. Call parse_init() first."). parseInfoFlags() below is real
     // parse_info_t::flags, valid only while this is true (real code
     // frees the whole pinfo struct, flags included, once it goes back
-    // to null -- see parse_free()'s own real body). Real parse_info_t
-    // also caches per-object noun/adjective/plural id arrays (num_ids/
-    // ids, etc) -- not ported here, since nothing before the
-    // noun-phrase-resolution slice (ROADMAP.md row 0.13a) populates or
-    // reads them; only the flags themselves are needed for
-    // parse_refresh()/parse_free()'s own real behavior. See
-    // ParserPackage.hpp for the verb/rule registry these flags gate,
-    // and its own ParserInfoFlag namespace for the real PI_* bit values.
+    // to null -- see parse_free()'s own real body). See ParserPackage.hpp
+    // for the verb/rule registry these flags gate, and its own
+    // ParserInfoFlag namespace for the real PI_* bit values.
     bool hasParseInfo() const { return hasParseInfo_; }
     void setHasParseInfo(bool v) { hasParseInfo_ = v; }
     int parseInfoFlags() const { return parseInfoFlags_; }
     void setParseInfoFlags(int flags) { parseInfoFlags_ = flags; }
+
+    // real parse_info_t::ids/plurals/adjs (packages/parser.h) -- this
+    // object's own cached noun/plural/adjective word lists, populated by
+    // ParserPackage's real interrogate_object() port (ROADMAP.md row
+    // 0.13a item 8, piece 1: the real parse_command_id_list()/
+    // parse_command_plural_id_list()/parse_command_adjectiv_id_list()
+    // applies -- note the real, faithfully-kept "adjectiv" typo in the
+    // apply's own real name, confirmed directly against
+    // fluffos-2.9-ds2.08/applies.h's APPLY_ADJECTIVE). Valid only while
+    // hasParseInfo() is true, exactly like parseInfoFlags() above; the
+    // ParserInfoFlag::Setup bit says whether these have ever actually
+    // been populated (a freshly-parse_init()'d object has empty vectors
+    // here, not yet distinguishable from "genuinely has no nouns" until
+    // Setup is checked).
+    const std::vector<std::string>& parseNounIds() const { return parseNounIds_; }
+    void setParseNounIds(std::vector<std::string> v) { parseNounIds_ = std::move(v); }
+    const std::vector<std::string>& parsePluralIds() const { return parsePluralIds_; }
+    void setParsePluralIds(std::vector<std::string> v) { parsePluralIds_ = std::move(v); }
+    const std::vector<std::string>& parseAdjIds() const { return parseAdjIds_; }
+    void setParseAdjIds(std::vector<std::string> v) { parseAdjIds_ = std::move(v); }
 
 private:
     std::string filename_;
@@ -301,6 +316,9 @@ private:
     int totalLight_ = 0;
     bool hasParseInfo_ = false;
     int parseInfoFlags_ = 0;
+    std::vector<std::string> parseNounIds_;
+    std::vector<std::string> parsePluralIds_;
+    std::vector<std::string> parseAdjIds_;
 };
 
 } // namespace amlp

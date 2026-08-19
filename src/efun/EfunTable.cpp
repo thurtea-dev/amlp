@@ -4780,32 +4780,28 @@ void registerCoreEfuns() {
 
     // void parse_refresh() -- real packages/parser.c's f_parse_refresh():
     // informs the parser that current_object's own cached noun/adjective/
-    // plural id data (not yet populated by anything in this driver, see
-    // LpcObject::parseInfoFlags()'s own comment) may be stale and should
-    // be recomputed the next time it is actually needed. Real semantics
-    // ported in full even though the cache itself is not populated yet:
-    // the master_ob special case (clears the master's own PI_VERB_HANDLER-
-    // independent MS_HAS_USERS-equivalent... this driver has not ported
-    // interrogate_master()'s USERS half either, see EfunTable.cpp's own
-    // parse_add_rule comment, so this reduces to "master_ob with no
-    // pinfo returns early, doing nothing" -- still a real, correct,
-    // observable no-throw path, not skipped); the "not known by the
-    // parser" guard; the PI_SETUP/PI_REFRESH flag dance (real "pi->flags
-    // &= PI_VERB_HANDLER; pi->flags |= PI_REFRESH;" when PI_SETUP was
-    // set, or just "pi->flags &= PI_VERB_HANDLER;" otherwise -- both
-    // reduce to "keep only PI_VERB_HANDLER, plus PI_REFRESH if a real
-    // cache existed to invalidate", faithfully reproduced via the same
-    // bitwise AND/OR even though PI_SETUP itself is never actually set
-    // by anything in this slice); and the same real PI_VERB_HANDLER ->
-    // livings_are_remote() -> PI_REMOTE_LIVINGS re-check parse_add_rule()
-    // above now also does, this time with real code's own O_DESTRUCTED
-    // guard (isDestructed() here) after the apply, matching the one real
-    // difference between these two real call sites exactly.
+    // plural id data (ParserPackage::interrogateObject(), row 0.13a item
+    // 8 piece 1) may be stale and should be recomputed the next time
+    // load_objects() actually needs it. Real semantics ported in full:
+    // the master_ob special case -- real "master_state &= ~MS_HAS_USERS;
+    // if (!master_ob->pinfo) return;", unconditionally invalidating the
+    // cached master()->users() list (ParserPackage::
+    // invalidateMasterUsersCache(), item 8 piece 2) BEFORE the early
+    // return, not after -- the "not known by the parser" guard; the
+    // PI_SETUP/PI_REFRESH flag dance (real "pi->flags &= PI_VERB_HANDLER;
+    // pi->flags |= PI_REFRESH;" when PI_SETUP was set, or just
+    // "pi->flags &= PI_VERB_HANDLER;" otherwise); and the same real
+    // PI_VERB_HANDLER -> livings_are_remote() -> PI_REMOTE_LIVINGS
+    // re-check parse_add_rule() above now also does, this time with real
+    // code's own O_DESTRUCTED guard (isDestructed() here) after the
+    // apply, matching the one real difference between these two real
+    // call sites exactly.
     t.registerEfun("parse_refresh", [](VM& vm, std::vector<Value>&) -> Value {
         auto ob = vm.currentObject();
         if (!ob) return Value{};
 
         if (ob == vm.masterObject()) {
+            ParserPackage::invalidateMasterUsersCache();
             if (!ob->hasParseInfo()) return Value{};
         }
 

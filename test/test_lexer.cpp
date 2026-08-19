@@ -18876,6 +18876,284 @@ static void testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag() {
     std::cout << "testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag OK\n";
 }
 
+// --- Noun-phrase-to-object resolution engine, pieces 1-4 (ROADMAP.md row
+// 0.13a item 8): ParserPackage::checkSpecialWord()/interrogateObject()/
+// loadObjects(), a real, complete pipeline not yet wired into
+// parseSentence() itself (item 8 piece 5, parse_obj(), is the next
+// slice) -- see LoadedObjectSet's own header comment (ParserPackage.hpp).
+
+static void testCheckSpecialWordMatchesFixedTableAndNumericOrdinalsWithTheTeenRule() {
+    using amlp::SpecialWordKind;
+
+    assert(amlp::ParserPackage::checkSpecialWord("the").kind == SpecialWordKind::Article);
+    assert(amlp::ParserPackage::checkSpecialWord("me").kind == SpecialWordKind::Self);
+    assert(amlp::ParserPackage::checkSpecialWord("myself").kind == SpecialWordKind::Self);
+    assert(amlp::ParserPackage::checkSpecialWord("all").kind == SpecialWordKind::All);
+    assert(amlp::ParserPackage::checkSpecialWord("of").kind == SpecialWordKind::Of);
+    assert(amlp::ParserPackage::checkSpecialWord("and").kind == SpecialWordKind::And);
+
+    auto second = amlp::ParserPackage::checkSpecialWord("second");
+    assert(second.kind == SpecialWordKind::Ordinal && second.arg == 2);
+
+    // Numeric ordinals ("3rd", "21st", ...): the suffix must match the
+    // real, digit-specific ending exactly.
+    auto third = amlp::ParserPackage::checkSpecialWord("3rd");
+    assert(third.kind == SpecialWordKind::Ordinal && third.arg == 3);
+    auto twentyFirst = amlp::ParserPackage::checkSpecialWord("21st");
+    assert(twentyFirst.kind == SpecialWordKind::Ordinal && twentyFirst.arg == 21);
+
+    // Real check_special_word()'s own "a teen is always 'th'" rule:
+    // "11th" is correct even though a bare trailing '1' would otherwise
+    // suggest "st".
+    auto eleventh = amlp::ParserPackage::checkSpecialWord("11th");
+    assert(eleventh.kind == SpecialWordKind::Ordinal && eleventh.arg == 11);
+    assert(amlp::ParserPackage::checkSpecialWord("11st").kind == SpecialWordKind::None);
+
+    // A bare number with no ordinal suffix, and an ordinary word, match
+    // nothing.
+    assert(amlp::ParserPackage::checkSpecialWord("42").kind == SpecialWordKind::None);
+    assert(amlp::ParserPackage::checkSpecialWord("sword").kind == SpecialWordKind::None);
+
+    std::cout << "testCheckSpecialWordMatchesFixedTableAndNumericOrdinalsWithTheTeenRule OK\n";
+}
+
+static void testInterrogateObjectPopulatesTheNounPluralAdjCacheAndSkipsReInterrogationUntilRefreshed() {
+    ObjectVarHarness harness;
+    harness.writeFile("/io_thing.c",
+        "int nounCalls;\n"
+        "void setup() { parse_init(); }\n"
+        "void refresh() { parse_refresh(); }\n"
+        "mixed *parse_command_id_list() { nounCalls++; return ({\"rock\"}); }\n"
+        "mixed *parse_command_plural_id_list() { return ({\"rocks\"}); }\n"
+        "mixed *parse_command_adjectiv_id_list() { return ({\"heavy\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 0; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int getNounCalls() { return nounCalls; }\n");
+    auto thing = harness.objects.cloneObject("/io_thing");
+    assert(thing != nullptr);
+    harness.vm.callFunction(thing, "setup", {});
+
+    amlp::ParserPackage::interrogateObject(harness.vm, thing);
+    assert(thing->parseNounIds().size() == 1 && thing->parseNounIds()[0] == "rock");
+    assert(thing->parsePluralIds().size() == 1 && thing->parsePluralIds()[0] == "rocks");
+    assert(thing->parseAdjIds().size() == 1 && thing->parseAdjIds()[0] == "heavy");
+    assert((thing->parseInfoFlags() & amlp::ParserInfoFlag::Setup) != 0);
+    assert((thing->parseInfoFlags() & amlp::ParserInfoFlag::Living) == 0);
+    assert((thing->parseInfoFlags() & amlp::ParserInfoFlag::InvAccessible) == 0);
+    assert((thing->parseInfoFlags() & amlp::ParserInfoFlag::InvVisible) != 0);
+
+    // Cache hit: PI_SETUP is already set and PI_REFRESH is not, so a
+    // second call must not re-invoke parse_command_id_list() at all.
+    amlp::ParserPackage::interrogateObject(harness.vm, thing);
+    assert(std::get<int64_t>(harness.vm.callFunction(thing, "getNounCalls", {}).data) == 1);
+
+    // real f_parse_refresh() clears PI_SETUP and sets PI_REFRESH -- the
+    // next interrogateObject() call must genuinely re-fetch.
+    harness.vm.callFunction(thing, "refresh", {});
+    amlp::ParserPackage::interrogateObject(harness.vm, thing);
+    assert(std::get<int64_t>(harness.vm.callFunction(thing, "getNounCalls", {}).data) == 2);
+
+    std::cout << "testInterrogateObjectPopulatesTheNounPluralAdjCacheAndSkipsReInterrogationUntilRefreshed OK\n";
+}
+
+// The full real load_objects() pipeline (pieces 1+3+4): a room
+// containing a player (this session's own parseUser) and a rock, with
+// the player themselves carrying a sword -- confirms the real object
+// numbering order, the RAO_INREACH/RAO_MY propagation down the
+// environment tree (rec_add_object()), me_object, and the word ->
+// object-index hash table (add_to_hash_table()) all end up correct
+// end to end, not just piece by piece.
+static void testLoadObjectsBuildsTheNumberedObjectUniverseFromAnEnvironmentTree() {
+    ObjectVarHarness harness;
+    harness.writeFile("/lo_room.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"room\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/lo_player.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/lo_rock.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"rock\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 0; }\n"
+        "int inventory_visible() { return 0; }\n");
+    harness.writeFile("/lo_sword.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"sword\"}); }\n"
+        "mixed *parse_command_plural_id_list() { return ({\"swords\"}); }\n"
+        "mixed *parse_command_adjectiv_id_list() { return ({\"sharp\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 0; }\n"
+        "int inventory_visible() { return 0; }\n");
+
+    auto room = harness.objects.cloneObject("/lo_room");
+    auto player = harness.objects.cloneObject("/lo_player");
+    auto rock = harness.objects.cloneObject("/lo_rock");
+    auto sword = harness.objects.cloneObject("/lo_sword");
+    assert(room && player && rock && sword);
+
+    for (auto& ob : {room, player, rock, sword}) harness.vm.callFunction(ob, "setup", {});
+    // Real move_object() appends (VM::moveObject()'s own "dest->
+    // inventory().push_back(item);") -- moving player then rock leaves
+    // room->inventory() as [player, rock]. rec_add_object() recurses
+    // into each child's own inventory immediately (depth-first), so
+    // player's own carried sword is numbered right after player, before
+    // the room's next sibling (rock) is even visited.
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(rock, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(sword, "go", std::vector<amlp::Value>{amlp::Value(player)});
+
+    amlp::LoadedObjectSet result = amlp::ParserPackage::loadObjects(harness.vm, player);
+
+    assert(result.objects.size() == 4);
+    assert(result.objects[0] == room);
+    assert(result.objects[1] == player);
+    assert(result.objects[2] == sword);
+    assert(result.objects[3] == rock);
+    assert(result.meObject == 1);
+
+    // Every object here is reachable and, separately, accessible (the
+    // room and player both leave RAO_INREACH set the whole way down).
+    assert(result.inReach == std::vector<bool>({true, true, true, true}));
+    assert(result.isAccessible == std::vector<bool>({true, true, true, true}));
+    // Only the player is living.
+    assert(result.isLiving == std::vector<bool>({false, true, false, false}));
+
+    // The hash table: each object's own noun (plus the sword's own
+    // plural/adjective) points back at exactly its own index.
+    assert(result.hashTable.at("room").nounObjs == std::vector<bool>({true, false, false, false}));
+    assert(result.hashTable.at("adventurer").nounObjs == std::vector<bool>({false, true, false, false}));
+    assert(result.hashTable.at("sword").nounObjs == std::vector<bool>({false, false, true, false}));
+    assert(result.hashTable.at("rock").nounObjs == std::vector<bool>({false, false, false, true}));
+    assert(result.hashTable.at("swords").isPlural);
+    assert(result.hashTable.at("swords").pluralObjs == std::vector<bool>({false, false, true, false}));
+    assert(result.hashTable.at("sharp").isAdj);
+    assert(result.hashTable.at("sharp").adjObjs == std::vector<bool>({false, false, true, false}));
+
+    // The fixed "my" adjective covers exactly the player's own carried
+    // items (the sword), not the player's own object nor anything else
+    // in the room.
+    assert(result.hashTable.at("my").isAdj);
+    assert(result.hashTable.at("my").adjObjs == std::vector<bool>({false, false, true, false}));
+
+    std::cout << "testLoadObjectsBuildsTheNumberedObjectUniverseFromAnEnvironmentTree OK\n";
+}
+
+// master()->parse_command_users() caching (piece 2): cached across
+// separate loadObjects() calls until parse_refresh() runs on master;
+// plus real load_objects()'s own final "num_people" fallback, which
+// picks up a connected user real rec_add_object() never reached because
+// an invisible container sits between them and the room (confirming the
+// fallback's real purpose: every connected player stays nameable even
+// when not enumerable via room contents), while a user already found by
+// the ordinary tree walk is not added a second time.
+static void testLoadObjectsCachesMasterUsersAndTheNumPeopleFallbackFindsAnOtherwiseUnreachableUser() {
+    // masterUsersCache() is real process-wide state (this method's own
+    // header comment, ParserPackage.hpp) -- an earlier test's own
+    // loadObjects() call (e.g. this file's own hierarchy test just
+    // above, which loads no master at all) can already have marked it
+    // valid-but-empty by the time this test runs, in the same real
+    // "fetched once, cached until refresh" sense a long-running driver
+    // process would. Explicitly invalidate first so this test's own
+    // first loadObjects() call below is guaranteed to be a genuine
+    // fetch, not an accidental reuse of another test's own cache state.
+    amlp::ParserPackage::invalidateMasterUsersCache();
+
+    ObjectVarHarness harness;
+    harness.writeFile("/unused.c",
+        "object *userList = ({});\n"
+        "int userCalls;\n"
+        "void addUser(object u) { userList += ({u}); }\n"
+        "mixed *parse_command_users() { userCalls++; return userList; }\n"
+        "int getUserCalls() { return userCalls; }\n"
+        "void doRefresh() { parse_refresh(); }\n");
+    assert(harness.objects.loadMasterObject());
+    auto master = harness.vm.masterObject();
+    assert(master != nullptr);
+
+    harness.writeFile("/lo2_room.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"room\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/lo2_player.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    // A container whose own contents are not visible -- rec_add_object()
+    // adds the box itself but never recurses into it.
+    harness.writeFile("/lo2_box.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"box\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 0; }\n"
+        "int inventory_visible() { return 0; }\n");
+    harness.writeFile("/lo2_hidden.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"stowaway\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 0; }\n"
+        "int inventory_visible() { return 0; }\n");
+
+    auto room = harness.objects.cloneObject("/lo2_room");
+    auto player = harness.objects.cloneObject("/lo2_player");
+    auto box = harness.objects.cloneObject("/lo2_box");
+    auto hidden = harness.objects.cloneObject("/lo2_hidden");
+    assert(room && player && box && hidden);
+    for (auto& ob : {room, player, box, hidden}) harness.vm.callFunction(ob, "setup", {});
+
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(box, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(hidden, "go", std::vector<amlp::Value>{amlp::Value(box)});
+
+    harness.vm.callFunction(master, "addUser", std::vector<amlp::Value>{amlp::Value(player)});
+    harness.vm.callFunction(master, "addUser", std::vector<amlp::Value>{amlp::Value(hidden)});
+
+    amlp::LoadedObjectSet first = amlp::ParserPackage::loadObjects(harness.vm, player);
+    // room, box, player from the tree walk, plus hidden via the
+    // num_people fallback -- not a duplicate of player, who was already
+    // reached directly.
+    assert(first.objects.size() == 4);
+    bool sawHidden = false;
+    int playerCount = 0;
+    for (auto& ob : first.objects) {
+        if (ob == hidden) sawHidden = true;
+        if (ob == player) playerCount++;
+    }
+    assert(sawHidden);
+    assert(playerCount == 1);
+    assert(std::get<int64_t>(harness.vm.callFunction(master, "getUserCalls", {}).data) == 1);
+
+    // A second loadObjects() call reuses the cached master()->
+    // parse_command_users() result -- no new call.
+    amlp::ParserPackage::loadObjects(harness.vm, player);
+    assert(std::get<int64_t>(harness.vm.callFunction(master, "getUserCalls", {}).data) == 1);
+
+    // parse_refresh() on master invalidates the cache -- the next
+    // loadObjects() call genuinely re-fetches.
+    harness.vm.callFunction(master, "doRefresh", {});
+    amlp::ParserPackage::loadObjects(harness.vm, player);
+    assert(std::get<int64_t>(harness.vm.callFunction(master, "getUserCalls", {}).data) == 2);
+
+    std::cout << "testLoadObjectsCachesMasterUsersAndTheNumPeopleFallbackFindsAnOtherwiseUnreachableUser OK\n";
+}
+
 // --- SIGPIPE (src/main.cpp, src/net/instruct.md's own "Known gap"
 // note): a client connection closing at the wrong moment relative to
 // this process's own next write() to that same socket used to be able
@@ -19585,6 +19863,10 @@ int main() {
     testParseSentenceSkipsAnObjectTokenRuleGracefullyAndStillMatchesASiblingStrRule();
     testParseSentenceFallsBackToTheGenericDoVerbRuleNamingWhenTheSimpleNameIsNotDefined();
     testParseSentenceRequiresParseInitAndRejectsATruthyDebugFlag();
+    testCheckSpecialWordMatchesFixedTableAndNumericOrdinalsWithTheTeenRule();
+    testInterrogateObjectPopulatesTheNounPluralAdjCacheAndSkipsReInterrogationUntilRefreshed();
+    testLoadObjectsBuildsTheNumberedObjectUniverseFromAnEnvironmentTree();
+    testLoadObjectsCachesMasterUsersAndTheNumPeopleFallbackFindsAnOtherwiseUnreachableUser();
     testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess();
     std::cout << "all tests passed\n";
     return 0;
