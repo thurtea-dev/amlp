@@ -18,7 +18,14 @@ below exist so a reader can see how a third, architecturally different
 driver solved the same problems, not because AMLP is trying to match it
 feature-for-feature.
 
-Last updated: 2026-08-20. `ROADMAP.md` and `STATUS.md` are the living
+Last updated: 2026-08-20 (refreshed same day: Phase 1's real-blocker count
+moved from 5/11 to 10/11, not from new feature work but from five stale
+checkboxes -- rows 1.2, 1.3, 1.4, 1.9, and 1.16 -- corrected the same
+2026-08-20 session to match real, already-landed work their own cells
+had recorded across many earlier sessions but never checked off. See
+`ROADMAP.md`'s own dated correction on each row and this file's own
+rewritten Phase 1 section below for the honest accounting.)
+`ROADMAP.md` and `STATUS.md` are the living
 documents; if this file and either of those disagree on a specific row's
 status, trust `ROADMAP.md`'s own checkbox and re-derive this file's own
 summary from it rather than the reverse.
@@ -33,11 +40,11 @@ already runs a real bundled mudlib end to end -- login, movement,
 command dispatch, object creation, persistence, sockets -- and has grown
 a substantial fraction of real FluffOS's own efun surface plus the start
 of genuine LDMud and DGD dialect support behind a config switch. It is
-not yet a drop-in replacement for either real driver: large, well-scoped
-pieces of Phase 1 (dialect completeness) are still open, and every
-Phase 2 and Phase 3 item (the features meant to eventually *exceed* what
-either real driver offers) has a planning document but zero implemented
-code.
+not yet a drop-in replacement for either real driver: Phase 2 and Phase 3
+(the features meant to eventually *exceed* what either real driver
+offers) each have a planning document but zero implemented code, though
+Phase 1's own real, corpus-driven dialect-compatibility work is now
+substantially exhausted -- see immediately below.
 
 **Phase 0 (stabilize the current base): complete.**
 16 of 16 rows checked off, including `parse_*` (0.13a), the large
@@ -47,13 +54,27 @@ remains, see below, but all 8 named efuns are implemented, including
 real two-object matching, and the row's own multi-session scope has
 landed).
 
-**Phase 1 (dialect universality): the real work, a bit under half
-done.** Counting only the rows that actually gate Phase 1 completion
-(DGD-only rows are comparison context, not blockers, per the scope
-clarification above): 5 of 11 real blocking rows are done. The rest are
-individually scoped, with real, specific reasons on record for why each
-is still open (see the phase table below) -- none of them are vague
-"todo" placeholders.
+**Phase 1 (dialect universality): the real, corpus-driven work is now
+substantially exhausted, not "a bit under half done."** An earlier
+revision of this file undercounted this badly -- five rows (1.2, 1.3,
+1.4, 1.9, 1.16) had real, already-landed work sitting in their own
+`ROADMAP.md` cells across several earlier sessions that was never
+reflected in their checkboxes, corrected 2026-08-20. Counting only the
+rows that actually gate Phase 1 completion (DGD-only rows are comparison
+context, not blockers, per the scope clarification above): **10 of 11
+real blocking rows are done.** The one still open, row 1.8
+(`#'lfun::`/`#'sefun::`/`#'var::` closure-literal prefixes), was
+investigated for the first time this same session and found to have
+**zero real corpus usage** for its own remaining scope across every
+vendored mudlib corpus in `temp/` -- deferred on the same
+zero-evidence-discipline basis this project has applied consistently
+elsewhere (`bind_lambda()`'s cross-object form, `lambda()` itself, DGD's
+own five still-open rows), not forgotten or blocked. Counting only rows
+with real, non-DGD, non-zero-evidence scope still open, as opposed to
+counting every unchecked box regardless of what is actually left in it:
+**zero real Phase 1 blockers remain.** See `ROADMAP.md`'s own row-by-row
+citations for the underlying evidence on every count below, not repeated
+here.
 
 **Phase 2 and Phase 3: not started.** Every directory Phase 2/3 work
 would live in (`src/jit`, `src/gc`, `src/lsp`, `src/persist`,
@@ -66,57 +87,56 @@ items. They are real, considered plans, not real code.
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0 -- Stabilize | 16 | 16 | 0 | 100% |
-| 1 -- Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 5 | 6 | 45% |
-| 1 -- Dialect universality (including 5 DGD-only comparison rows) | 16 | 5 | 11 | 31% |
+| 1 -- Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
+| 1 -- Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
 | 2 -- Beyond both (novel features) | 22 | 0 | 22 | 0% |
 | 3 -- Production hardening + docs | 8 | 0 | 8 | 0% |
 
-**What is genuinely blocking Phase 1 completion right now** (each with
-its own detailed, source-cited scoping note in `ROADMAP.md`, not
+**What is left open in Phase 1, and why each item stays open** (each
+with its own detailed, source-cited scoping note in `ROADMAP.md`, not
 guessed at here):
 
-- **Row 1.2/1.3 (dialect-aware lexer/parser), partially landed**: DGD's
-  `atomic` keyword and `nil` literal are dialect-gated and working;
-  LDMud's `#'name` bare-closure-literal form is dialect-gated and
-  working. Still open: `'name` symbol literals, `rlimits`, and every
-  `#'` form beyond the bare name (`#'+`, `#'[`, `#'efun::`, ...).
-- **Row 1.4/1.16 (pluggable boot API), the one open architectural
-  question**: real FluffOS/LDMud/DGD each have a *differently shaped*
-  connect/disconnect callback contract (FluffOS: `connect()`/`net_dead()`
-  on a fresh login object; LDMud: broadly similar but different apply
-  names; DGD: a three-way `telnet_connect`/`binary_connect`/
-  `datagram_connect` port-type fork plus `close()` on the persistent
-  user object itself, not a fresh login object at all). `BootApi`
-  currently abstracts exactly one apply (`masterUidApply()`) and
-  deliberately omits connect/disconnect until this three-way shape
-  mismatch gets a real design decision -- not an oversight, an
-  explicitly recorded open question (`include/amlp/dialect/BootApi.hpp`'s
-  own comment).
-- **Row 1.7/1.8 (LDMud closure kinds and driver hooks), partially
-  landed**: real hook storage/dispatch (`set_driver_hook()`, the full
-  32-slot table), automatic boot wiring (`inaugurate_master()`), and two
-  real hook trigger points (`H_MOVE_OBJECT0`/`H_MOVE_OBJECT1` inside
-  `move_object()`, `H_MODIFY_COMMAND`'s real direction-abbreviation
-  mapping) are wired end to end and verified live. `unbound_lambda()`/
-  `bind_lambda()` are real for the one confirmed corpus quoted-code
-  shape (`secure/master/hooks.c`'s own `H_LOAD_UIDS`/`H_MOVE_OBJECT0`
-  bodies). Still genuinely open: `lambda()` itself (0 real corpus hits,
-  not started), the rest of real `lambda()`'s own quoted-code grammar,
-  the full `CLOSURE_LAMBDA`/`CLOSURE_BOUND_LAMBDA`/
-  `CLOSURE_UNBOUND_LAMBDA` kind distinction this driver's own flat
-  `Closure` struct still does not fully have, `bind_lambda()`'s
-  cross-object form (blocked on `privilege_violation()`, itself
-  unimplemented), and several remaining hook numbers/trigger points
-  (`H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS`, real per-hook
-  type-map validation).
-- **Row 1.9 (LDMud mapping width > 1)**: `m_indices()`/`m_values()`
-  (the two highest-real-call-site names) are done; the real N-columns-
-  wide value semantics (`m_allocate`/`m_entry`/`m_reallocate`/`m_add`/
-  `m_contains`, the `([ k: v1; v2 ])` literal syntax) need a `Mapping`
-  structure rework this driver's own single-column-per-key
-  `std::vector<std::pair<Value, Value>>` does not support, cascading
-  through indexing, `save_object`, and the existing mapping-union `+`
-  operator.
+- **Row 1.8 (LDMud `#'lfun::`/`#'sefun::`/`#'var::` closure-literal
+  prefixes), the one row with real remaining scope, deferred on
+  evidence**: the bare `#'name` form and the `#'efun::name` forced-tier
+  prefix (rows 1.2/1.3) are real and tested; `#'lfun::`/`#'sefun::`
+  (more forced-tier prefixes) and `#'var::` (`CLOSURE_IDENTIFIER`, a
+  reference-to-a-global-variable closure kind this driver has no model
+  of at all, structurally distinct from a callable closure) have zero
+  confirmed real mudlib call sites anywhere in `temp/` -- the only hit
+  for any of the three is the LDMud driver's own changelog prose noting
+  when it added them, not a real mudlib using them.
+- **Row 1.7's own remaining sub-items (the row itself is closed, these
+  are real, named exceptions inside it, not a separate open row)**:
+  `H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS` driver-hook trigger
+  points have real but minimal evidence -- 3 real call sites, all in one
+  file (`secure/master/hooks.c`), versus 324 files defining `reset()`
+  and 43 defining `clean_up()`, which is why `H_RESET`/`H_CLEAN_UP` (now
+  real, dialect-gated where the two real drivers genuinely disagree) was
+  picked first. Plain dialect-agnostic `lambda()`, `bind_lambda()`'s
+  cross-object form, and per-hook type-map validation all have zero real
+  corpus pressure -- `privilege_violation()` (which the cross-object
+  `bind_lambda()` form is gated behind) is a security-relevant
+  authorization gate with no corpus call-site signal of its own by
+  nature, a defensive-completeness question rather than a
+  compatibility gap, flagged as a candidate for its own future
+  evidence-independent evaluation rather than silently grouped with the
+  zero-usage items above.
+- **Row 1.9's own remaining sub-items (the row itself is closed, same
+  pattern as row 1.7 above)**: `m_allocate`/`m_entry`/`m_reallocate`/
+  `m_add`/`m_contains` (the real N-columns-wide efun family) and the
+  `([:width])` empty-mapping literal all have zero real call sites
+  across every corpus in `temp/` -- `m_indices()`/`m_values()` (the two
+  real names with real usage), the width-2 `([ k: v1; v2 ])` literal, and
+  `map[key, n]` indexing/assignment (including a real IncDec-on-column
+  bug this project's own live-bug-first discipline caught and fixed) are
+  the parts of this row real corpus evidence actually called for, and
+  are done.
+- **DGD's own five still-open rows (1.11-1.15)**: real, considered
+  scope with real citations against `temp/dgd/`'s own source, but
+  explicitly comparison context rather than a Phase 1 blocker per this
+  project's own stated goal -- a FluffOS/LDMud-level driver done better
+  than either, not three-way parity with DGD.
 
 ## Row 0.13a (`parse_*`), now checked (partial), in detail
 

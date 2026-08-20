@@ -18135,6 +18135,32 @@ static void testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyR
 // call at backend.c:251) has no analog of this gate at all -- see the
 // sibling FluffOS-dialect test directly below this one, which proves the
 // opposite outcome from the identical setup.
+//
+// Coverage note, added 2026-08-20 after a direct regression-coverage
+// audit (each of the two real fixes landed alongside this test --
+// the dialect gate itself, and the separate readyForCleanUp-latched-
+// before-reset ordering fix it exposed -- was reverted in isolation,
+// rebuilt, and run against this exact test to confirm what actually
+// catches what, rather than assumed): THIS test, by itself, does not
+// independently catch a regression of *either* fix -- reverting the
+// dialect gate alone, or reverting the ordering fix alone, both still
+// produce cleanUpCalls == 0 here under dialect: ldmud, identical to
+// this test's own expected passing value, since LDMud's own real
+// behavior already wants suppression regardless of which mechanism
+// (correct or accidentally-broken) currently produces it. The sibling
+// FluffOS test directly below is the one that actually distinguishes
+// all four states (both fixed / ordering-only / dialect-only / both
+// reverted) -- confirmed by the same direct revert-and-rebuild
+// experiment. This test still earns its place as a real, dialect-
+// specific correctness assertion (LDMud really must suppress here) and
+// as the one place `dialect: ldmud`'s own positive case is exercised at
+// all, just not as independent regression coverage for these two fixes
+// specifically -- see the FluffOS test's own comment for where that
+// coverage actually lives, and the further `dialect: dgd` test below it
+// for the one related, distinct gap this same audit surfaced (a
+// plausible "gate on `!= FluffOS`" implementation mistake that neither
+// this test nor the FluffOS one would catch, since both dialects agree
+// with either phrasing).
 static void testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFiredUnderLdmudDialect() {
     ObjectVarHarness harness("dialect: ldmud\n");
     amlp::Scheduler scheduler(harness.vm);
@@ -18174,6 +18200,22 @@ static void testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFiredUnd
 // "dialect: fluffos" (this harness's own default, unset here on purpose to
 // also confirm that default matches explicit FluffOS behavior) both
 // reset() and clean_up() must fire this same cycle.
+//
+// This is the test that actually carries independent regression coverage
+// for *both* of 2026-08-20's real fixes (see the sibling LDMud test's own
+// coverage note directly above for the full audit): reverting either the
+// dialect gate alone, or the readyForCleanUp-latched-before-reset ordering
+// fix alone, each independently flips cleanUpCalls from the expected 1
+// down to 0 here (confirmed by reverting each in isolation, rebuilding,
+// and re-running this exact test). That the two fixes share one test
+// rather than getting one apiece is not accidental undercoverage; it is
+// the actual shape of the bug: a real reset() call can only ever move
+// timeOfRef() forward, never backward, so the ordering fix has no
+// observable effect except in exactly the same "clean_up() should still
+// fire despite reset() firing this same tick, under a dialect where
+// suppression must not apply" window the dialect gate also governs --
+// there is no black-box scenario where one fix's reversion is visible
+// and the other's is not.
 static void testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect() {
     ObjectVarHarness harness; // default dialect: fluffos
     amlp::Scheduler scheduler(harness.vm);
@@ -18202,6 +18244,53 @@ static void testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealRes
     assert(obj->willCleanUp() == false); // real: falsy return clears O_WILL_CLEAN_UP, same as any other clean_up() call
 
     std::cout << "testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect OK\n";
+}
+
+// A third dialect, added 2026-08-20 by the same coverage audit as the two
+// tests directly above: not additional coverage for either of that
+// session's own two real fixes (the audit proved no black-box scenario
+// distinguishes them beyond what the FluffOS test already does), but a
+// real, distinct, adjacent regression this exact scenario can catch and
+// the other two cannot -- a plausible future "simplification" of the
+// dialect check from an allowlist ("suppress only when dialect ==
+// LpcDialect::LdMud") to a denylist ("suppress whenever dialect !=
+// LpcDialect::FluffOS") would still pass both the LDMud test above (LDMud
+// suppresses either way) and the FluffOS test above (FluffOS does not
+// suppress either way) -- DGD is the one dialect where the two phrasings
+// disagree, so only a DGD-dialect run of this same scenario can tell them
+// apart. DGD has no real reset()/clean_up() mechanism of its own (this
+// row's own real-driver research never found one), so this is not
+// asserting any real DGD behavior -- purely a guard against the allowlist
+// silently regressing into a denylist, the same "correct rather than
+// merely coincidentally passing" standard the sibling tests apply.
+static void testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderDgdDialect() {
+    ObjectVarHarness harness("dialect: dgd\n");
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/rc_both_dgd.c",
+        "int resetCalls; int cleanUpCalls;\n"
+        "void reset() { resetCalls = resetCalls + 1; }\n"
+        "int clean_up(int arg) { cleanUpCalls = cleanUpCalls + 1; return 0; }\n"
+        "int queryResetCalls() { return resetCalls; }\n"
+        "int queryCleanUpCalls() { return cleanUpCalls; }\n");
+    auto obj = harness.objects.cloneObject("/rc_both_dgd");
+    assert(obj != nullptr);
+
+    // Due for a real (non-virtual) reset...
+    obj->armReset(std::chrono::seconds{0});
+    obj->setResetState(false);
+    // ...and independently also "due" for clean_up.
+    obj->setTimeOfRef(std::chrono::steady_clock::now() - std::chrono::hours(2));
+
+    scheduler.tickResetsAndCleanup();
+
+    amlp::Value resetCalls = harness.vm.callFunction(obj, "queryResetCalls", {});
+    amlp::Value cleanUpCalls = harness.vm.callFunction(obj, "queryCleanUpCalls", {});
+    assert(std::get<int64_t>(resetCalls.data) == 1);
+    assert(std::get<int64_t>(cleanUpCalls.data) == 1); // NOT suppressed under DGD either -- only LDMud suppresses
+    assert(obj->willCleanUp() == false);
+
+    std::cout << "testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderDgdDialect OK\n";
 }
 
 // ROADMAP.md row 1.9's own first real slice: real LDMud's own names for
@@ -21985,6 +22074,7 @@ int main() {
     testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyReturn();
     testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFiredUnderLdmudDialect();
     testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect();
+    testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderDgdDialect();
     testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
     testMValuesBareFormReturnsColumnZeroValues();
     testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();
