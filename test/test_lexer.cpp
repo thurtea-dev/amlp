@@ -17739,6 +17739,174 @@ static void testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError() {
     std::cout << "testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError OK\n";
 }
 
+// --- privilege_violation() (Phase 1, row 1.7/1.8) --------------------------
+// Real interpret.c:8492-8722's shared "trust bypass, apply, interpret the
+// result" core (VM::privilegeViolation()), exercised through its first
+// two real trigger points: bind_lambda()'s cross-object form
+// (closure.c:6394-6400) and set_driver_hook() (simulate.c:5091-5095).
+
+// Real "if (!is_current_object(*sp) && !privilege_violation(...))
+// { free_svalue(sp--); return sp; }" (closure.c:6396-6400): a denied
+// cross-object bind is not an error, it silently hands back the original
+// closure, still unbound.
+static void testBindLambdaCrossObjectDeniedByRealPrivilegeViolationReturnsClosureUnharmed() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        // Real op text confirmed via denying everything except what it
+        // explicitly names -- "bind_lambda" is deliberately not one of
+        // them, so the default (-1, deny) applies.
+        "int privilege_violation(string what, mixed who, mixed arg) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/bl_other.c", "void create() {}\n");
+    harness.writeFile("/bl_caller.c",
+        "mixed run(object other) {\n"
+        "    mixed c = unbound_lambda(({'x}), ({#'sizeof, 'x}));\n"
+        "    return bind_lambda(c, other);\n"
+        "}\n");
+    auto other = harness.objects.cloneObject("/bl_other");
+    auto caller = harness.objects.cloneObject("/bl_caller");
+    assert(other != nullptr && caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "run", {amlp::Value(other)});
+    auto* closurePtr = std::get_if<std::shared_ptr<amlp::Closure>>(&result.data);
+    assert(closurePtr != nullptr && *closurePtr != nullptr);
+    // Still unbound -- the real "Return closure unharmed" case, denial is
+    // not an error and does not rebind.
+    assert((*closurePtr)->unboundUntilBound == true);
+
+    std::cout << "testBindLambdaCrossObjectDeniedByRealPrivilegeViolationReturnsClosureUnharmed OK\n";
+}
+
+// Real grant path: a master privilege_violation() returning a positive
+// number genuinely rebinds the closure to the other object, matching
+// real "ob = *sp; ..." once the check passes -- inspected directly on
+// the returned Closure (owner + unboundUntilBound) rather than through
+// funcall(), since a nested "#'name" inside an unbound_lambda's own
+// quoted body is a separately pre-built CLOSURE_LFUN pinned to whichever
+// object's source literally wrote it (VM::evalQuotedLambdaNode()'s own
+// "callClosure(*headClosure, ...)"), not something bind_lambda()'s own
+// rebind of the *outer* wrapper closure would ever move -- confirmed
+// while writing this test (an earlier draft assumed rebinding would
+// change which object's own same-named function a nested "#'name"
+// resolves to; it does not, real semantics ported correctly here even
+// though this test's own first draft got it backwards).
+static void testBindLambdaCrossObjectGrantedByRealPrivilegeViolationRebindsTheClosure() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) {\n"
+        "    return what == \"bind_lambda\" ? 1 : -1;\n"
+        "}\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/bl2_other.c", "void create() {}\n");
+    harness.writeFile("/bl2_caller.c",
+        "mixed run(object other) {\n"
+        "    mixed c = unbound_lambda(({'x}), ({#'sizeof, 'x}));\n"
+        "    return bind_lambda(c, other);\n"
+        "}\n");
+    auto other = harness.objects.cloneObject("/bl2_other");
+    auto caller = harness.objects.cloneObject("/bl2_caller");
+    assert(other != nullptr && caller != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(caller, "run", {amlp::Value(other)});
+    auto* closurePtr = std::get_if<std::shared_ptr<amlp::Closure>>(&result.data);
+    assert(closurePtr != nullptr && *closurePtr != nullptr);
+    assert((*closurePtr)->unboundUntilBound == false);
+    assert((*closurePtr)->owner.lock() == other);
+
+    std::cout << "testBindLambdaCrossObjectGrantedByRealPrivilegeViolationRebindsTheClosure OK\n";
+}
+
+// Real "!svp" branch (interpret.c:8570): a master with no
+// privilege_violation() lfun at all is a hard error, same as a genuine
+// violation -- not a silent grant and not a silent deny.
+static void testBindLambdaCrossObjectWithNoMasterPrivilegeViolationLfunHardErrors() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c", "void create() {}\n"); // no privilege_violation() lfun at all
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/bl3_other.c", "void create() {}\n");
+    harness.writeFile("/bl3_caller.c",
+        "mixed run(object other) {\n"
+        "    mixed c = unbound_lambda(({'x}), ({#'sizeof, 'x}));\n"
+        "    return bind_lambda(c, other);\n"
+        "}\n");
+    auto other = harness.objects.cloneObject("/bl3_other");
+    auto caller = harness.objects.cloneObject("/bl3_caller");
+    assert(other != nullptr && caller != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(caller, "run", {amlp::Value(other)});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        assert(std::string(e.what()).find("privilege violation") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testBindLambdaCrossObjectWithNoMasterPrivilegeViolationLfunHardErrors OK\n";
+}
+
+// Real trust bypass (interpret.c:8552-8553): current_object == master_ob
+// grants immediately, no apply at all -- confirmed by a master with no
+// privilege_violation() lfun (which would otherwise hard error, see the
+// test just above) still succeeding when the master itself is the caller.
+static void testPrivilegeViolationTrustBypassGrantsTheMasterObjectItselfWithNoLfunNeeded() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n" // no privilege_violation() lfun at all
+        "mixed run(object other) {\n"
+        "    mixed c = unbound_lambda(({'x}), ({#'sizeof, 'x}));\n"
+        "    mixed bound = bind_lambda(c, other);\n"
+        "    return funcall(bound, ({1,2,3}));\n"
+        "}\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/tb_other.c", "void create() {}\n");
+    auto other = harness.objects.cloneObject("/tb_other");
+    assert(other != nullptr);
+
+    auto master = harness.objects.masterObject();
+    assert(master != nullptr);
+    amlp::Value result = harness.vm.callFunction(master, "run", {amlp::Value(other)});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 3);
+
+    std::cout << "testPrivilegeViolationTrustBypassGrantsTheMasterObjectItselfWithNoLfunNeeded OK\n";
+}
+
+// Real "free_svalue(sp); return sp - 2;" denial path (simulate.c:5093-
+// 5094): set_driver_hook() silently leaves the hook unchanged on denial,
+// no error, no side effect -- confirmed via move_object() still falling
+// back to hardcoded logic afterward (the same observable check
+// testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet already uses),
+// proving the hook was genuinely never stored.
+static void testSetDriverHookDeniedByRealPrivilegeViolationSilentlyLeavesHookUnchanged() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/sdhd_room.c", "int isRoom() { return 1; }\n");
+    harness.writeFile("/sdhd_mover.c",
+        "void install() {\n"
+        "    set_driver_hook(0, unbound_lambda(({'item,'dest}), ({#'sizeof,'item})));\n"
+        "}\n"
+        "void doMove(mixed dest) { move_object(dest); }\n");
+    auto room = harness.objects.cloneObject("/sdhd_room");
+    auto mover = harness.objects.cloneObject("/sdhd_mover");
+    assert(room != nullptr && mover != nullptr);
+
+    harness.vm.callFunction(mover, "install", {});
+    // Hook was denied, so still 0 (void) -- confirmed directly rather
+    // than only inferred from move_object()'s own fallback behavior.
+    assert(harness.vm.getDriverHook(0).isVoid());
+
+    harness.vm.callFunction(mover, "doMove", {amlp::Value(room)});
+    assert(mover->environment().lock() == room);
+
+    std::cout << "testSetDriverHookDeniedByRealPrivilegeViolationSilentlyLeavesHookUnchanged OK\n";
+}
+
 // ROADMAP.md row 1.7/1.8's own set_driver_hook() investigation: real
 // simulate.c:5082-5088's own "Bad hook number" errorf(), exact real
 // range 0..NUM_DRIVER_HOOKS-1 (NUM_DRIVER_HOOKS == 32, real mudlib/sys/
@@ -17790,6 +17958,19 @@ static void testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage() {
 // unbound_lambda() work) actually runs and performs the move.
 static void testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun() {
     ObjectVarHarness harness("dialect: ldmud\n");
+    // set_driver_hook()'s own real privilege_violation() gate (real as of
+    // 2026-08-20, ROADMAP.md row 1.7/1.8) needs a real driver master
+    // object with a permissive privilege_violation() lfun -- the
+    // established set_hide()/shadow()-style harness pattern
+    // (loadMasterObject() + "/unused.c", see the shadow tests' own
+    // section header comment). Note this is a *different* object from
+    // /mh_master.c below: that one is just an ordinary mudlib object this
+    // test happens to name "master" (the hook installer), not this
+    // driver's own configured master_file.
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
     harness.writeFile("/mh_room.c", "int isRoom() { return 1; }\n");
     harness.writeFile("/mh_master.c",
         "mixed lastItem; mixed lastDest; mixed hookRanAsWhom;\n"
@@ -17890,6 +18071,15 @@ static void testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet() {
 // does not (matching real direction commands' own no-argument shape).
 static void testHModifyCommandRewritesBareAbbreviationToTheMappedFullVerb() {
     ObjectVarHarness harness("dialect: ldmud\n");
+    // set_driver_hook()'s own real privilege_violation() gate (real as of
+    // 2026-08-20, ROADMAP.md row 1.7/1.8) -- same permissive-master
+    // pattern as the H_MOVE_OBJECT0 test above; /hmc_mover.c below is an
+    // ordinary mudlib object, not this driver's own configured
+    // master_file.
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
     harness.writeFile("/hmc_room.c",
         "void init() { add_action(\"cmd_north\", \"north\"); }\n"
         "int cmd_north(string arg) { return 1; }\n");
@@ -22190,6 +22380,11 @@ int main() {
     testUnboundLambdaIsUncallableUntilBoundThenRunsHooksCsOwnQuotedCodeShape();
     testUnboundLambdaNestedQuotedCallMatchesHooksCsLoadUidsShape();
     testUnboundLambdaBodySymbolNotAmongParamsThrowsClearError();
+    testBindLambdaCrossObjectDeniedByRealPrivilegeViolationReturnsClosureUnharmed();
+    testBindLambdaCrossObjectGrantedByRealPrivilegeViolationRebindsTheClosure();
+    testBindLambdaCrossObjectWithNoMasterPrivilegeViolationLfunHardErrors();
+    testPrivilegeViolationTrustBypassGrantsTheMasterObjectItselfWithNoLfunNeeded();
+    testSetDriverHookDeniedByRealPrivilegeViolationSilentlyLeavesHookUnchanged();
     testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage();
     testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun();
     testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet();

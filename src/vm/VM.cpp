@@ -743,6 +743,49 @@ std::shared_ptr<LpcObject> VM::simulEfunObject() const {
     return objects_.simulEfunObject();
 }
 
+bool VM::privilegeViolation(const std::string& what, std::vector<Value> args) {
+    // real "if (get_current_object() == master_ob) return MY_TRUE; if
+    // (get_current_object() == simul_efun_object) return MY_TRUE;"
+    // (interpret.c:8552-8553 and identical in the other three real
+    // wrappers) -- checked before anything else, no apply at all.
+    auto caller = currentObject();
+    auto master = masterObject();
+    if (caller && (caller == master || caller == simulEfunObject())) return true;
+
+    // real "!svp" branch (interpret.c:8570): no privilege_violation()
+    // lfun on the master at all is a hard error, same as a genuine
+    // violation, not a silent grant or a silent deny. See this method's
+    // own VM.hpp comment for why this is checked explicitly rather than
+    // trusting applyMaster()'s own Value{} return, which cannot tell
+    // "missing lfun" apart from "lfun returned 0" on its own.
+    if (!master || !functionExists(master, "privilege_violation")) {
+        throw LpcRuntimeError("privilege violation: " + what);
+    }
+
+    std::vector<Value> callArgs;
+    callArgs.reserve(args.size() + 2);
+    callArgs.emplace_back(what);
+    callArgs.emplace_back(caller);
+    for (auto& a : args) callArgs.push_back(std::move(a));
+
+    Value result = applyMaster("privilege_violation", std::move(callArgs));
+
+    // real "svp->type != T_NUMBER || svp->u.number < 0" branch
+    // (interpret.c:8570): wrong return type or a negative number is also
+    // a hard error, exactly like a missing lfun -- only a real T_NUMBER
+    // >= 0 return is a legitimate answer.
+    if (!std::holds_alternative<int64_t>(result.data)) {
+        throw LpcRuntimeError("privilege violation: " + what);
+    }
+    int64_t n = std::get<int64_t>(result.data);
+    if (n < 0) {
+        throw LpcRuntimeError("privilege violation: " + what);
+    }
+    // real "return svp->u.number > 0;" -- exactly 0 is a real, valid
+    // "gently denied" answer, not an error.
+    return n > 0;
+}
+
 std::shared_ptr<LpcObject> VM::findObject(const std::string& filename) const {
     // See VM.hpp's own comment: real find_object() compiles+loads on a
     // miss, which is exactly ObjectManager::loadObject()'s existing
@@ -1004,28 +1047,37 @@ const std::string& VM::mudName() const {
 
 // LDMud driver_hook (ROADMAP.md row 1.7/1.8). Range validation matches
 // real f_set_driver_hook()'s own "Bad hook number" errorf() exactly
-// (simulate.c:5082-5088); everything past that -- real per-hook type
-// validation against hook_type_map[] (prolang.y:195-229), the real
-// privilege_violation("set_driver_hook", ...) authorization gate
-// (simulate.c:5091, this driver has zero privilege_violation() call
-// sites anywhere yet), and the special "take ownership of an unbound
-// lambda even for a hook whose type map doesn't otherwise allow
-// closures, immediately rebinding it to master_ob" case (simulate.c:
-// 5189-5203) -- is deliberately not replicated this slice: real
-// per-hook type mismatches simply misbehave at the point of actual
-// dispatch instead of being rejected up front (the same permissive-
-// storage precedent m_values() used before column validation existed),
-// no caller besides the master object has any real reason to call this
-// efun at all in this mudlib's own confirmed corpus, and the special
-// eager-rebind-to-master case is a pure optimization in real LDMud --
-// H_MOVE_OBJECT0's own real trigger (object.c's move_object(), see
-// moveObject()'s own comment below) unconditionally rebinds to
-// current_object on every single call regardless of what it was bound
-// to at set_driver_hook() time, so skipping the eager bind here changes
-// no observable behavior. Registered unconditionally in EfunTable.cpp,
-// not gated on dialect, matching this table's own established
-// convention (unshadow()'s own comment: efun availability is never
-// withheld by dialect here).
+// (simulate.c:5082-5088); the real privilege_violation("set_driver_hook",
+// this_object(), what) authorization gate (simulate.c:5091, function
+// header comment at 5070 -- confirmed the real call only ever passes the
+// hook *number* as extra data, not the value being set, despite
+// doc/master/privilege_violation's own "arg2" text; that doc page is
+// stale here, same as its now-dead "enable_telnet"/"set_limits" entries)
+// is real as of 2026-08-20 (ROADMAP.md row 1.7/1.8's own
+// privilege_violation() scoping investigation), wired at the
+// EfunTable.cpp call site via VM::privilegeViolation() rather than here,
+// matching that helper's own placement next to applyMaster(). Range
+// validation (this method) still runs first, exactly like real code's
+// own ordering (simulate.c:5082 before :5091). What is still deliberately
+// not replicated -- real per-hook type validation against
+// hook_type_map[] (prolang.y:195-229), and the special "take ownership
+// of an unbound lambda even for a hook whose type map doesn't otherwise
+// allow closures, immediately rebinding it to master_ob" case
+// (simulate.c:5189-5203) -- real per-hook type mismatches simply
+// misbehave at the point of actual dispatch instead of being rejected up
+// front (the same permissive-storage precedent m_values() used before
+// column validation existed), and the special eager-rebind-to-master
+// case is a pure optimization in real LDMud -- H_MOVE_OBJECT0's own real
+// trigger (object.c's move_object(), see moveObject()'s own comment
+// below) unconditionally rebinds to current_object on every single call
+// regardless of what it was bound to at set_driver_hook() time, so
+// skipping the eager bind here changes no observable behavior.
+// Registered unconditionally in EfunTable.cpp, not gated on dialect,
+// matching this table's own established convention (unshadow()'s own
+// comment: efun availability is never withheld by dialect here) --
+// real FluffOS has no set_driver_hook() efun at all (confirmed by grep,
+// zero hits in the vendored fluffos-2.9-ds2.08 tree), so there is no
+// real FluffOS behavior this privilege gate could ever conflict with.
 Value VM::getDriverHook(int what) const {
     if (what < 0 || what >= kNumDriverHooks) return Value{};
     return driverHooks_[static_cast<size_t>(what)];

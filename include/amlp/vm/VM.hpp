@@ -155,6 +155,40 @@ public:
     // "current_object == simul_efun_ob" guard (replace_program.c).
     std::shared_ptr<LpcObject> simulEfunObject() const;
 
+    // real LDMud privilege_violation()/privilege_violation2()/
+    // privilege_violation4()/privilege_violation_n()
+    // (temp/ldmud/src/interpret.c:8492-8722), collapsed into one shared
+    // helper: all four real wrappers are thin shells around the identical
+    // "trust bypass, apply master's privilege_violation() lfun, interpret
+    // the result" core, differing only in which/how-many extra data args
+    // get pushed before the call -- callers assemble their own op-
+    // specific `args` (matching each real call site's own exact shape,
+    // e.g. call_out_info's bare `0`, bind_lambda's target object) and this
+    // does the shared part. `what` is the real op name (e.g.
+    // "bind_lambda", matching doc/master/privilege_violation's own
+    // per-op catalog); `args` becomes everything in the real master apply
+    // after `who` (current_object, inserted automatically here exactly
+    // like real code's own unconditional `push_current_object`).
+    //
+    // Real trust bypass (interpret.c:8552-8553, identical in all four):
+    // current_object == master_ob or == simul_efun_object grants
+    // immediately, no apply at all.
+    //
+    // Real result interpretation (interpret.c:8570-8578, identical in all
+    // four): a return > 0 grants (true); a *missing* lfun, a non-number
+    // return, or a *negative* number all raise a hard "privilege
+    // violation: %s" error (interpret.c:8573) -- a return of exactly 0
+    // does NOT error, it is real code's own "gently denied" case
+    // (interpret.c:8504-8505's own doc comment) and returns false with no
+    // throw. This driver's own callFunction()/applyMaster() cannot
+    // distinguish "master has no privilege_violation() lfun at all" from
+    // "it exists and explicitly returned 0" at the Value{} level (both
+    // collapse to the same default-constructed Value{}), so
+    // functionExists() is checked explicitly first here, faithfully
+    // reproducing real code's own "!svp" branch rather than losing it to
+    // that collapse.
+    bool privilegeViolation(const std::string& what, std::vector<Value> args);
+
     // real FluffOS's find_object(): an already-loaded lookup that falls
     // back to *compiling and loading the file on a miss*
     // (simulate.c's find_object(): "if ((ob = lookup_object_hash(

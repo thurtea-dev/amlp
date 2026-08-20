@@ -2855,11 +2855,12 @@ void registerCoreEfuns() {
     // privilege check at all (real v_bind_lambda(): "If the argument ob
     // is omitted, the closure is bound to this_object()"). The 2-
     // argument cross-object form gates on a real privilege_violation()
-    // call in real LDMud (closure.c:6394-6396) that this driver does not
-    // implement at all yet (confirmed by grep, zero call sites anywhere)
-    // -- honestly rejected here rather than silently allowing an
-    // unauthorized cross-object bind or silently pretending the
-    // privilege check always passes.
+    // call in real LDMud (closure.c:6394-6396) -- real and wired as of
+    // 2026-08-20, ROADMAP.md row 1.7/1.8's own privilege_violation()
+    // scoping investigation, ported via the shared VM::privilegeViolation()
+    // helper (VM.hpp/VM.cpp), the first real trigger point this driver
+    // implements. See the call site just below for the exact real arg
+    // shape and denial behavior.
     t.registerEfun("bind_lambda", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty()) {
             throw LpcRuntimeError("bind_lambda() requires at least 1 argument");
@@ -2875,10 +2876,22 @@ void registerCoreEfuns() {
             if (!obPtr || !*obPtr) {
                 throw LpcRuntimeError("Bad argument 2 to bind_lambda()");
             }
+            // real "if (!is_current_object(*sp) && !privilege_violation(
+            // STR_BIND_LAMBDA, sp, sp)) { free_svalue(sp--); return sp; }"
+            // (closure.c:6396-6400) -- the check only runs when ob is
+            // given AND differs from current_object (the common
+            // "bind to myself" case, already handled by the `target =
+            // *obPtr` fallthrough below, never even reaches the apply);
+            // a denial (not an error, just a false/"0" answer) is not an
+            // error either, it silently hands back the original closure
+            // untouched, exactly like real code's own "Return closure
+            // unharmed" comment. Real extra data arg is `ob` itself
+            // (`sp`, the target object) -- matches this driver's own
+            // *obPtr directly.
             if (*obPtr != vm.currentObject()) {
-                throw LpcRuntimeError(
-                    "bind_lambda(): binding to another object requires "
-                    "privilege_violation(), not implemented in this driver");
+                if (!vm.privilegeViolation("bind_lambda", {Value(*obPtr)})) {
+                    return Value(closure);
+                }
             }
             target = *obPtr;
         } else {
@@ -2906,10 +2919,12 @@ void registerCoreEfuns() {
     // master.c's create(), or an explicit eval/apply) rather than
     // relying on that automatic real wiring. See VM::setDriverHook()'s
     // own comment for exactly which real validation this deliberately
-    // does not replicate (per-hook type-map checking, the privilege_
-    // violation() authorization gate, the eager unbound-lambda-to-
-    // master rebind optimization) and why each is a safe, flagged
-    // simplification rather than a silent gap. Registered
+    // does not replicate (per-hook type-map checking, the eager
+    // unbound-lambda-to-master rebind optimization) and why each is a
+    // safe, flagged simplification rather than a silent gap; the
+    // privilege_violation() authorization gate itself is real as of
+    // 2026-08-20 (ROADMAP.md row 1.7/1.8's own investigation), wired
+    // right below via VM::privilegeViolation(). Registered
     // unconditionally, matching this table's own established
     // dialect-neutral-availability convention.
     t.registerEfun("set_driver_hook", [](VM& vm, std::vector<Value>& args) -> Value {
@@ -2920,6 +2935,29 @@ void registerCoreEfuns() {
             throw LpcRuntimeError("Bad argument 1 to set_driver_hook()");
         }
         int64_t what = std::get<int64_t>(args[0].data);
+        // real "n = sp[-1].u.number; if (n < 0 || n >= NUM_DRIVER_HOOKS)
+        // errorf(\"Bad hook number...\");" (simulate.c:5080-5088) runs
+        // BEFORE the privilege check below (simulate.c:5091) -- checked
+        // explicitly here, ahead of privilegeViolation(), rather than
+        // relying on VM::setDriverHook()'s own later range check, to
+        // match that real ordering exactly (a real out-of-range call
+        // must fail with "Bad hook number", not a privilege-violation
+        // error, regardless of what the master's own privilege_violation()
+        // lfun would have said).
+        if (what < 0 || what >= VM::kNumDriverHooks) {
+            throw LpcRuntimeError(
+                "Bad hook number: " + std::to_string(what) + ", expected 0.." +
+                std::to_string(VM::kNumDriverHooks - 1));
+        }
+        // real "if (!privilege_violation(STR_SET_DRIVER_HOOK, sp-1, sp))
+        // { free_svalue(sp); return sp - 2; }" (simulate.c:5091-5095).
+        // Real extra data arg is the hook number itself, `what` (see
+        // this efun's own header comment on why not `arg` too). A
+        // denial is not an error -- real code silently returns void
+        // with the hook left unchanged, ported here as a silent no-op.
+        if (!vm.privilegeViolation("set_driver_hook", {Value(what)})) {
+            return Value{};
+        }
         vm.setDriverHook(static_cast<int>(what), args[1]);
         return Value{};
     });
