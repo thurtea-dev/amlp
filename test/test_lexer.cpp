@@ -18125,14 +18125,18 @@ static void testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyR
     std::cout << "testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyReturn OK\n";
 }
 
-// real LDMud backend.c's own "!bResetCalled" gate (backend.c:1403): a
+// real LDMud backend.c's own "!bResetCalled" gate (backend.c:1402-1406): a
 // real reset() firing this same cycle suppresses clean_up() for the same
-// object this same cycle, even if it would otherwise be due -- see
-// Scheduler::tickResetsAndCleanup()'s own comment for why LDMud's more
-// conservative rule is used here even though real FluffOS's own
-// ready_for_clean_up latch has no exact analog of this gate.
-static void testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFired() {
-    ObjectVarHarness harness;
+// object this same cycle, even if it would otherwise be due. Confirmed
+// dialect-specific to LDMud (2026-08-20 resolution of the prior session's
+// own open question, see Scheduler::tickResetsAndCleanup()'s own header
+// comment for the full citation on both real drivers): real FluffOS's own
+// ready_for_clean_up latch (backend.c:241, before its own reset_object()
+// call at backend.c:251) has no analog of this gate at all -- see the
+// sibling FluffOS-dialect test directly below this one, which proves the
+// opposite outcome from the identical setup.
+static void testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFiredUnderLdmudDialect() {
+    ObjectVarHarness harness("dialect: ldmud\n");
     amlp::Scheduler scheduler(harness.vm);
     harness.vm.setScheduler(&scheduler);
     harness.writeFile("/rc_both.c",
@@ -18155,10 +18159,49 @@ static void testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFired() 
     amlp::Value resetCalls = harness.vm.callFunction(obj, "queryResetCalls", {});
     amlp::Value cleanUpCalls = harness.vm.callFunction(obj, "queryCleanUpCalls", {});
     assert(std::get<int64_t>(resetCalls.data) == 1);
-    assert(std::get<int64_t>(cleanUpCalls.data) == 0); // suppressed this cycle
+    assert(std::get<int64_t>(cleanUpCalls.data) == 0); // suppressed this cycle, LDMud only
     assert(obj->willCleanUp() == true); // never actually called, so still armed
 
-    std::cout << "testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFired OK\n";
+    std::cout << "testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFiredUnderLdmudDialect OK\n";
+}
+
+// The FluffOS side of the same real divergence, identical setup to the
+// LDMud test directly above: real FluffOS's own look_for_objects_to_swap()
+// (backend.c:241-296) latches ready_for_clean_up before calling
+// reset_object(), then fires clean_up() unconditionally on that latched
+// value with no re-check of whether reset() actually ran -- confirmed by
+// reading backend.c directly, not assumed from LDMud's own shape. Under
+// "dialect: fluffos" (this harness's own default, unset here on purpose to
+// also confirm that default matches explicit FluffOS behavior) both
+// reset() and clean_up() must fire this same cycle.
+static void testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect() {
+    ObjectVarHarness harness; // default dialect: fluffos
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/rc_both_fluffos.c",
+        "int resetCalls; int cleanUpCalls;\n"
+        "void reset() { resetCalls = resetCalls + 1; }\n"
+        "int clean_up(int arg) { cleanUpCalls = cleanUpCalls + 1; return 0; }\n"
+        "int queryResetCalls() { return resetCalls; }\n"
+        "int queryCleanUpCalls() { return cleanUpCalls; }\n");
+    auto obj = harness.objects.cloneObject("/rc_both_fluffos");
+    assert(obj != nullptr);
+
+    // Due for a real (non-virtual) reset...
+    obj->armReset(std::chrono::seconds{0});
+    obj->setResetState(false);
+    // ...and independently also "due" for clean_up.
+    obj->setTimeOfRef(std::chrono::steady_clock::now() - std::chrono::hours(2));
+
+    scheduler.tickResetsAndCleanup();
+
+    amlp::Value resetCalls = harness.vm.callFunction(obj, "queryResetCalls", {});
+    amlp::Value cleanUpCalls = harness.vm.callFunction(obj, "queryCleanUpCalls", {});
+    assert(std::get<int64_t>(resetCalls.data) == 1);
+    assert(std::get<int64_t>(cleanUpCalls.data) == 1); // NOT suppressed under FluffOS, unlike LDMud above
+    assert(obj->willCleanUp() == false); // real: falsy return clears O_WILL_CLEAN_UP, same as any other clean_up() call
+
+    std::cout << "testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect OK\n";
 }
 
 // ROADMAP.md row 1.9's own first real slice: real LDMud's own names for
@@ -21940,7 +21983,8 @@ int main() {
     testTickResetsAndCleanupPermanentlyDisablesResetWhenNoResetFunctionExists();
     testTickResetsAndCleanupCallsRealCleanUpAndTracksItsReturnValue();
     testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyReturn();
-    testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFired();
+    testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFiredUnderLdmudDialect();
+    testTickResetsAndCleanupDoesNotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect();
     testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
     testMValuesBareFormReturnsColumnZeroValues();
     testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();

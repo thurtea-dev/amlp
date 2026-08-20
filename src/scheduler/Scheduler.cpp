@@ -1,4 +1,6 @@
 #include "amlp/scheduler/Scheduler.hpp"
+#include "amlp/config/Config.hpp"
+#include "amlp/dialect/LpcDialect.hpp"
 #include "amlp/net/Server.hpp"
 #include "amlp/object/LiveObjectRegistry.hpp"
 #include "amlp/object/LpcObject.hpp"
@@ -293,6 +295,40 @@ void Scheduler::tickResetsAndCleanup() {
     constexpr std::chrono::seconds kTimeToReset{1800};
     constexpr std::chrono::seconds kTimeToCleanUp{3600};
 
+    // Real FluffOS vs. real LDMud disagree on exactly one rule in this
+    // whole mechanism: whether a real (non-virtual) reset() firing this
+    // same cycle suppresses clean_up() this same cycle. This was
+    // previously hardcoded to LDMud's rule regardless of configured
+    // dialect; resolved 2026-08-20 by re-reading both real sources side
+    // by side rather than guessing which one "the more conservative
+    // choice" actually matches in practice:
+    //   - LDMud backend.c:1321 computes "time_since_ref = current_time -
+    //     obj->time_of_ref" into a local BEFORE its own reset block runs
+    //     (backend.c:1331-1387), then gates clean_up() on that same local
+    //     plus an explicit "!bResetCalled" (backend.c:1402-1406) -- a real
+    //     reset() firing this tick genuinely suppresses clean_up() this
+    //     same tick, confirmed directly, not inferred.
+    //   - Real FluffOS's own look_for_objects_to_swap() computes
+    //     "ready_for_clean_up" into a local at backend.c:241, ALSO before
+    //     its own reset_object() call at backend.c:251, but never gates
+    //     it on whether that reset_object() call actually ran -- the
+    //     comment right above the check even says so explicitly ("Check
+    //     reference time before reset() is called."), and clean_up() at
+    //     backend.c:267 fires whenever ready_for_clean_up and
+    //     O_WILL_CLEAN_UP hold, unconditionally. Confirmed no same-cycle
+    //     suppression exists in real FluffOS at all.
+    // Both real drivers agree that clean_up() *eligibility* itself must
+    // be decided from time_of_ref as it stood before reset() ran, not
+    // after -- reset()'s own call is an ordinary "touch" (this driver's
+    // own VM::callFunction() touchTimeOfRef(), matching real apply_low())
+    // that would otherwise reset the very clock clean_up() eligibility
+    // reads, silently defeating a same-cycle collision under either
+    // dialect if read after the fact. So `readyForCleanUp` below is
+    // latched from `obj->timeOfRef()` before the reset block runs, the
+    // same ordering both real drivers use, and only the *suppression* on
+    // top of that latched value is dialect-gated.
+    LpcDialect dialect = dialectFromString(vm_.config().dialect());
+
     auto now = std::chrono::steady_clock::now();
     // Snapshot every live object first, the same "decide who fires before
     // calling any LPC code" reasoning tickHeartbeats() above already
@@ -303,6 +339,14 @@ void Scheduler::tickResetsAndCleanup() {
     // that the same way.
     for (auto& obj : LiveObjectRegistry::all()) {
         if (obj->isDestructed()) continue;
+
+        // Latched before the reset block below runs -- see this method's
+        // own header comment just above for why (both real drivers do the
+        // same, backend.c:241 FluffOS / backend.c:1321 LDMud): reset()
+        // firing touches timeOfRef() like any other call into the object,
+        // which would otherwise silently and dialect-independently defeat
+        // this same-cycle reading if it were taken after the fact.
+        bool readyForCleanUp = obj->willCleanUp() && (now - obj->timeOfRef()) > kTimeToCleanUp;
 
         // ------ Reset ------
         // Real backend.c's own due-check ("obj->time_reset && obj->
@@ -356,17 +400,17 @@ void Scheduler::tickResetsAndCleanup() {
         }
 
         // ------ Clean Up ------
-        // Real backend.c: only when O_WILL_CLEAN_UP is still set, enough
-        // time has passed since the last touch, and (LDMud specifically,
-        // object.c:1403/backend.c:1403) not on the same cycle a real
-        // reset() just fired for this object -- real FluffOS's own
-        // ready_for_clean_up is latched before its own reset check runs
-        // each cycle so it has no exact analog of this same-cycle gate,
-        // but LDMud's is used here since it is the more conservative,
-        // less surprising choice (never double-touch an object in one
-        // tick) and both real drivers agree on every other rule below.
-        if (obj->willCleanUp() && !resetCalledThisCycle
-            && (now - obj->timeOfRef()) > kTimeToCleanUp) {
+        // Real backend.c: only when O_WILL_CLEAN_UP was still set and
+        // enough time had passed since the last touch as of the top of
+        // this iteration (readyForCleanUp, latched above) -- plus, real
+        // LDMud only (backend.c:1402-1406's own "!bResetCalled"), not on
+        // the same cycle a real reset() just fired for this same object.
+        // Real FluffOS has no analog of that suppression at all (see this
+        // method's own header comment for the full backend.c citation on
+        // both sides), so this is now genuinely dialect-gated rather than
+        // hardcoded to LDMud's rule for every dialect.
+        bool suppressedBySameCycleReset = resetCalledThisCycle && dialect == LpcDialect::LdMud;
+        if (readyForCleanUp && !suppressedBySameCycleReset) {
             // Real "push_number(ob->flags & (O_CLONE) ? 0 : ob->prog->
             // ref)" (FluffOS, object.c:290) / equivalent LDMud
             // (O_CLONE|O_REPLACED -> 0, else prog->ref, backend.c:1425-1431)

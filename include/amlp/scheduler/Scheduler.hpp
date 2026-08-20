@@ -124,7 +124,12 @@ public:
     // rule (0 for a clone, else prog->ref) -- this is a real, dialect-
     // universal LPMud-family mechanism, not an LDMud-only hook, so this
     // method runs unconditionally, the same way tickHeartbeats() above
-    // does not gate on dialect either). See LpcObject::resetState()/
+    // does not gate on dialect either. One rule inside it *is* dialect-
+    // gated, though (real FluffOS and real LDMud genuinely disagree here):
+    // whether a real reset() firing this same cycle suppresses clean_up()
+    // this same cycle for the same object -- see tickResetsAndCleanup()'s
+    // own header comment in Scheduler.cpp for the full citation on both
+    // sides)). See LpcObject::resetState()/
     // willCleanUp()/isClone()/armReset()/timeOfRef()'s own header comments
     // in LpcObject.hpp for what each piece of per-object state here backs.
     // Deliberately public and directly callable, same reasoning as

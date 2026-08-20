@@ -3,6 +3,150 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-20 (a further session): resolved the prior session's own open
+same-cycle reset/clean_up dialect question (was hardcoded to LDMud's rule
+for every dialect, now genuinely `Config::dialect()`-gated, plus one
+latent dialect-independent ordering bug fixed along the way), ROADMAP row
+1.7 updated to reflect it, then continued the same evidence-based Phase 1
+re-ranking: row 1.9's own checkbox corrected to match its own already-
+recorded close-out (re-verified fresh, still zero real usage for its five
+deferred sub-items), and row 1.8 -- previously a completely blank
+placeholder -- properly investigated and documented for the first time,
+confirmed zero real corpus evidence for its own remaining `#'lfun::`/
+`#'sefun::`/`#'var::` scope and correctly left deferred rather than built
+speculatively (701 tests, up from 700).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules -- `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Dialect-gate resolution.** Read `Scheduler::tickResetsAndCleanup()`
+directly: the prior session's own same-cycle "a real reset() firing
+suppresses clean_up() this same tick" rule was hardcoded to LDMud's own
+`!bResetCalled` behavior (`backend.c:1402-1406`) for every dialect, not
+gated on `Config::dialect()` at all. Re-read both real sources side by
+side to confirm the actual divergence rather than trusting the prior
+session's own "more conservative choice" framing: real FluffOS
+`backend.c:241-267` (`look_for_objects_to_swap()`) computes
+`ready_for_clean_up` into a local *before* calling `reset_object()`
+(`backend.c:251`) and never re-checks it against whether that call
+actually ran ("Check reference time before reset() is called." -- the
+comment directly above the check). Confirmed no same-cycle suppression
+exists in real FluffOS at all, and confirmed this is a real,
+corpus-plausible collision, not a hypothetical one: reachable whenever
+`O_RESET_STATE` gets cleared by something that does not also touch
+`time_of_ref` (this driver's own `set_environment()`/`move_object()`
+fallback three-way `O_RESET_STATE` clear, `VM.cpp:1163-1176`, confirmed
+not to touch `timeOfRef()`).
+
+While fixing this, found and fixed one further, dialect-independent
+latent ordering bug in the same code: `readyForCleanUp` was read from
+`obj->timeOfRef()` *after* the reset block ran, but a real reset()'s own
+call touches `timeOfRef()` like any other call into the object
+(`VM::callFunction()`'s real `apply_low()`-equivalent touch) -- reading
+it post-reset would have silently defeated a same-cycle collision under
+*either* dialect even after adding the dialect flag, since the
+elapsed-time check would already read as "just touched." Both real
+drivers avoid exactly this by latching their own equivalent value
+(`ready_for_clean_up`/`time_since_ref`) *before* calling `reset_object()`
+each cycle (`backend.c:241` FluffOS, `backend.c:1321` LDMud) -- reproduced
+here the same way: `readyForCleanUp` is now latched at the top of each
+object's own iteration, before the reset block runs, and only the
+*suppression* on top of that latched value is gated on
+`dialect == LpcDialect::LdMud`.
+
+2 new regression tests replace the prior single one
+(`test/test_lexer.cpp`): `testTickResetsAndCleanupSkipsCleanUpOnTheSame
+CycleARealResetFiredUnderLdmudDialect` (same setup as before, now under
+an explicit `dialect: ldmud` harness) and `testTickResetsAndCleanupDoes
+NotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect`
+(identical setup, default FluffOS dialect, opposite outcome from
+identical inputs, proving the divergence is real and dialect-driven).
+701 tests passing (up from 700), zero regressions.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (`TIME_TO_RESET`/`TIME_TO_CLEAN_UP` temporarily shrunk to 4/6
+real seconds for one verification build, reverted immediately after,
+full suite re-confirmed passing at both settings): booted the real
+driver under both `dialect: fluffos` (default) and `dialect: ldmud` with
+the refactored code, confirmed no crash under either; a real scratch
+object cloned and moved into the real bundled `/single/start_room` (so a
+real `shared_ptr` reference from the room's own inventory kept it alive
+across separate eval connections -- the same live-object-lifetime lesson
+the prior session's own live verification had already surfaced) had its
+real `clean_up()` fire correctly via a genuine wall-clock timer under
+both dialects, with the correct real clone argument (`0`), confirming
+the refactored `readyForCleanUp` latch did not regress the ordinary
+(non-colliding) path under either dialect. One honest live-session loose
+end, not a code-correctness concern: the same scenario's own `reset()`
+did not fire within the observed window under either dialect
+(`resetCalls` stayed 0 while `cleanUpCalls` reached 1), identically
+reproduced under both dialects against byte-identical, unmodified
+reset-block code -- most likely an artifact of this specific interactive
+test setup (repeated eval connections independently touching the object)
+rather than a driver defect, since the exact same reset-firing mechanism
+is independently and deterministically confirmed correct by
+`testTickResetsAndCleanupCallsRealResetOnceDueAndNotInResetState` and 4
+other passing unit tests exercising it directly -- not chased further
+given the unit-level proof already stands, flagged here rather than
+silently omitted. Scratch object file and log removed before stopping
+both scratch processes, confirmed via `git status` that `mudlib/` is
+exactly as found.
+
+**Phase 1 re-ranking, continued.** Surveyed every remaining open Phase 1
+row (1.2, 1.3, 1.4, 1.8, 1.9, 1.16; DGD-only rows 1.11-1.15 deprioritized
+per this file's own 2026-08-18 scope note) against its own current cell
+text rather than trusting the checkbox alone. Found two real
+checkbox/cell mismatches, both corrected rather than picking a new
+speculative feature to build:
+
+Row 1.9 (LDMud mapping width): its own 2026-08-19 close-out text already
+said the real, evidenced work was done and its five remaining sub-items
+(`m_allocate`/`m_entry`/`m_reallocate`/`m_add`/`m_contains`,
+`([:width])`) were deferred on zero real corpus evidence -- but the
+checkbox itself was still `[ ]`. Re-verified the zero-evidence claim
+fresh rather than trusting it stale (the close-out's own explicit
+standing instruction): every fresh hit for any of those five is the
+LDMud driver's own test/doc/HISTORY/CHANGELOG tree, its own bundled
+`mud/lp-245` example mudlib (not one of this project's seven tracked
+real gameplay corpora), or its own `mudlib/deprecated/`-namespaced
+backward-compat stub definitions -- zero real game-content call sites.
+Checkbox corrected to `[x]`.
+
+Row 1.8 (`LDMud #'symbol references baked at construction`): found
+completely blank -- title only, no investigation ever recorded. Traced
+the gap to `PROMPT-ARCHIVE.md`'s own original `P1-B` prompt (its own
+stale framing per `CLAUDE.md`'s standing warning about that file),
+which had lumped rows 1.7 and 1.8 together as one task; the real
+`#'`-closure work that followed happened entirely under row 1.7's own
+cell across several later sessions, leaving row 1.8 never actually
+written up. Read real LDMud source directly (`doc/LPC/closures`,
+`closure.c`) to determine row 1.8's real remaining scope distinct from
+row 1.7's already-done bare-`#'name`/`#'efun::` work: `#'lfun::`/
+`#'sefun::` (reusable on the same forced-tier mechanism `#'efun::`
+already established) and `#'var::variable_name` (real `CLOSURE_IDENTIFIER`,
+a reference-to-a-global-variable closure kind, not a callable at all --
+`doc/LPC/closures:43`, `closure.c:450`/`524`/`977`/`1198`/`4178`).
+Re-checked real corpus usage fresh for all three (not reused from row
+1.7's own prior count): `grep -rn "#'var::"`/`"#'lfun::"`/`"#'sefun::"`
+across every corpus vendored in `temp/` -- zero real mudlib call sites
+for any of the three; the only hit anywhere is `temp/ldmud/HISTORY:226`,
+the driver's own changelog prose. Per this project's own repeatedly-
+applied zero-corpus-evidence discipline (row 1.7's own `bind_lambda()`
+stand-in rejected on the same grounds; row 1.9's own five deferred
+sub-items above), row 1.8 stays open and deferred rather than built
+speculatively -- now properly documented with real citations instead of
+left blank, so a future session does not have to re-derive this from
+scratch.
+
+No further open Phase 1 row (1.2, 1.3, 1.4, 1.16) turned up a new,
+real-evidence-backed, buildable gap this pass beyond what prior sessions
+had already investigated and correctly deferred (connect/disconnect,
+`rlimits`, the DGD `&ident(args)` closure syntax, the LDMud master-apply
+table's own remaining items) -- see each row's own cell for that already-
+recorded reasoning, none of it re-litigated here since nothing new was
+found to change it.
+
 **2026-08-20 (fresh session): row 1.7/1.8's `H_RESET`/`H_CLEAN_UP` real
 object-lifecycle slice picked and built after a fresh corpus comparison
 against the row's other live candidate (the three remaining
