@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 namespace amlp {
@@ -775,6 +776,7 @@ std::shared_ptr<LpcObject> ObjectManager::loadObject(const std::string& rawFilen
             return nullptr;
         }
     }
+    armResetAndCleanup(obj);
 
     return obj;
 }
@@ -796,6 +798,13 @@ std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFile
     auto obj = std::make_shared<LpcObject>(filename, program);
     LiveObjectRegistry::add(obj);
     initPrivsForObject(obj, filename);
+    // real simulate.c's own "new_ob->flags |= O_CLONE | O_WILL_CLEAN_UP;"
+    // (clone_object(), simulate.c:2448) -- O_CLONE set unconditionally,
+    // right alongside O_WILL_CLEAN_UP, at construction, not deferred to
+    // armResetAndCleanup() below (which only sets the willCleanUp() half
+    // for both loadObject() and cloneObject() uniformly). See
+    // LpcObject::isClone()'s own header comment for what this backs.
+    obj->setIsClone(true);
 
     if (vm_) {
         try {
@@ -806,6 +815,7 @@ std::shared_ptr<LpcObject> ObjectManager::cloneObject(const std::string& rawFile
             return nullptr;
         }
     }
+    armResetAndCleanup(obj);
 
     return obj;
 }
@@ -1039,6 +1049,29 @@ void ObjectManager::reloadObject(const std::shared_ptr<LpcObject>& obj,
                        << obj->filename() << ": " << e.what() << "\n";
         }
     }
+    // real reset_object(obj, H_CREATE_OB|H_CREATE_CLONE, 0) runs again as
+    // part of the same real call_create() this reload just re-ran (object.c's
+    // own reload_object() calls call_create() exactly the way a fresh
+    // load/clone does) -- so this object's own reset/clean_up timers are
+    // rearmed the same way, not left at whatever they were before the
+    // reload. isClone() is deliberately left untouched: reload_object()
+    // does not change O_CLONE in real code either, only re-runs
+    // initializers/create().
+    if (!obj->isDestructed()) armResetAndCleanup(obj);
+}
+
+void ObjectManager::armResetAndCleanup(const std::shared_ptr<LpcObject>& obj) {
+    if (!obj || obj->isDestructed()) return;
+    // Real TIME_TO_RESET default, 1800 seconds -- see this method's own
+    // header comment for the exact real citation. Kept local to this one
+    // call site and Scheduler::tickResetsAndCleanup()'s own reschedule
+    // (not a shared header constant): this driver's own established
+    // convention for real driver-hook-number/timing constants is a small
+    // locally-scoped citation at each real use site rather than a central
+    // header (see VM.cpp's own kHModifyCommand/kHMoveObject0/1 for the
+    // same pattern with hook numbers).
+    obj->armReset(std::chrono::seconds{1800});
+    obj->setWillCleanUp(true);
 }
 
 } // namespace amlp

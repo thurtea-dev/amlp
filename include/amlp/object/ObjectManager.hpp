@@ -177,6 +177,23 @@ private:
     // driver has run yet depends on the master object's own privs.
     void initPrivsForObject(const std::shared_ptr<LpcObject>& obj, const std::string& filename);
 
+    // real reset_object(ob, H_CREATE_OB|H_CREATE_CLONE|H_CREATE_SUPER, 0)
+    // being called at load/clone time (object.c:800-885 -- see its own
+    // header comment on LpcObject::armReset() for the exact real formula
+    // this wraps) plus real simulate.c's own unconditional "ob->flags |=
+    // O_WILL_CLEAN_UP;" right after creation succeeds (simulate.c:2263,
+    // 2448). Called from loadObject()/cloneObject() after create() runs,
+    // only if the object survived it (a create() that self-destructs has
+    // nothing left to arm) -- matching real code's own "if (!(ob->flags &
+    // O_DESTRUCTED))" guard around the O_WILL_CLEAN_UP assignment
+    // (simulate.c:2261). Real TIME_TO_RESET default (1800 seconds,
+    // temp/ldmud/autoconf/configure's own "DEFAULTwith_time_to_reset=1800",
+    // confirmed against the real vendored ./configure --help text too:
+    // "--with-time-to-reset=SECONDS  default=1800") -- not yet exposed as
+    // a Config-tunable in this first slice, matching zero real corpus
+    // evidence of any mudlib overriding it via the configure() efun.
+    void armResetAndCleanup(const std::shared_ptr<LpcObject>& obj);
+
     Config& config_;
     VM* vm_ = nullptr;
     std::shared_ptr<LpcObject> master_;

@@ -3,6 +3,182 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-20 (fresh session): row 1.7/1.8's `H_RESET`/`H_CLEAN_UP` real
+object-lifecycle slice picked and built after a fresh corpus comparison
+against the row's other live candidate (the three remaining
+`unbound_lambda()`-based hooks, `H_LOAD_UIDS`/`H_CLONE_UIDS`/
+`H_INCLUDE_DIRS`); confirmed dialect-universal (real FluffOS has the
+identical mechanism under different flag names, not LDMud-only); a
+docs pivot mid-session (README/CREDITS/COMPARISON refresh, no driver
+names in public-facing docs anymore) handled in between (700 tests, up
+from 694).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules -- `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Corpus evidence comparison, before picking.** Re-ran both candidate
+counts from scratch across every vendored corpus in `temp/` rather than
+trusting the prior session's own tally: `reset()` is defined in 324
+real files (`ldmud` 164, `dead-souls` 55, `nightmare3` 75, `es2_mudlib`
+10, `core-lib` 10, `lima` 6, `wiz_tools` 2, `mudlib` 2), `clean_up()` in
+43 more, spread broadly across nearly every corpus, not concentrated in
+one file. `set_driver_hook(H_LOAD_UIDS|H_CLONE_UIDS|H_INCLUDE_DIRS)`, by
+contrast, has exactly 3 real call sites total, all three in one file
+(`core-lib/secure/master/hooks.c`, the same 3 of 14 hook calls already
+counted in row 1.7's own prior stock-take) -- the only other hits found
+anywhere are `temp/ldmud`'s own bundled driver test fixtures
+(`test/t-deprecated-sefuns/master.c`, `test/t-language/master.c`), the
+driver vendor's own regression scaffolding, not independent gameplay
+corpora. Confirmed real FluffOS has the identical reset/clean_up
+mechanism too (`temp/reference/fluffos-2.9-ds2.08/backend.c:196-302`'s
+own `look_for_objects_to_swap()`, `object.c:1896-1927`'s own
+`reset_object()`/`call_create()` -- same `O_WILL_RESET`/`O_RESET_STATE`/
+`O_WILL_CLEAN_UP` flags under different literal names, same
+`current_time + TIME_TO_RESET/2 + random_number(TIME_TO_RESET/2)`
+formula, same "no reset() in the object -> never call it again" quirk,
+same clean_up() argument rule), so this is a real, dialect-universal
+LPMud-family object-lifecycle mechanism, not an LDMud-only hook --
+picked over the UID hooks by an overwhelming margin on real evidence,
+not the "obvious next hook number" assumption.
+
+**What was built**, read in full before building: LDMud
+`backend.c:1330-1476` (`process_objects()`'s own reset/clean_up
+section) and `object.c:800-885` (`reset_object()`), cross-checked
+against real FluffOS `backend.c:196-302`/`object.c:1896-1927` for the
+same mechanism. Real `TIME_TO_RESET`/`TIME_TO_CLEAN_UP` defaults
+confirmed from `temp/ldmud/autoconf/configure`'s own
+`DEFAULTwith_time_to_reset=1800`/`DEFAULTwith_time_to_clean_up=3600`
+(seconds), matching the real `./configure --help` text too; `ALARM_TIME`
+default 2, already matching this driver's own pre-existing
+`Scheduler::kHeartbeatCycle`.
+
+`LpcObject` (`include/amlp/object/LpcObject.hpp`) gained `resetState()`/
+`willCleanUp()`/`isClone()`/`timeReset()`/`timeOfRef()` plus `armReset()`
+(the real randomized-delay formula, both drivers, cited above) and
+`disableReset()` (the real "permanently stop trying" quirk, represented
+as an unreachably-far-future `timeReset()` rather than a magic zero).
+`VM::callFunction()` now clears `resetState()` and touches `timeOfRef()`
+on every call into an object from outside (real `apply_low()`'s own
+"unset its reset status"/`time_of_ref` update, `interpret.c:20311-20345`)
+-- the real, universal "something touched this object" signal both the
+virtual-vs-real reset decision and clean_up eligibility key off.
+`set_environment()` (`EfunTable.cpp`) and `VM::moveObject()`'s own
+hardcoded fallback both gained the matching real three-way
+`O_RESET_STATE` clear (dest/item/old-super, `object.c:5188-5198`).
+`ObjectManager` gained `armResetAndCleanup()`, called after `create()`
+succeeds in `loadObject()`/`cloneObject()`/`reloadObject()` (standing in
+for real `reset_object(ob, H_CREATE_OB|H_CREATE_CLONE, 0)` always
+running at creation) -- `cloneObject()` also sets the new `isClone()`
+flag unconditionally, matching real `O_CLONE`.
+
+New `Scheduler::tickResetsAndCleanup()`, gated by the same real
+`kHeartbeatCycle` 2-second window `ALARM_TIME`'s own real doc comment
+says reset/clean_up genuinely share with heart_beat -- dispatches
+through `driverHooks_[H_RESET]`/`driverHooks_[H_CLEAN_UP]` when set to
+a string, falling back to the literal `"reset"`/`"clean_up"` names
+otherwise, matching both real corpus's own actual configured hook value
+(`core-lib/secure/master/hooks.c`) and real FluffOS's own fixed
+`APPLY_RESET`/`APPLY_CLEAN_UP` names exactly. The real closure-hook form
+is honestly left unimplemented (zero corpus evidence, the same stance
+`H_MODIFY_COMMAND`'s own T_CLOSURE/T_STRING gap already took last
+session). One real, deliberate divergence between the two real drivers,
+flagged rather than silently picked: LDMud's own same-cycle "a real
+reset() firing suppresses clean_up() this same tick" gate (`!bResetCalled`,
+`backend.c:1403`) is used here even though real FluffOS's own
+`ready_for_clean_up` latch has no exact analog -- the more conservative,
+never-double-touch choice, and the one place the two real drivers'
+own sections do not agree byte-for-byte. Real per-cycle cross-object
+batching (LDMud's `!did_reset`, FluffOS's whole-list-every-5-minutes
+sweep) is deliberately not replicated -- a real-driver performance
+strategy for large object counts under a fixed time budget, not a
+semantic requirement; every object due this tick is processed this
+tick here, flagged as a deliberate simplification for this driver's
+own much smaller expected object counts.
+
+6 new regression tests (`test/test_lexer.cpp`, `ObjectVarHarness` plus a
+real `Scheduler`, directly manipulating `armReset()`/`setResetState()`/
+`setTimeOfRef()` the same way the pre-existing call_out tests already
+construct an already-past `dueAt` directly rather than sleeping): a
+real (non-virtual) reset firing and correctly re-arming; a virtual
+reset never actually calling `reset()`; permanent reset-disable when no
+`reset()` is defined; `clean_up()` firing with the real clone-vs-non-clone
+argument and tracking its own truthy/falsy return (both directions);
+and the same-cycle reset-suppresses-clean_up gate.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4129, a real Python TCP
+client, a temporary scratch object with real `reset()`/`clean_up()`
+bodies that `write_file()` a log -- removed afterward): `TIME_TO_RESET`/
+`TIME_TO_CLEAN_UP` temporarily shrunk to 4/6 real seconds for this one
+verification build only (reverted to the real 1800/3600 immediately
+after, full suite re-confirmed passing at both settings) so a real
+30-60-minute wait was not required to observe a genuine timer-driven
+fire. The real `Scheduler::tickResetsAndCleanup()` timer fired
+`reset()` once on the newly cloned object, then `clean_up()` once with
+the real clone argument (`0`), both observed purely by polling the log
+file the LPC bodies themselves wrote -- `eval` used only to clone/touch
+the object beforehand and to read the log afterward, never to invoke
+`reset()`/`clean_up()` itself. The object survived, since its own
+`clean_up()` correctly returned `0` without calling `destruct()`. One
+genuine test-authoring mistake caught and fixed before trusting the
+result, not a driver bug: an early attempt called `move_object(item,
+dest)` assuming a real two-argument form, not realizing this driver's
+own `move_object()` efun is real FluffOS's own single-argument form
+(always moves `current_object()`, silently ignoring a second argument)
+-- the clone never actually reached the target room, and a *later*,
+unrelated `eval` call's own routine destruction of its own scratch
+`/tmp_eval_file` object (real `command/eval.c`'s own pre-existing
+"clean up first" step, confirmed real, not new) was what actually
+vanished from the room's inventory, not anything this session built;
+switched to the real two-argument `set_environment(item, env)`
+primitive and confirmed correct. Also confirmed live, incidentally:
+this bundled mudlib's own real `inherit/clean_up.c`
+(`int clean_up(int inh) { destruct(this_object()); return 0; }`,
+inherited via `include/command.h`'s own `inherit CLEAN_UP;` by every
+kept command file -- `who.c`/`say.c`/`quit.c`/`shutdown.c`) had been
+dormant dead code until this session, since this driver never called
+`clean_up()` at all before now -- confirmed it does NOT fire
+prematurely or destroy live command blueprints (`/command/eval`,
+`/single/master`, `/single/simul_efun`, `/single/start_room`,
+`/clone/wand_of_creation`) during the shrunk-window run, since none had
+gone untouched long enough yet within the test's own real window; a
+genuinely long-uptime run would eventually and correctly self-destruct,
+e.g., `/command/who` the first time nobody uses it for a real hour,
+exactly as this mudlib's own file was already written expecting. Driver
+stayed healthy throughout. Scratch object files removed before stopping
+the scratch process, leaving the bundled `mudlib/` tree exactly as
+found (confirmed via `git status`). 700 tests passing (up from 694),
+zero regressions.
+
+**Docs pivot, mid-session (user-directed).** README.md's own tagline no
+longer names FluffOS/LDMud/DGD ("targeting FluffOS/LDMud/DGD dialect
+compatibility" replaced with dialect-neutral language, pointing readers
+to the new `CREDITS.md` and existing `COMPARISON.md` instead).
+`CREDITS.md` (new) is the one place those three real drivers are named
+in the public-facing docs now, framed as prior-art attribution, not a
+compatibility claim. `INSTALL.md` needed no changes (confirmed it never
+named any driver). `COMPARISON.md` (which explicitly keeps naming real
+drivers by design -- that is its whole purpose) refreshed in place with
+today's real numbers rather than 2026-08-18's stale ones: Phase 0 is
+now 16/16 (100%, `parse_*`/row 0.13a's own checkbox flipped since this
+file was last updated -- all 8 real efun names implemented including
+real two-object `OBJ`/`LIV`/`OBS`/`LVS` matching, confirmed by reading
+`STATUS.md`'s own strictly-chronological log directly rather than
+trusting an ambiguous-looking mid-cell note in `ROADMAP.md` that turned
+out to describe an intermediate, since-superseded state); Phase 1 real
+blockers now 5/11 (45%, up from 4/11, row 1.7 itself having since
+flipped to checked-partial); efun surface 248 of 270 (up from 247);
+test count 694 (this session's own baseline before the reset/clean_up
+work above, itself now 700). Explicitly scoped by the user to README.md
++ INSTALL.md + CREDITS.md + COMPARISON.md only -- `ROADMAP.md`/
+`STATUS.md`/every `src/*/instruct.md` keep naming real drivers
+throughout, since their whole citation-based verification methodology
+depends on it (per `CLAUDE.md`), not touched.
+
+Staged with `git add` only, per this project's own standing rule; not
+committed.
+
 **2026-08-19 (a further fresh session, same day): row 1.7/1.8 updated to
 accurately reflect its current real state (H_MOVE_OBJECT0/1 fully wired
 end to end, concrete remaining list), a full fresh Phase 1 re-ranking

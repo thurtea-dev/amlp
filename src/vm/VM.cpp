@@ -609,6 +609,22 @@ Value VM::callFunction(const std::shared_ptr<LpcObject>& obj,
     // silently does nothing, not an error.
     if (obj->isDestructed()) return Value{};
 
+    // real apply_low()'s own "The function call will swap in the object
+    // and also unset its reset status." (interpret.c, right above its own
+    // "ob->flags &= ~O_RESET_STATE;", interpret.c:20319) plus "ob->
+    // time_of_ref = current_time;" a few lines later (interpret.c:20345)
+    // -- every real call into an object from outside marks it "touched",
+    // both so Scheduler::tickResetsAndCleanup() does a real (not virtual)
+    // reset next time one is due, and so it stays clean_up()-ineligible
+    // for a fresh real time_to_cleanup window. Deliberately unconditional
+    // here (this method's own single real "call into an object from
+    // outside" entry point, per this method's own comment above), matching
+    // real apply_low() being called for call_other, heart_beat/call_out
+    // firing, and driver-hook dispatch alike -- not narrowed to exclude
+    // any of those, the same way real code does not either.
+    obj->setResetState(false);
+    obj->touchTimeOfRef();
+
     // Shadow chain (Phase 0.6): real apply_low()'s own two-phase
     // mechanism (interpret.c), confirmed directly before implementing,
     // not assumed from instruct.md's own simplified "call the shadow,
@@ -1144,10 +1160,18 @@ void VM::moveObject(const std::shared_ptr<LpcObject>& item, const std::shared_pt
         }
     }
 
+    // real object.c:5188-5198's own three O_RESET_STATE clears (dest,
+    // item, item's old super) -- see EfunTable.cpp's own set_environment()
+    // registration for the exact same real citation; reproduced here too
+    // since this leg is this driver's own hardcoded fallback move (no
+    // hook installed), not a call through set_environment() itself.
+    dest->setResetState(false);
     if (auto oldEnv = item->environment().lock()) {
         auto& oldInv = oldEnv->inventory();
         oldInv.erase(std::remove(oldInv.begin(), oldInv.end(), item), oldInv.end());
+        oldEnv->setResetState(false);
     }
+    item->setResetState(false);
     item->setEnvironment(dest);
     dest->inventory().push_back(item);
 

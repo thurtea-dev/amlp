@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -293,6 +294,95 @@ public:
     const std::vector<std::string>& parseAdjIds() const { return parseAdjIds_; }
     void setParseAdjIds(std::vector<std::string> v) { parseAdjIds_ = std::move(v); }
 
+    // real object_t's O_RESET_STATE flag (object.h: "is in a virgin
+    // resetted state"): true immediately after reset()/create() has run
+    // and nothing has touched the object since; Scheduler's own reset
+    // sweep does a real reset() call only when this is false, otherwise
+    // just silently reschedules (real backend.c's own "virtual" reset --
+    // see object.c:75-82's own doc comment, "the backend simply sets a
+    // new .time_reset time, but does not do any real action"). Cleared
+    // by VM::callFunction() (real apply_low()'s own "The function call
+    // will swap in the object and also unset its reset status.",
+    // interpret.c:20311) and by set_environment()/VM::moveObject() (real
+    // object.c:5188-5198's own three O_RESET_STATE clears on item/dest/
+    // old-super) -- both cited directly at their own call sites.
+    bool resetState() const { return resetState_; }
+    void setResetState(bool v) { resetState_ = v; }
+
+    // real object_t's O_WILL_CLEAN_UP flag (object.h): set unconditionally
+    // on every freshly loaded/cloned object (real simulate.c:2263/2448,
+    // confirmed directly -- not gated on whether clean_up() is actually
+    // defined; a driver-fired call to an undefined clean_up() simply
+    // clears the flag the same way a defined one returning 0 does) and
+    // cleared once a clean_up() call returns falsy/undefined, so a
+    // destructed-or-uninterested object stops being asked again. See
+    // Scheduler::tickResetsAndCleanup().
+    bool willCleanUp() const { return willCleanUp_; }
+    void setWillCleanUp(bool v) { willCleanUp_ = v; }
+
+    // real object_t's O_CLONE flag (object.h), set only by
+    // ObjectManager::cloneObject(). Backs the single real clean_up()
+    // argument this driver reproduces: real backend.c's own "push_number
+    // (inter_sp, (obj->flags & (O_CLONE|O_REPLACED)) ? 0 :
+    // O_PROG_SWAPPED(obj) ? 1 : obj->prog->ref)" -- confirmed real corpus
+    // usage cares about this (lima/lib/obj/secure/cmd.c's own "int
+    // clean_up(int instances) { if (instances) return ASK_AGAIN; ...
+    // }"), so clones get 0 (safe to self-destruct) and every other
+    // object gets a fixed truthy 1, standing in for real code's own
+    // program->ref refcount (this driver does not track per-program
+    // reference counts; a live blueprint's real ref is always >= 1
+    // anyway, so the practical truthy/falsy outcome real mudlib clean_up()
+    // bodies branch on matches without needing the exact count) -- see
+    // Scheduler::tickResetsAndCleanup() for where this is read.
+    // O_REPLACED (replace_program()) has no corpus evidence combined
+    // with clean_up() and is not folded in here.
+    bool isClone() const { return isClone_; }
+    void setIsClone(bool v) { isClone_ = v; }
+
+    // real object_t::time_reset (object.h doc comment, object.c:75-82).
+    // armReset() is real reset_object()'s own "Be sure to update time
+    // first!" step (object.c:825-828): "current_time + time_to_reset/2 +
+    // random_number(time_to_reset/2)", the real randomized reset-delay
+    // window -- also sets resetState() true, matching real reset_object()'s
+    // own unconditional "ob->flags |= O_RESET_STATE;" at its own end
+    // (object.c:884). Called once at creation (ObjectManager, standing in
+    // for real reset_object(ob, H_CREATE_OB, 0) always being called at
+    // load/clone time) and again by Scheduler::tickResetsAndCleanup()
+    // every time a reset (real or virtual) is due.
+    std::chrono::steady_clock::time_point timeReset() const { return timeReset_; }
+    void armReset(std::chrono::seconds timeToReset);
+
+    // real reset_object()'s own "if (!sapply_ign_prot(...) && arg ==
+    // H_RESET) ob->time_reset = 0;" (object.c:869-870) -- confirmed
+    // identical in real FluffOS too, just spelled differently ("ob->flags
+    // &= ~O_WILL_RESET; /* don't call it next time */", object.c:1905):
+    // an object with no reset() lfun defined at all gets permanently
+    // excluded from further reset attempts the very first time the
+    // driver notices, in both real drivers. Represented here as an
+    // unreachably-far-future timeReset() (steady_clock::time_point::max())
+    // rather than a magic zero, matching the "0 means never" real
+    // semantics without needing a separate sentinel check at every
+    // timeReset() read site.
+    void disableReset() { timeReset_ = std::chrono::steady_clock::time_point::max(); }
+
+    // real object_t::time_of_ref (object.h doc comment: "the time() of
+    // the last apply on this object"). touchTimeOfRef() is called by
+    // VM::callFunction() on every call into this object from outside,
+    // matching real apply_low()'s own "ob->time_of_ref = current_time;"
+    // (interpret.c:20345, a few lines after the same function's own
+    // O_RESET_STATE clear cited above). Backs the clean_up() eligibility
+    // check ("time_since_ref > time_to_cleanup", backend.c:1403).
+    std::chrono::steady_clock::time_point timeOfRef() const { return timeOfRef_; }
+    void touchTimeOfRef() { timeOfRef_ = std::chrono::steady_clock::now(); }
+    // Direct setter, real usage the same as CallOutEntry::dueAt/
+    // HeartbeatEntry::ticksRemaining being plain public fields elsewhere
+    // in this driver (Scheduler.hpp): lets a regression test simulate
+    // "an hour has genuinely passed since this object was last touched"
+    // without a real driver process ever waiting an hour, the same way
+    // the call_out regression tests construct an already-past dueAt
+    // directly rather than sleeping.
+    void setTimeOfRef(std::chrono::steady_clock::time_point t) { timeOfRef_ = t; }
+
 private:
     std::string filename_;
     std::shared_ptr<CompiledProgram> program_;
@@ -319,6 +409,11 @@ private:
     std::vector<std::string> parseNounIds_;
     std::vector<std::string> parsePluralIds_;
     std::vector<std::string> parseAdjIds_;
+    bool resetState_ = false;
+    bool willCleanUp_ = false;
+    bool isClone_ = false;
+    std::chrono::steady_clock::time_point timeReset_{};
+    std::chrono::steady_clock::time_point timeOfRef_{};
 };
 
 } // namespace amlp

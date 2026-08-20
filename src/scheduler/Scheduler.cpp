@@ -1,5 +1,6 @@
 #include "amlp/scheduler/Scheduler.hpp"
 #include "amlp/net/Server.hpp"
+#include "amlp/object/LiveObjectRegistry.hpp"
 #include "amlp/object/LpcObject.hpp"
 #include "amlp/vm/VM.hpp"
 #include <algorithm>
@@ -52,6 +53,17 @@ void Scheduler::run(Server& server, int maxIterations) {
         if (now - lastHeartbeat_ >= kHeartbeatCycle) {
             lastHeartbeat_ = now;
             tickHeartbeats();
+            // Real ALARM_TIME's own doc comment (config.h.in, LDMud):
+            // "the granularity of the call_outs, and base granularity of
+            // heart_beat, reset und clean_up calls" -- reset/clean_up
+            // share heart_beat's own real timing granularity in both real
+            // drivers (LDMud's ALARM_TIME default is 2, matching
+            // kHeartbeatCycle exactly; real FluffOS's own
+            // look_for_objects_to_swap() runs on its own coarser 5-minute
+            // sweep instead, backend.c:216 -- LDMud's tighter granularity
+            // is used here since it is the one this driver's own
+            // kHeartbeatCycle already matches).
+            tickResetsAndCleanup();
         }
         tickCallOuts();
 
@@ -239,6 +251,144 @@ void Scheduler::tickHeartbeats() {
             vm_.callFunction(obj, "heart_beat", {});
         } catch (const std::exception& e) {
             std::cerr << "[heart_beat] " << obj->filename() << ": " << e.what() << "\n";
+        }
+    }
+}
+
+namespace {
+// Real reset_object()'s own string-hook dispatch (LDMud object.c:865-873):
+// driverHooks_[hookNum] can be a closure, a string, or (having never had
+// set_driver_hook() called for that slot) unset. Real closure-typed
+// H_RESET/H_CLEAN_UP have zero confirmed real corpus usage -- core-lib's
+// own real hooks.c (the one confirmed LDMud-targeting corpus vendored
+// here) configures both as plain strings, "reset"/"clean_up", the exact
+// fallback default used when the slot is unset too -- so the closure
+// form is honestly left unimplemented here, the same "zero confirmed
+// real corpus usage" stance H_MODIFY_COMMAND's own T_CLOSURE/T_STRING
+// forms already took (VM::dispatchCommand()'s own comment, VM.cpp).
+// FluffOS has no hook indirection here at all (a fixed APPLY_RESET/
+// APPLY_CLEAN_UP apply, real object.c:1896-1927), so the same fallback
+// name is exactly what real FluffOS always calls too.
+std::string hookFunctionName(VM& vm, int hookNum, const char* fallback) {
+    Value hookVal = vm.getDriverHook(hookNum);
+    if (auto* name = std::get_if<std::string>(&hookVal.data)) return *name;
+    return fallback;
+}
+} // namespace
+
+void Scheduler::tickResetsAndCleanup() {
+    constexpr int kHReset = 7;    // mudlib/sys/driver_hook.h
+    constexpr int kHCleanUp = 8;
+    // Real TIME_TO_RESET/TIME_TO_CLEAN_UP defaults (LDMud
+    // temp/ldmud/autoconf/configure: "DEFAULTwith_time_to_reset=1800",
+    // "DEFAULTwith_time_to_clean_up=3600", confirmed against the real
+    // vendored ./configure --help text too). Real FluffOS uses the same
+    // formula shape in its own reset_object() (object.c:1898-1900,
+    // "current_time + TIME_TO_RESET/2 + random_number(TIME_TO_RESET/2)"),
+    // confirmed identical to LDMud's; its own specific default value is
+    // read from a runtime config file rather than a compile-time default
+    // (include/runtime_config.h's own CFG_INT indirection), not
+    // independently confirmed here, so these numbers are cited to LDMud's
+    // real compile-time default specifically.
+    constexpr std::chrono::seconds kTimeToReset{1800};
+    constexpr std::chrono::seconds kTimeToCleanUp{3600};
+
+    auto now = std::chrono::steady_clock::now();
+    // Snapshot every live object first, the same "decide who fires before
+    // calling any LPC code" reasoning tickHeartbeats() above already
+    // documents in full -- reset()/clean_up() are just as free to call
+    // set_heart_beat()/destruct()/move_object() on arbitrary objects as
+    // heart_beat() is, and LiveObjectRegistry::all() already returns a
+    // fresh vector, not a live view, so this is naturally safe against
+    // that the same way.
+    for (auto& obj : LiveObjectRegistry::all()) {
+        if (obj->isDestructed()) continue;
+
+        // ------ Reset ------
+        // Real backend.c's own due-check ("obj->time_reset && obj->
+        // time_reset < current_time" in LDMud; "(ob->flags & O_WILL_RESET)
+        // && (ob->next_reset < current_time) && !(ob->flags &
+        // O_RESET_STATE)" in FluffOS -- both real drivers agree on the
+        // substance: skip a resetState() object with a "virtual" reset
+        // (object.c:75-82's own real doc comment: "the backend simply
+        // sets a new .time_reset time, but does not do any real action"),
+        // only really call reset() once something has touched the object
+        // since its last one. Deliberately not replicating either real
+        // driver's own further per-cycle batching gate (LDMud's "!did_reset
+        // || !comm_time_to_call_heart_beat", FluffOS's whole-list-per-5-
+        // minutes sweep cap) -- a real-driver performance strategy for
+        // large object counts under a fixed per-tick time budget, not a
+        // semantic requirement; every object due this tick is processed
+        // this tick here, a flagged, deliberate simplification for this
+        // driver's own much smaller expected object counts.
+        bool resetCalledThisCycle = false;
+        if (now >= obj->timeReset()) {
+            if (obj->resetState()) {
+                // Virtual reset: nothing touched this object, just push
+                // the timer out again.
+                obj->armReset(kTimeToReset);
+            } else {
+                resetCalledThisCycle = true;
+                // "Be sure to update time first!" -- real reset_object()'s
+                // own comment, both drivers, cited above.
+                obj->armReset(kTimeToReset);
+                std::string resetFn = hookFunctionName(vm_, kHReset, "reset");
+                if (vm_.functionExists(obj, resetFn)) {
+                    try {
+                        vm_.resetEvalCost();
+                        vm_.callFunction(obj, resetFn, {}, Origin::Driver);
+                    } catch (const std::exception& e) {
+                        std::cerr << "[reset] " << obj->filename() << ": " << e.what() << "\n";
+                    }
+                } else {
+                    // Real "no reset() in the object" branch, both real
+                    // drivers: permanently stop trying (object.c:1904-1906
+                    // FluffOS, object.c:869-870 LDMud).
+                    obj->disableReset();
+                }
+                if (obj->isDestructed()) continue;
+                // reset_object()'s own unconditional final step, both
+                // real drivers (object.c:884 LDMud, object.c:1908 FluffOS):
+                // set regardless of whether reset() was actually found/
+                // ran/returned anything.
+                obj->setResetState(true);
+            }
+        }
+
+        // ------ Clean Up ------
+        // Real backend.c: only when O_WILL_CLEAN_UP is still set, enough
+        // time has passed since the last touch, and (LDMud specifically,
+        // object.c:1403/backend.c:1403) not on the same cycle a real
+        // reset() just fired for this object -- real FluffOS's own
+        // ready_for_clean_up is latched before its own reset check runs
+        // each cycle so it has no exact analog of this same-cycle gate,
+        // but LDMud's is used here since it is the more conservative,
+        // less surprising choice (never double-touch an object in one
+        // tick) and both real drivers agree on every other rule below.
+        if (obj->willCleanUp() && !resetCalledThisCycle
+            && (now - obj->timeOfRef()) > kTimeToCleanUp) {
+            // Real "push_number(ob->flags & (O_CLONE) ? 0 : ob->prog->
+            // ref)" (FluffOS, object.c:290) / equivalent LDMud
+            // (O_CLONE|O_REPLACED -> 0, else prog->ref, backend.c:1425-1431)
+            // -- see LpcObject::isClone()'s own header comment for why a
+            // fixed 1 stands in for the real prog->ref count here.
+            std::vector<Value> args{Value(obj->isClone() ? int64_t{0} : int64_t{1})};
+            // real "int save_reset_state = obj->flags & O_RESET_STATE;"
+            // (both drivers) -- calling clean_up() would otherwise clear
+            // it as an ordinary touch (VM::callFunction()'s own real
+            // apply_low()-equivalent clear), but real code explicitly
+            // restores whatever it was beforehand once the call returns.
+            bool savedResetState = obj->resetState();
+            Value result;
+            try {
+                vm_.resetEvalCost();
+                result = vm_.callFunction(obj, hookFunctionName(vm_, kHCleanUp, "clean_up"), args, Origin::Driver);
+            } catch (const std::exception& e) {
+                std::cerr << "[clean_up] " << obj->filename() << ": " << e.what() << "\n";
+            }
+            if (obj->isDestructed()) continue;
+            if (!isTruthy(result)) obj->setWillCleanUp(false);
+            obj->setResetState(savedResetState);
         }
     }
 }

@@ -17953,6 +17953,214 @@ static void testHModifyCommandIsANoOpWhenNoHookIsSetOrTheValueIsNotAMapping() {
     std::cout << "testHModifyCommandIsANoOpWhenNoHookIsSetOrTheValueIsNotAMapping OK\n";
 }
 
+// ROADMAP.md row 1.7/1.8's own H_RESET/H_CLEAN_UP slice: real backend.c's
+// own process_objects() (LDMud)/look_for_objects_to_swap() (real FluffOS's
+// own name for the same mechanism) -- confirmed identical in substance in
+// both real drivers (Scheduler::tickResetsAndCleanup()'s own header
+// comment has the full citation), so this runs dialect-universally, not
+// gated to "dialect: ldmud" the way the H_MOVE_OBJECT0/H_MODIFY_COMMAND
+// hook tests above are.
+//
+// A real reset() due, on an object that has not been touched into a
+// non-virgin state (resetState() false, this driver's own O_RESET_STATE
+// equivalent) since it was last reset, is armReset()'s own "not yet
+// touched" case flipped -- cloneObject() itself leaves a fresh object
+// resetState()==true (matching real reset_object(ob, H_CREATE_OB, 0)
+// running at creation), so this test explicitly flips it false first to
+// simulate "something touched this object since creation", the one real
+// precondition a genuine (non-virtual) reset() call needs.
+static void testTickResetsAndCleanupCallsRealResetOnceDueAndNotInResetState() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/tr_room.c",
+        "int resetCount;\n"
+        "void reset() { resetCount = resetCount + 1; }\n"
+        "int queryResetCount() { return resetCount; }\n");
+    auto room = harness.objects.cloneObject("/tr_room");
+    assert(room != nullptr);
+
+    room->armReset(std::chrono::seconds{0}); // due "now"
+    room->setResetState(false);              // touched since last reset
+
+    scheduler.tickResetsAndCleanup();
+
+    // Checked before any further call on room -- every call into an
+    // object from outside re-touches it (VM::callFunction()'s own real
+    // apply_low()-equivalent clear), which would otherwise immediately
+    // undo the very thing being asserted here.
+    assert(room->resetState() == true); // real reset_object()'s own unconditional final step
+    assert(room->timeReset() > std::chrono::steady_clock::now()); // "Be sure to update time first!"
+
+    amlp::Value count = harness.vm.callFunction(room, "queryResetCount", {});
+    assert(std::get<int64_t>(count.data) == 1);
+
+    std::cout << "testTickResetsAndCleanupCallsRealResetOnceDueAndNotInResetState OK\n";
+}
+
+// The "virtual" reset case (real object.c:75-82's own doc comment: "the
+// backend simply sets a new .time_reset time, but does not do any real
+// action") -- a due object still in its virgin resetState() (nothing has
+// touched it since creation/its last real reset) must NOT actually call
+// reset() again, just push its own timer out.
+static void testTickResetsAndCleanupDoesAVirtualResetWhenAlreadyInResetState() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/vr_room.c",
+        "int resetCount;\n"
+        "void reset() { resetCount = resetCount + 1; }\n"
+        "int queryResetCount() { return resetCount; }\n");
+    auto room = harness.objects.cloneObject("/vr_room");
+    assert(room != nullptr);
+
+    room->armReset(std::chrono::seconds{0}); // due "now"; resetState() stays true (armReset()'s own default)
+    assert(room->resetState() == true);
+
+    scheduler.tickResetsAndCleanup();
+
+    amlp::Value count = harness.vm.callFunction(room, "queryResetCount", {});
+    assert(std::get<int64_t>(count.data) == 0); // reset() never actually called
+    assert(room->timeReset() > std::chrono::steady_clock::now()); // still rescheduled
+
+    std::cout << "testTickResetsAndCleanupDoesAVirtualResetWhenAlreadyInResetState OK\n";
+}
+
+// real "if (!sapply_ign_prot(...) && arg == H_RESET) ob->time_reset = 0;"
+// (LDMud object.c:869-870) / "ob->flags &= ~O_WILL_RESET; /* don't call
+// it next time */" (real FluffOS object.c:1904-1906) -- an object with no
+// reset() lfun at all gets permanently excluded from further reset
+// attempts the first time the driver notices, in both real drivers.
+static void testTickResetsAndCleanupPermanentlyDisablesResetWhenNoResetFunctionExists() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/nr_thing.c", "int probe() { return 1; }\n"); // no reset() at all
+    auto thing = harness.objects.cloneObject("/nr_thing");
+    assert(thing != nullptr);
+
+    thing->armReset(std::chrono::seconds{0});
+    thing->setResetState(false);
+
+    scheduler.tickResetsAndCleanup();
+
+    assert(thing->timeReset() == std::chrono::steady_clock::time_point::max());
+    // Confirms the object survived (no crash calling a function that does
+    // not exist) and is still otherwise perfectly usable.
+    amlp::Value probe = harness.vm.callFunction(thing, "probe", {});
+    assert(std::get<int64_t>(probe.data) == 1);
+
+    std::cout << "testTickResetsAndCleanupPermanentlyDisablesResetWhenNoResetFunctionExists OK\n";
+}
+
+// real backend.c's own clean_up() dispatch: only once O_WILL_CLEAN_UP is
+// still set and enough real time has passed since the object's own last
+// touch (time_of_ref); a falsy/undefined return clears O_WILL_CLEAN_UP so
+// it is never tried again, a truthy one keeps it armed. real "push_number
+// (ob->flags & (O_CLONE) ? 0 : ob->prog->ref)" (FluffOS object.c:290) --
+// see LpcObject::isClone()'s own header comment for the exact real
+// argument rule this reproduces (a clone gets 0; a non-clone, this
+// driver's own fixed stand-in for a real always->=1 program refcount,
+// gets 1).
+static void testTickResetsAndCleanupCallsRealCleanUpAndTracksItsReturnValue() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/cu_clone.c",
+        "int lastArg; int calls;\n"
+        "int clean_up(int arg) { lastArg = arg; calls = calls + 1; return 0; }\n"
+        "int queryLastArg() { return lastArg; }\n"
+        "int queryCalls() { return calls; }\n");
+    auto clone = harness.objects.cloneObject("/cu_clone");
+    assert(clone != nullptr);
+    assert(clone->isClone() == true);
+    assert(clone->willCleanUp() == true); // real: set unconditionally at creation, both drivers
+
+    // Simulate "over an hour untouched" without a real driver process
+    // ever waiting an hour -- same "construct an already-past timestamp
+    // directly" approach the call_out regression tests already use for
+    // CallOutEntry::dueAt.
+    clone->setTimeOfRef(std::chrono::steady_clock::now() - std::chrono::hours(2));
+    // Keep reset() out of the way this same tick (armed far in the
+    // future) so it cannot suppress clean_up() via the same-cycle gate
+    // exercised separately below.
+    clone->armReset(std::chrono::seconds{3600});
+
+    scheduler.tickResetsAndCleanup();
+
+    amlp::Value lastArg = harness.vm.callFunction(clone, "queryLastArg", {});
+    amlp::Value calls = harness.vm.callFunction(clone, "queryCalls", {});
+    assert(std::get<int64_t>(calls.data) == 1);
+    assert(std::get<int64_t>(lastArg.data) == 0); // real: a clone always gets 0
+    assert(clone->willCleanUp() == false); // real: falsy return clears O_WILL_CLEAN_UP
+
+    std::cout << "testTickResetsAndCleanupCallsRealCleanUpAndTracksItsReturnValue OK\n";
+}
+
+// The non-clone side of the same real argument rule, plus the "truthy
+// return keeps trying again later" half real backend.c documents right
+// alongside it ("Only if the clean_up returns a non-zero value, will it
+// be called again.").
+static void testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyReturn() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/cu_blueprint.c",
+        "int lastArg;\n"
+        "int clean_up(int arg) { lastArg = arg; return 1; }\n"
+        "int queryLastArg() { return lastArg; }\n");
+    auto blueprint = harness.objects.loadObject("/cu_blueprint");
+    assert(blueprint != nullptr);
+    assert(blueprint->isClone() == false);
+
+    blueprint->setTimeOfRef(std::chrono::steady_clock::now() - std::chrono::hours(2));
+    blueprint->armReset(std::chrono::seconds{3600});
+
+    scheduler.tickResetsAndCleanup();
+
+    amlp::Value lastArg = harness.vm.callFunction(blueprint, "queryLastArg", {});
+    assert(std::get<int64_t>(lastArg.data) == 1); // real: a non-clone gets 1 here
+    assert(blueprint->willCleanUp() == true); // real: truthy return keeps it armed
+
+    std::cout << "testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyReturn OK\n";
+}
+
+// real LDMud backend.c's own "!bResetCalled" gate (backend.c:1403): a
+// real reset() firing this same cycle suppresses clean_up() for the same
+// object this same cycle, even if it would otherwise be due -- see
+// Scheduler::tickResetsAndCleanup()'s own comment for why LDMud's more
+// conservative rule is used here even though real FluffOS's own
+// ready_for_clean_up latch has no exact analog of this gate.
+static void testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFired() {
+    ObjectVarHarness harness;
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/rc_both.c",
+        "int resetCalls; int cleanUpCalls;\n"
+        "void reset() { resetCalls = resetCalls + 1; }\n"
+        "int clean_up(int arg) { cleanUpCalls = cleanUpCalls + 1; return 0; }\n"
+        "int queryResetCalls() { return resetCalls; }\n"
+        "int queryCleanUpCalls() { return cleanUpCalls; }\n");
+    auto obj = harness.objects.cloneObject("/rc_both");
+    assert(obj != nullptr);
+
+    // Due for a real (non-virtual) reset...
+    obj->armReset(std::chrono::seconds{0});
+    obj->setResetState(false);
+    // ...and independently also "due" for clean_up, if nothing suppressed it.
+    obj->setTimeOfRef(std::chrono::steady_clock::now() - std::chrono::hours(2));
+
+    scheduler.tickResetsAndCleanup();
+
+    amlp::Value resetCalls = harness.vm.callFunction(obj, "queryResetCalls", {});
+    amlp::Value cleanUpCalls = harness.vm.callFunction(obj, "queryCleanUpCalls", {});
+    assert(std::get<int64_t>(resetCalls.data) == 1);
+    assert(std::get<int64_t>(cleanUpCalls.data) == 0); // suppressed this cycle
+    assert(obj->willCleanUp() == true); // never actually called, so still armed
+
+    std::cout << "testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFired OK\n";
+}
+
 // ROADMAP.md row 1.9's own first real slice: real LDMud's own names for
 // keys()/values() (see EfunTable.cpp's own comment on "m_indices"/
 // "m_values" for the full real-source citation and corpus-frequency
@@ -21727,6 +21935,12 @@ int main() {
     testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet();
     testHModifyCommandRewritesBareAbbreviationToTheMappedFullVerb();
     testHModifyCommandIsANoOpWhenNoHookIsSetOrTheValueIsNotAMapping();
+    testTickResetsAndCleanupCallsRealResetOnceDueAndNotInResetState();
+    testTickResetsAndCleanupDoesAVirtualResetWhenAlreadyInResetState();
+    testTickResetsAndCleanupPermanentlyDisablesResetWhenNoResetFunctionExists();
+    testTickResetsAndCleanupCallsRealCleanUpAndTracksItsReturnValue();
+    testTickResetsAndCleanupPassesOneForANonCloneAndKeepsTryingOnTruthyReturn();
+    testTickResetsAndCleanupSkipsCleanUpOnTheSameCycleARealResetFired();
     testMIndicesReturnsMappingKeysSameOrderAsKeysEfun();
     testMValuesBareFormReturnsColumnZeroValues();
     testMValuesAcceptsExplicitColumnZeroButRejectsNonZeroWidth();

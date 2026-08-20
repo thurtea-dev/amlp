@@ -3849,10 +3849,21 @@ void registerCoreEfuns() {
             dest = *destPtr;
         }
 
+        // real object.c:5188-5198's own three O_RESET_STATE clears --
+        // dest, item ("touch it", the real inline comment), and item's
+        // old super, all cleared as part of this same real primitive
+        // (confirmed directly, the exact real lines this efun's own
+        // header comment already cites for the move itself). See
+        // LpcObject::resetState()'s own header comment for what this
+        // backs (Scheduler::tickResetsAndCleanup()'s real-vs-virtual
+        // reset decision).
+        if (dest) dest->setResetState(false);
         if (auto oldEnv = item->environment().lock()) {
             auto& oldInv = oldEnv->inventory();
             oldInv.erase(std::remove(oldInv.begin(), oldInv.end(), item), oldInv.end());
+            oldEnv->setResetState(false);
         }
+        item->setResetState(false);
         item->setEnvironment(dest);
         if (dest) dest->inventory().push_back(item);
         return Value{};

@@ -18,7 +18,7 @@ below exist so a reader can see how a third, architecturally different
 driver solved the same problems, not because AMLP is trying to match it
 feature-for-feature.
 
-Last updated: 2026-08-18. `ROADMAP.md` and `STATUS.md` are the living
+Last updated: 2026-08-20. `ROADMAP.md` and `STATUS.md` are the living
 documents; if this file and either of those disagree on a specific row's
 status, trust `ROADMAP.md`'s own checkbox and re-derive this file's own
 summary from it rather than the reverse.
@@ -39,16 +39,18 @@ Phase 2 and Phase 3 item (the features meant to eventually *exceed* what
 either real driver offers) has a planning document but zero implemented
 code.
 
-**Phase 0 (stabilize the current base): effectively complete.**
-15 of 16 rows checked off; the one open row, `parse_*` (0.13a), is a
-large natural-language parser package that is itself most of the way
-done (see below) and is explicitly carved out as its own multi-session
-project rather than a Phase-0-blocking gap.
+**Phase 0 (stabilize the current base): complete.**
+16 of 16 rows checked off, including `parse_*` (0.13a), the large
+natural-language parser package that was the one still-open row as of
+this file's prior revision -- now checked (partial: one real sub-gap
+remains, see below, but all 8 named efuns are implemented, including
+real two-object matching, and the row's own multi-session scope has
+landed).
 
-**Phase 1 (dialect universality): the real work, roughly one third
+**Phase 1 (dialect universality): the real work, a bit under half
 done.** Counting only the rows that actually gate Phase 1 completion
 (DGD-only rows are comparison context, not blockers, per the scope
-clarification above): 4 of 11 real blocking rows are done. The rest are
+clarification above): 5 of 11 real blocking rows are done. The rest are
 individually scoped, with real, specific reasons on record for why each
 is still open (see the phase table below) -- none of them are vague
 "todo" placeholders.
@@ -63,9 +65,9 @@ items. They are real, considered plans, not real code.
 
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
-| 0 -- Stabilize | 16 | 15 | 1 (large, in progress) | 94% |
-| 1 -- Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 4 | 7 | 36% |
-| 1 -- Dialect universality (including 5 DGD-only comparison rows) | 16 | 4 | 12 | 25% |
+| 0 -- Stabilize | 16 | 16 | 0 | 100% |
+| 1 -- Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 5 | 6 | 45% |
+| 1 -- Dialect universality (including 5 DGD-only comparison rows) | 16 | 5 | 11 | 31% |
 | 2 -- Beyond both (novel features) | 22 | 0 | 22 | 0% |
 | 3 -- Production hardening + docs | 8 | 0 | 8 | 0% |
 
@@ -90,13 +92,23 @@ guessed at here):
   mismatch gets a real design decision -- not an oversight, an
   explicitly recorded open question (`include/amlp/dialect/BootApi.hpp`'s
   own comment).
-- **Row 1.7/1.8 (LDMud closure kinds)**: `lambda()`/`unbound_lambda()`/
-  `bind_lambda()`/baked-`#'symbol` need a real `CLOSURE_LAMBDA`/
-  `CLOSURE_BOUND_LAMBDA`/`CLOSURE_UNBOUND_LAMBDA` kind distinction this
-  driver's own flat `Closure` struct does not have yet. Confirmed
-  genuinely larger than a normal batch item, not attempted as a partial
-  stand-in (a stand-in was considered and explicitly rejected -- see
-  row 1.7's own note).
+- **Row 1.7/1.8 (LDMud closure kinds and driver hooks), partially
+  landed**: real hook storage/dispatch (`set_driver_hook()`, the full
+  32-slot table), automatic boot wiring (`inaugurate_master()`), and two
+  real hook trigger points (`H_MOVE_OBJECT0`/`H_MOVE_OBJECT1` inside
+  `move_object()`, `H_MODIFY_COMMAND`'s real direction-abbreviation
+  mapping) are wired end to end and verified live. `unbound_lambda()`/
+  `bind_lambda()` are real for the one confirmed corpus quoted-code
+  shape (`secure/master/hooks.c`'s own `H_LOAD_UIDS`/`H_MOVE_OBJECT0`
+  bodies). Still genuinely open: `lambda()` itself (0 real corpus hits,
+  not started), the rest of real `lambda()`'s own quoted-code grammar,
+  the full `CLOSURE_LAMBDA`/`CLOSURE_BOUND_LAMBDA`/
+  `CLOSURE_UNBOUND_LAMBDA` kind distinction this driver's own flat
+  `Closure` struct still does not fully have, `bind_lambda()`'s
+  cross-object form (blocked on `privilege_violation()`, itself
+  unimplemented), and several remaining hook numbers/trigger points
+  (`H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS`, real per-hook
+  type-map validation).
 - **Row 1.9 (LDMud mapping width > 1)**: `m_indices()`/`m_values()`
   (the two highest-real-call-site names) are done; the real N-columns-
   wide value semantics (`m_allocate`/`m_entry`/`m_reallocate`/`m_add`/
@@ -106,19 +118,27 @@ guessed at here):
   through indexing, `save_object`, and the existing mapping-union `+`
   operator.
 
-## Row 0.13a (`parse_*`), the one open Phase 0 row, in detail
+## Row 0.13a (`parse_*`), now checked (partial), in detail
 
 FluffOS's real natural-language sentence/grammar-rule parser package
 (`packages/parser.c`, 3,419 lines) -- confirmed, not assumed, to matter:
 Dead Souls' own core command dispatch calls `parse_sentence()` directly.
-7 of 8 real efun names are implemented (`parse_init`, `parse_add_rule`,
+All 8 real efun names are now implemented (`parse_init`, `parse_add_rule`,
 `parse_add_synonym`, `parse_remove`, `parse_dump`, `parse_refresh`,
-`parse_sentence`); only `parse_my_rules()` (a thin variant of
-`parse_sentence()` itself) and full `OBJ`/`LIV`/`OBS`/`LVS`
-noun-phrase-to-object matching (`parse_sentence()` currently handles
-`STR`/`WRD`/literal-only rules, a real, confirmed subset of what the
-package supports, not a simplification of it) remain. See `ROADMAP.md`
-row 0.13a for the full component breakdown and exact remaining scope.
+`parse_sentence`, `parse_my_rules`), including full `OBJ`/`LIV`/`OBS`/`LVS`
+noun-phrase-to-object matching -- both single-object rules (candidate
+resolution, adjective/ordinal narrowing, `LIV_MODIFIER`, "all of"/plural
+`OBS` matching, ambiguity/error reporting) and real two-object rules
+("give OBJ to LIV", both singular and plural shapes, e.g. "give OBS to
+LIV") via `dependent_check_functions()`/`check_one_relation()`/
+`check_object_relations()`, all live-verified against a real running
+driver. Real corpus evidence found 77 real two-object rules in Dead
+Souls' own `lib/verbs/` alone, so this was a real, sized piece of work,
+not a theoretical corner case. One real, specific sub-gap remains:
+`parse_sentence()`'s own 4th `nicks` argument (a caller-supplied nickname
+mapping) is still accepted for signature compatibility but never
+consulted. See `ROADMAP.md` row 0.13a for the full component breakdown,
+citations, and live-verification history.
 
 ---
 
@@ -145,7 +165,7 @@ driver ships.
 | FluffOS 2.9 (ds2.08) | 270 | `ROADMAP.md` row 0.13's own `efun_defs.c` accounting (excludes ifdef'd-out/non-runtime entries; a raw `grep -c '^{"'` over the same file gives 276, the 6-name difference being exactly those exclusions) |
 | LDMud | ~305 | Rough estimate: `temp/ldmud/doc/efun/` file count (one doc page per real efun is LDMud's own documentation convention; not independently cross-checked against a table the way the FluffOS/DGD/AMLP numbers were, so treat as approximate) |
 | DGD (this vendored C++ port) | 243 | Real count: `grep -c '^FUNCDEF('` across `temp/dgd/src/kfun/{builtin,std,file,math,extra}.cpp` |
-| **AMLP** | **247 of 270 real FluffOS names** (240 non-`parse_*` + 7 of 8 `parse_*`) | `ROADMAP.md` row 0.13/0.13a's own accounting. The 23-name real gap: 40 non-`parse_*` names are documented, individually-verified exclusions (architecture mismatch, e.g. no `TYPE_CLASS`/buffer-type/ed()-editor equivalent, or zero real call sites across all six vendored mudlib corpora) minus the ones no longer counted against the gap, plus the one still-open `parse_my_rules()`. AMLP's own efun table primarily targets FluffOS's surface, with LDMud/DGD-specific additions layered on where a dialect diverges (`m_indices`/`m_values`, `#'name`, `nil`, `atomic`) -- it does not separately track coverage against LDMud's or DGD's own full efun/kfun lists the way it does for FluffOS. |
+| **AMLP** | **248 of 270 real FluffOS names** (240 non-`parse_*` + all 8 `parse_*`) | `ROADMAP.md` row 0.13/0.13a's own accounting. The 22-name real gap: 40 non-`parse_*` names are documented, individually-verified exclusions (architecture mismatch, e.g. no `TYPE_CLASS`/buffer-type/ed()-editor equivalent, or zero real call sites across all six vendored mudlib corpora) minus the ones no longer counted against the gap. `parse_*` itself is no longer part of the gap at all (all 8 names implemented as of row 0.13a's own most recent slice, see below), though `parse_sentence()`'s own `nicks` argument stays unconsulted, a feature-completeness gap within an implemented efun rather than a missing-efun gap. AMLP's own efun table primarily targets FluffOS's surface, with LDMud/DGD-specific additions layered on where a dialect diverges (`m_indices`/`m_values`, `#'name`, `nil`, `atomic`) -- it does not separately track coverage against LDMud's or DGD's own full efun/kfun lists the way it does for FluffOS. |
 
 ## Master/boot apply coverage
 
@@ -178,7 +198,8 @@ applicable).
 |---|---|---|---|---|
 | Dialect selectable via config, one driver | Yes (`fluffos`/`ldmud`/`dgd`) | -- (is FluffOS) | -- (is LDMud) | -- (is DGD) |
 | Closures: `(: name :)` / `#'name` (FluffOS-style) | Yes | Yes | Yes (also has its own richer kinds) | -- |
-| Closures: real `lambda()`/`unbound_lambda()`/`bind_lambda()` kind distinction | No (row 1.7, open) | -- | Yes | -- |
+| Driver hooks (`set_driver_hook()`, `inaugurate_master()` boot wiring) | Partial (full 32-slot storage/dispatch real; 2 of several real trigger points wired -- `H_MOVE_OBJECT0/1`, `H_MODIFY_COMMAND`) | -- | Yes | -- |
+| Closures: real `lambda()`/`unbound_lambda()`/`bind_lambda()` kind distinction | Partial (`unbound_lambda()`/`bind_lambda()` real for the one confirmed corpus quoted-code shape; plain `lambda()` and the full closure-kind matrix not started, row 1.7/1.8 open) | -- | Yes | -- |
 | Mapping width > 1 (`m_allocate`, N-column values) | Partial (`m_indices`/`m_values` real names ported, single-column only; row 1.9 open) | -- | Yes | -- |
 | Shadows (`shadow()`, LDMud `unshadow()`/`query_allow_shadow`) | Yes | Yes (FluffOS shape) | Yes (LDMud shape, done) | -- |
 | `replace_program()`, LDMud no-arg sole-inherit form | Yes | Partial (has `replace_program`, not the LDMud no-arg form) | Yes | -- |
@@ -187,7 +208,7 @@ applicable).
 | `rlimits` (per-task tick/stack limits) | No (row 1.11, not started) | -- | -- | Yes |
 | `parse_string` (grammar-driven string parsing kfun) | No (row 1.13, not started -- confirmed comparable in size to `parse_*` itself, a dedicated DFA+LALR subsystem) | -- | -- | Yes |
 | Lightweight objects (value-semantics objects) | No (row 1.14, not started) | -- | -- | Yes |
-| `parse_*` natural-language sentence parser | 7 of 8 efuns real, `STR`/`WRD`/literal rules only | Yes (real source this work is ported from) | -- | -- |
+| `parse_*` natural-language sentence parser | All 8 efuns real, including single- and two-object `OBJ`/`LIV`/`OBS`/`LVS` matching; `nicks` argument unconsulted | Yes (real source this work is ported from) | -- | -- |
 | `save_object`/`restore_object`, real `.o` text format | Partial (restore-side only; save still uses this driver's own format) | Yes | Yes (own format) | Statedump-based, different model entirely |
 | PCRE `regexp`/`regexplode`/`reg_assoc` | Yes | Yes | Yes (own regexp efuns) | -- |
 | Full telnet IAC negotiation, echo suppression, NAWS | Yes | Yes | Yes | Yes |
@@ -223,12 +244,16 @@ applicable).
   should be described as "in progress."
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger
-  master-object callback surface -- see the section above.
+  master-object callback surface -- see the section above. LDMud's
+  separate driver-hook mechanism (`set_driver_hook()`,
+  `inaugurate_master()`) is real and automatically wired at boot, but
+  only 2 of its many real trigger points actually dispatch anything yet.
 - **Dialect coverage is asymmetric.** FluffOS is the primary, most
   complete target (this is where the bundled mudlib and most of the
   regression corpus point); LDMud has real, working, dialect-gated
-  pieces (closures, `m_indices`/`m_values`, shadows, `replace_program`)
-  but real gaps (full closure kinds, mapping width); DGD support is the
+  pieces (closures, `m_indices`/`m_values`, shadows, `replace_program`,
+  driver hooks) but real gaps (full closure kinds, mapping width, most
+  hook trigger points); DGD support is the
   thinnest of the three by design (comparison-only, not a completion
   target) -- `nil` and `atomic`-the-keyword are the only DGD-dialect
   pieces implemented, with the rest (`rlimits`, `atomic`-the-semantics,
@@ -250,7 +275,7 @@ undersells what already works: AMLP is not a wrapper or a fork of any
 of the three real drivers -- its own lexer, parser, code generator,
 bytecode VM, object system, and network layer are original
 implementations, verified continuously against real vendored source and
-a real bundled mudlib rather than against assumption. 657 regression
+a real bundled mudlib rather than against assumption. 694 regression
 tests pass as of this writing (see `STATUS.md` for the current count,
 which changes every session), and the discipline behind every checked
 row above is the same: read the real source, port the real behavior

@@ -115,6 +115,22 @@ public:
     void tickHeartbeats();
     void tickCallOuts();
 
+    // Real backend.c's own process_objects() (LDMud)/look_for_objects_to_
+    // swap() (real FluffOS's own name for the same real mechanism,
+    // confirmed against temp/reference/fluffos-2.9-ds2.08/backend.c:196-302
+    // -- same O_RESET_STATE/O_WILL_CLEAN_UP flags under different literal
+    // names, same "current_time + TIME_TO_RESET/2 + random_number(
+    // TIME_TO_RESET/2)" formula in reset_object(), same clean_up() argument
+    // rule (0 for a clone, else prog->ref) -- this is a real, dialect-
+    // universal LPMud-family mechanism, not an LDMud-only hook, so this
+    // method runs unconditionally, the same way tickHeartbeats() above
+    // does not gate on dialect either). See LpcObject::resetState()/
+    // willCleanUp()/isClone()/armReset()/timeOfRef()'s own header comments
+    // in LpcObject.hpp for what each piece of per-object state here backs.
+    // Deliberately public and directly callable, same reasoning as
+    // tickHeartbeats()/tickCallOuts() above.
+    void tickResetsAndCleanup();
+
     static void requestShutdown();
 
     // Query-only counterpart to requestShutdown(), for the shutdown()
