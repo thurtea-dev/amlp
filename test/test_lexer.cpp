@@ -21143,6 +21143,134 @@ static void testParseSentenceExplicitEnvArrayOverridesTheOrdinaryEnvironmentWalk
     std::cout << "testParseSentenceExplicitEnvArrayOverridesTheOrdinaryEnvironmentWalk OK\n";
 }
 
+// ROADMAP.md row 0.13a's own "nicks" note, implemented 2026-08-20: real
+// add_nicknames()/expand_node() (packages/parser.c:1095-1108/1302-1323).
+// A nickname word ("sam") that is not any real noun id of the target
+// object at all -- only the 4th-argument nicks mapping ties the two
+// together -- correctly resolves to that object when the object is part
+// of this same call's own loadObjects() universe (here: same room as
+// the player, the ordinary reachability rule every other noun already
+// follows).
+static void testParseSentenceNicknameResolvesToAnAlreadyLoadedObject() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nk_room.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"room\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/nk_widget.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        // deliberately NOT named "sam" -- the only way "get sam" can
+        // resolve to this object at all is through the nicks mapping.
+        "mixed *parse_command_id_list() { return ({\"widget\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/nk_player.c",
+        "void setup() { parse_init(); parse_add_rule(\"get\", \"OBJ\"); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int can_get_obj(mixed a) { return 1; }\n"
+        "int direct_get_obj(object a) { return 1; }\n"
+        "object gotIt;\n"
+        "void do_get_obj(object a) { gotIt = a; }\n"
+        "mixed runWithNicks(string s, mapping n) { return parse_sentence(s, 0, 0, n); }\n"
+        "object probe() { return gotIt; }\n");
+
+    auto room = harness.objects.cloneObject("/nk_room");
+    auto player = harness.objects.cloneObject("/nk_player");
+    auto widget = harness.objects.cloneObject("/nk_widget");
+    assert(room && player && widget);
+    for (auto& ob : {room, player, widget}) harness.vm.callFunction(ob, "setup", {});
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(room)});
+    harness.vm.callFunction(widget, "go", std::vector<amlp::Value>{amlp::Value(room)}); // same room as the player
+
+    auto nicks = std::make_shared<amlp::Mapping>();
+    nicks->entries.emplace_back(amlp::Value(std::string("sam")), amlp::Value(widget));
+    amlp::Value result = harness.vm.callFunction(
+        player, "runWithNicks",
+        std::vector<amlp::Value>{amlp::Value(std::string("get sam")), amlp::Value(nicks)});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) == 1);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>(harness.vm.callFunction(player, "probe", {}).data) == widget);
+
+    std::cout << "testParseSentenceNicknameResolvesToAnAlreadyLoadedObject OK\n";
+}
+
+// The other real half of expand_node()'s own lazy-lookup rule: the
+// nickname key is present in the mapping and genuinely maps to a real,
+// live, non-destructed object -- but that object was never reached by
+// this call's own loadObjects() walk (here: it is sitting in a
+// different, unrelated room, exactly like the env-array test's own
+// lamp-in-roomB setup above, just reached via a nickname instead of an
+// explicit env override). Real expand_node()'s own final linear scan
+// over loaded_objects[] never finds it, so the word correctly does not
+// resolve as a noun at all -- not an error, a silent, correct
+// non-match, the same outcome any other out-of-reach candidate gets.
+static void testParseSentenceNicknamePresentButObjectNotYetLoadedDoesNotResolve() {
+    ObjectVarHarness harness;
+    harness.writeFile("/nk2_roomA.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"rooma\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/nk2_roomB.c",
+        "void setup() { parse_init(); }\n"
+        "mixed *parse_command_id_list() { return ({\"roomb\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/nk2_widget.c",
+        "void setup() { parse_init(); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"widget\"}); }\n"
+        "int is_living() { return 0; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n");
+    harness.writeFile("/nk2_player.c",
+        "void setup() { parse_init(); parse_add_rule(\"get\", \"OBJ\"); }\n"
+        "void go(object dest) { move_object(dest); }\n"
+        "mixed *parse_command_id_list() { return ({\"adventurer\"}); }\n"
+        "int is_living() { return 1; }\n"
+        "int inventory_accessible() { return 1; }\n"
+        "int inventory_visible() { return 1; }\n"
+        "int can_get_obj(mixed a) { return 1; }\n"
+        "int direct_get_obj(object a) { return 1; }\n"
+        "object gotIt;\n"
+        "void do_get_obj(object a) { gotIt = a; }\n"
+        "mixed runWithNicks(string s, mapping n) { return parse_sentence(s, 0, 0, n); }\n"
+        "object probe() { return gotIt; }\n");
+
+    auto roomA = harness.objects.cloneObject("/nk2_roomA");
+    auto roomB = harness.objects.cloneObject("/nk2_roomB");
+    auto player = harness.objects.cloneObject("/nk2_player");
+    auto widget = harness.objects.cloneObject("/nk2_widget");
+    assert(roomA && roomB && player && widget);
+    for (auto& ob : {roomA, roomB, player, widget}) harness.vm.callFunction(ob, "setup", {});
+    harness.vm.callFunction(player, "go", std::vector<amlp::Value>{amlp::Value(roomA)});
+    harness.vm.callFunction(widget, "go", std::vector<amlp::Value>{amlp::Value(roomB)}); // NOT roomA -- unreachable
+
+    auto nicks = std::make_shared<amlp::Mapping>();
+    nicks->entries.emplace_back(amlp::Value(std::string("sam")), amlp::Value(widget));
+    amlp::Value result = harness.vm.callFunction(
+        player, "runWithNicks",
+        std::vector<amlp::Value>{amlp::Value(std::string("get sam")), amlp::Value(nicks)});
+    assert(std::holds_alternative<int64_t>(result.data));
+    assert(std::get<int64_t>(result.data) != 1); // correctly does not resolve
+    // do_get_obj() never ran, so gotIt stays its default-initialized real
+    // 0 (LpcObject::LpcObject()'s own comment on why an unset object
+    // variable reads back as int64_t 0, not a null object reference).
+    assert(std::get<int64_t>(harness.vm.callFunction(player, "probe", {}).data) == 0);
+
+    std::cout << "testParseSentenceNicknamePresentButObjectNotYetLoadedDoesNotResolve OK\n";
+}
+
 // Two direct-object candidates that BOTH individually pass every real
 // check (their own dependentCheckFunctions() probe, and checkOneRelation()'s
 // own per-pair relational probe against the one indirect candidate) must
@@ -22138,6 +22266,8 @@ int main() {
     testParseObjTwoObjectTokenRulePluralDirectSingularIndirectResolvesTheFilteredArray();
     testParseObjTwoObjectTokenRuleSingularDirectPluralIndirectResolvesTheFilteredArray();
     testParseSentenceExplicitEnvArrayOverridesTheOrdinaryEnvironmentWalk();
+    testParseSentenceNicknameResolvesToAnAlreadyLoadedObject();
+    testParseSentenceNicknamePresentButObjectNotYetLoadedDoesNotResolve();
     testParseObjTwoSingularObjectTokenRuleWithTwoValidDirectCandidatesProducesErrAmbig();
     testParseMyRulesRestrictsMatchingToTheCallersOwnRegisteredRulesOnly();
     testParseMyRulesDefaultFlagReturnsVerbRuleArgsArrayWithoutCallingAnything();

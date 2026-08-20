@@ -5063,9 +5063,9 @@ void registerCoreEfuns() {
     // (real `parse_env`, an explicit object-array override for
     // loadObjects()'s own candidate universe) is real as of 2026-08-19 --
     // see ParserPackage::parseSentence()'s own header comment. The fourth
-    // (`nicks`, a lazy word-to-object nickname mapping) is accepted for
-    // real signature compatibility but still not consulted -- a
-    // genuinely separate, still-unimplemented feature, same comment.
+    // (`nicks`, a lazy word-to-object nickname mapping, real
+    // `add_nicknames()`/`expand_node()`) is real as of 2026-08-20, same
+    // comment.
     t.registerEfun("parse_sentence", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("parse_sentence: expected a string sentence argument");
@@ -5078,8 +5078,12 @@ void registerCoreEfuns() {
         if (args.size() > 2 && std::holds_alternative<std::shared_ptr<Array>>(args[2].data)) {
             envArray = &args[2];
         }
+        const Value* nicks = nullptr;
+        if (args.size() > 3 && std::holds_alternative<std::shared_ptr<Mapping>>(args[3].data)) {
+            nicks = &args[3];
+        }
         auto ob = vm.currentObject();
-        return ParserPackage::parseSentence(vm, ob, std::get<std::string>(args[0].data), debugFlag, envArray);
+        return ParserPackage::parseSentence(vm, ob, std::get<std::string>(args[0].data), debugFlag, envArray, nicks);
     });
 
     // mixed parse_my_rules(object user, string sentence, void|int

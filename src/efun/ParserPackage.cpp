@@ -675,11 +675,16 @@ void addObjectsFromArray(LoadedObjectSet& result, std::vector<bool>& myObjects,
 // real add_hash_entry() (packages/parser.c), item 8 piece 4: find or
 // create `word`'s own HashEntry, its three bool vectors pre-sized to
 // `objectCount` -- safe because, exactly like real code's own
-// add_to_hash_table() (the only real caller of add_hash_entry() outside
-// mark_hash_entry(), which this driver does not port -- see
-// LoadedObjectSet::hashTable's own header comment on real add_nicknames()
-// not being ported either), this only ever runs once the numbered
-// object universe has already stopped growing.
+// add_to_hash_table() and addNicknames() below (real add_nicknames(),
+// its own only real caller), this only ever runs once the numbered
+// object universe has already stopped growing. Real add_hash_entry()
+// also has a second real caller, mark_hash_entry() (packages/parser.c:
+// 1015-1037) -- confirmed genuine real dead code, not a port target:
+// grepped the whole vendored driver tree, zero call sites anywhere for
+// mark_hash_entry() itself (declared in packages/parser.h, defined,
+// never invoked), the same "real code, never called" category already
+// found for get_bb_uid()/multiple_adj()/err_obs() elsewhere in this
+// row's own investigation.
 HashEntry& addHashEntry(LoadedObjectSet& result, const std::string& word, size_t objectCount) {
     auto [it, inserted] = result.hashTable.try_emplace(word);
     if (inserted) {
@@ -709,6 +714,33 @@ void addToHashTable(LoadedObjectSet& result, const std::shared_ptr<LpcObject>& o
         HashEntry& he = addHashEntry(result, adj, result.objects.size());
         he.isAdj = true;
         he.adjObjs[index] = true;
+    }
+}
+
+// real add_nicknames() (packages/parser.c:1095-1108), item 8 piece 4:
+// "Note extremely clever delayed evaluation to avoid having to lookup
+// object pointer -> index" (real code's own comment, kept for context --
+// this is exactly why the real work is split into this eager half and
+// expandNode()'s own lazy half below, rather than resolving every
+// nickname to an object index up front). Real code walks `map`'s own
+// mapping_node_t hash buckets directly and checks `mn->values[0].type
+// == T_STRING` -- confirmed against real mapping.h/mapping.c directly
+// (mapping_node_t::values[0] is the real KEY slot, not a value column;
+// mapping.c:39's own "MAP_SVAL_HASH(mn->values[0])" hashes it for
+// lookup, settling what could otherwise be read either way from
+// add_nicknames() alone), i.e. "every string key in the mapping" -- this
+// driver's own Mapping::entries already stores key/value as a
+// std::pair, so `.first` is the direct equivalent, no ambiguity to
+// resolve at this driver's own level. Only marks the flag; does not
+// look at or validate the value at all (that is expandNode()'s own job,
+// lazily, per hash entry, at most once).
+void addNicknames(LoadedObjectSet& result, const Value& nicks) {
+    auto* mapPtr = std::get_if<std::shared_ptr<Mapping>>(&nicks.data);
+    if (!mapPtr || !*mapPtr) return;
+    for (const auto& entry : (*mapPtr)->entries) {
+        if (auto* key = std::get_if<std::string>(&entry.first.data)) {
+            addHashEntry(result, *key, result.objects.size()).isNickname = true;
+        }
     }
 }
 
@@ -859,7 +891,7 @@ void ParserPackage::interrogateObject(VM& vm, const std::shared_ptr<LpcObject>& 
 void ParserPackage::invalidateMasterUsersCache() { masterUsersCache().valid = false; }
 
 LoadedObjectSet ParserPackage::loadObjects(VM& vm, const std::shared_ptr<LpcObject>& parseUser,
-                                            const Value* envArray) {
+                                            const Value* envArray, const Value* nicks) {
     LoadedObjectSet result;
 
     // Step 1 (real load_objects()'s own comment: LPC code run during
@@ -898,13 +930,7 @@ LoadedObjectSet ParserPackage::loadObjects(VM& vm, const std::shared_ptr<LpcObje
     // real "he = add_hash_entry(my_string); he->flags |= HV_ADJ;
     // bitvec_copy(&he->pv.adj, &my_objects);" -- the fixed "my"
     // adjective, covering exactly the objects the RAO_MY walk above
-    // marked. Real add_nicknames(parse_nicks) is still not ported here --
-    // a genuinely separate feature from `envArray` above (a lazy
-    // word-to-object mapping consumed inside parseObj()'s own matching
-    // loop, not loadObjects()'s own object-universe construction), needs
-    // real new machinery, not yet built -- see
-    // ParserPackage::parseSentence()'s own header comment for the full
-    // real scope and citation.
+    // marked.
     {
         HashEntry& myEntry = addHashEntry(result, "my", result.objects.size());
         myEntry.isAdj = true;
@@ -912,6 +938,13 @@ LoadedObjectSet ParserPackage::loadObjects(VM& vm, const std::shared_ptr<LpcObje
             if (myObjects[i]) myEntry.adjObjs[i] = true;
         }
     }
+
+    // real "if (parse_nicks) add_nicknames(parse_nicks);"
+    // (packages/parser.c:1162-1163), the exact real position: right
+    // after the fixed "my" adjective entry above, before the
+    // "num_people" loop below. addNicknames()'s own comment has the
+    // full real citation and the key-vs-value ambiguity it resolves.
+    if (nicks) addNicknames(result, *nicks);
 
     // real load_objects()'s own final "num_people" loop, unconditional
     // regardless of whether an explicit parse_env was given (confirmed
@@ -1221,6 +1254,25 @@ struct SentenceSession {
     // same reason every other "current parse in progress" global already
     // is (this struct's own header comment).
     std::optional<Value> envArray;
+
+    // real `parse_nicks` (packages/parser.c): same shape and same
+    // reasoning as envArray directly above, one real difference worth
+    // recording rather than assuming away -- real free_parse_globals()
+    // (parser.c:621-639) explicitly resets `parse_nicks = 0;` (and
+    // `parse_env = 0;`) after every single parse_sentence() call,
+    // confirmed by reading it directly, so real code's own *observable*
+    // contract already is "fresh per call, nothing leaks across calls,"
+    // the same guarantee this driver's own fresh-per-call SentenceSession
+    // gives for free -- not a coincidental simplification, the actual
+    // real behavior. Only ParserPackage::parseSentence() ever populates
+    // this (real f_parse_sentence()'s own "if (st_num_arg == 4)
+    // parse_nicks = ...;" is the only real site that ever assigns
+    // parse_nicks at all); parseMyRules() below leaves it unset, matching
+    // real f_parse_my_rules() -- it has no `nicks` argument of its own,
+    // and parse_nicks is unconditionally 0 by the time it would run
+    // (freed after the prior call, never set by this call), so real
+    // parse_my_rules() never resolves a nickname either.
+    std::optional<Value> nicks;
 };
 
 // real isignore(x) = (!uisprint(x) || x == '\'').
@@ -1387,26 +1439,91 @@ std::string queryTheShort(VM& vm, const std::shared_ptr<LpcObject>& ob) {
     return "the thing";
 }
 
+// real expand_node() (packages/parser.c:1302-1323), ROADMAP.md row
+// 0.13a's own "nicks" note, implemented 2026-08-20: a nickname hash
+// entry's own one-shot lazy resolution, run from parseObj()'s own word
+// loop below the first (and only the first) time it actually encounters
+// a hash entry with isNickname still set. Two real quirks confirmed
+// directly from the C and ported faithfully, not smoothed over:
+//
+// 1. "he->flags &= ~HV_NICKNAME;" is the function's very first
+//    statement, unconditional -- it runs before any of the lookup/
+//    validity checks below, so a *failed* resolution (destructed
+//    object, an object never reached by this call's own loadObjects()
+//    walk) still permanently disables re-attempting this same hash
+//    entry for the rest of this call, exactly like a successful one.
+//    If a nickname word appears twice in one sentence and the first
+//    occurrence fails to resolve, the second occurrence does not get a
+//    second attempt -- it just sees isNoun still false and falls
+//    through, the same real outcome either way.
+// 2. real "sv = find_string_in_mapping(parse_nicks, he->name); if
+//    (sv->type != T_OBJECT) return;" -- find_string_in_mapping() (real
+//    mapping.c:830-848) never returns null, it returns "&const0u" (a
+//    static T_NUMBER 0) on a missing key, so a missing key and a
+//    present-but-non-object value both fold into the exact same
+//    "sv->type != T_OBJECT" bail, one check covering both real cases.
+//    This driver's own Mapping::entries has no equivalent sentinel to
+//    reuse, so the equivalent is written out as the two real cases it
+//    actually is: "not found in entries" and "found but not an object",
+//    same combined effect.
+//
+// The final real step -- "linear, but we only do this once per nickname
+// they use" -- confirms the object must already be part of *this call's
+// own* LoadedObjectSet::objects (built once, upfront, by loadObjects()
+// before parseObj() ever runs): a nickname mapped to some real, live,
+// non-destructed object this call's own environment/inventory walk
+// simply never reached (a real, correctly-unresolved "object not yet
+// loaded" case, not a bug) does not resolve, silently, exactly like any
+// other failed candidate lookup elsewhere in this file.
+void expandNode(SentenceSession& session, HashEntry& he, const std::string& word) {
+    he.isNickname = false; // unconditional, see quirk 1 above -- runs even on every early return below
+    if (!session.nicks) return;
+    auto* mapPtr = std::get_if<std::shared_ptr<Mapping>>(&session.nicks->data);
+    if (!mapPtr || !*mapPtr) return;
+
+    // real find_string_in_mapping(parse_nicks, he->name) -- see quirk 2
+    // above for why "not found" and "found but not T_OBJECT" collapse
+    // into the same outcome here, matching real code's own single check.
+    const Value* value = nullptr;
+    for (const auto& entry : (*mapPtr)->entries) {
+        if (auto* key = std::get_if<std::string>(&entry.first.data); key && *key == word) {
+            value = &entry.second;
+            break;
+        }
+    }
+    if (!value) return; // real "sv->type != T_OBJECT" via the missing-key half of find_string_in_mapping()'s own const0u fallback
+    auto* obPtr = std::get_if<std::shared_ptr<LpcObject>>(&value->data);
+    if (!obPtr || !*obPtr) return; // real "sv->type != T_OBJECT" via the wrong-value-type half
+    const auto& ob = *obPtr;
+    if (ob->isDestructed()) return; // real "if (ob->flags & O_DESTRUCTED) return;"
+    if (!ob->hasParseInfo()) return; // real "if (ob->pinfo == 0) return;"
+
+    for (size_t i = 0; i < session.loaded.objects.size(); i++) {
+        if (session.loaded.objects[i] == ob) {
+            he.isNoun = true;
+            he.nounObjs[i] = true;
+            return;
+        }
+    }
+    // real: falls off the end of the loop silently -- ob is a real,
+    // live, interrogated object, just not one this call's own
+    // loadObjects() ever reached, so no match, exactly like real code.
+}
+
 // real parse_obj() (packages/parser.c:1325-1543), ROADMAP.md row 0.13a
 // item 8 piece 5 -- the real noun-phrase word-matching engine: articles
 // ("the"), "all"/"all of", possessive "my", ordinals ("the second
-// sword", numeric "3rd"), nicknames (expand_node() -- a documented no-op
-// today, see below), adjective chains ("big red sword" -- each adjective
-// narrows `objects` before the noun itself is read), singular-vs-plural
-// noun matching (OBJ vs OBS), and the LIV_MODIFIER/VIS_ONLY_MODIFIER
-// filters, all via bitvector intersection against LoadedObjectSet's own
-// hash table. `state` is mutated in place as words are consumed, exactly
-// matching real code's own "parse_state_t *state" pointer aliasing --
-// each individual candidate interpretation gets its own `localState`
-// copy to recurse into parseRule() with, leaving `state` itself free to
-// keep advancing through an adjective chain.
-//
-// real expand_node() (a nickname's lazy noun-id resolution) is not
-// ported: it is only ever reached through an HV_NICKNAME hash entry, and
-// nothing populates HashEntry::isNickname yet (real add_nicknames(),
-// LoadedObjectSet::hashTable's own comment) -- this driver's own
-// parseSentence() has no `nicks` parameter at all yet for anything to
-// mark one with. Genuinely vacuous today, not silently skipped.
+// sword", numeric "3rd"), nicknames (expand_node(), real and tested as
+// of 2026-08-20, see its own comment directly above), adjective chains
+// ("big red sword" -- each adjective narrows `objects` before the noun
+// itself is read), singular-vs-plural noun matching (OBJ vs OBS), and
+// the LIV_MODIFIER/VIS_ONLY_MODIFIER filters, all via bitvector
+// intersection against LoadedObjectSet's own hash table. `state` is
+// mutated in place as words are consumed, exactly matching real code's
+// own "parse_state_t *state" pointer aliasing -- each individual
+// candidate interpretation gets its own `localState` copy to recurse
+// into parseRule() with, leaving `state` itself free to keep advancing
+// through an adjective chain.
 //
 // real code's own `err_obs`/`multiple_adj` locals are write-only dead
 // code (confirmed directly: neither is ever read anywhere in
@@ -1477,6 +1594,11 @@ void parseObj(VM& vm, SentenceSession& session, MatchState& state, int tok, int 
         auto hnodeIt = session.loaded.hashTable.find(str);
         if (hnodeIt == session.loaded.hashTable.end()) return; // real "if (!hnode) break;"
         HashEntry& hnode = hnodeIt->second;
+
+        // real "if (hnode->flags & HV_NICKNAME) expand_node(hnode);" --
+        // real position, right here, before the isNoun check just below
+        // gets a chance to read whatever expandNode() may have just set.
+        if (hnode.isNickname) expandNode(session, hnode, str);
 
         if (singularLegal && hnode.isNoun) {
             bool exploreErrors = (session.bestMatchWeight == 0) && (state.numErrors < session.bestNumErrors);
@@ -2921,7 +3043,8 @@ void runParseMatch(VM& vm, SentenceSession& session, const std::shared_ptr<LpcOb
                                                [](const VerbRuleNode& n) { return n.hasObjectToken; });
                 if (verbHasObj) {
                     session.loaded = ParserPackage::loadObjects(
-                        vm, session.caller, session.envArray ? &*session.envArray : nullptr);
+                        vm, session.caller, session.envArray ? &*session.envArray : nullptr,
+                        session.nicks ? &*session.nicks : nullptr);
                     session.objectsLoaded = true;
                 }
             }
@@ -2965,7 +3088,7 @@ Value buildRuleArgsArray(const SentenceSession& session) {
 } // namespace
 
 Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& caller, const std::string& sentence,
-                                     bool debugFlag, const Value* envArray) {
+                                     bool debugFlag, const Value* envArray, const Value* nicks) {
     // real code's own check order: the "not known by the parser" guard
     // runs before anything else, including the debug-flag check below.
     if (!caller || !caller->hasParseInfo()) {
@@ -2986,6 +3109,11 @@ Value ParserPackage::parseSentence(VM& vm, const std::shared_ptr<LpcObject>& cal
     // loadObjects() (its own comment), which the verb-lookup loop below
     // lazily calls at most once per parseSentence() call.
     if (envArray) session.envArray = *envArray;
+    // real "if (st_num_arg == 4) parse_nicks = (sp--)->u.map;" -- same
+    // "only consulted by loadObjects()" shape as envArray above, plus
+    // parseObj()'s own lazy expandNode() later in this same call
+    // (SentenceSession::nicks's own comment has the full real citation).
+    if (nicks) session.nicks = *nicks;
 
     // real "pi = parse_user->pinfo;", set for the duration of this call
     // (ParseInProgressGuard's own comment) -- parseSentence() itself

@@ -202,7 +202,7 @@ struct HashEntry {
     bool isNoun = false;     // real HV_NOUN
     bool isPlural = false;   // real HV_PLURAL
     bool isAdj = false;      // real HV_ADJ
-    bool isNickname = false; // real HV_NICKNAME (not yet set by anything -- see loadObjects()'s own comment)
+    bool isNickname = false; // real HV_NICKNAME, set by loadObjects()'s own real add_nicknames() port, cleared and resolved lazily by parseObj()'s own real expand_node() port (ParserPackage.cpp, both real packages/parser.c citations in loadObjects()'s own comment below)
     std::vector<bool> nounObjs;   // real pv.noun
     std::vector<bool> pluralObjs; // real pv.plural
     std::vector<bool> adjObjs;    // real pv.adj
@@ -422,20 +422,22 @@ public:
     // but-not-already-reachable user (real load_objects()'s own final
     // "num_people" loop), and finally builds the word -> object-index
     // hash table (piece 4, add_to_hash_table()). Real add_nicknames()
-    // (a caller-supplied object -> nickname mapping) is not ported here
-    // -- nothing in this driver's own parseSentence() signature
-    // consumes a `nicks` argument yet either (see that method's own
-    // comment), so there is nothing real for it to be exercised with;
-    // HashEntry::isNickname stays false for every entry this method
-    // produces. Called lazily from parseSentence() itself now (real
-    // "if (!objects_loaded && (parse_verb_entry->flags & VB_HAS_OBJ))
-    // load_objects();"), the first time a matched verb has at least one
-    // rule with an object-family token -- real load_objects() has no
-    // efun surface of its own either (it is exclusively parse_sentence()'s
-    // own internal pipeline), consumed by ParserPackage::parseObj() (item
-    // 8 piece 5, ROADMAP.md row 0.13a).
+    // (packages/parser.c:1095-1108) is ported here too, 2026-08-20, at
+    // the exact real call site (right after the fixed "my" adjective
+    // entry, before the "num_people" loop -- real "if (parse_nicks)
+    // add_nicknames(parse_nicks);", parser.c:1162-1163): for every
+    // STRING key in `nicks` (real parse_nicks, a caller-supplied
+    // nickname-word -> object mapping), find-or-create a HashEntry for
+    // that key text and set HashEntry::isNickname. This only marks the
+    // flag eagerly, for every key regardless of whether the player's
+    // own sentence ever actually uses it -- the real, potentially
+    // expensive lookup+resolution (real expand_node(), packages/
+    // parser.c:1302-1323) is deferred lazily to ParserPackage::parseObj()
+    // itself, the first time its own word loop actually encounters a
+    // hash entry with isNickname still set (item 8 piece 5,
+    // ROADMAP.md row 0.13a's own "nicks" note).
     static LoadedObjectSet loadObjects(VM& vm, const std::shared_ptr<LpcObject>& parseUser,
-                                        const Value* envArray = nullptr);
+                                        const Value* envArray = nullptr, const Value* nicks = nullptr);
 
     // real f_parse_sentence() (packages/parser.c). Real signature is
     // `mixed parse_sentence(string, void|int, void|object*,
@@ -456,15 +458,24 @@ public:
     // `add_nicknames()`/`expand_node()`'s lazy nickname-to-object
     // mapping -- a caller-supplied `mapping` from arbitrary word strings
     // to specific objects, resolved lazily the first time parse_obj()'s
-    // own word loop actually encounters that word), remains genuinely
-    // unimplemented -- real scope confirmed by reading
-    // `packages/parser.c:1095-1109` (`add_nicknames()`) and
-    // `packages/parser.c:1302-1319` (`expand_node()`) directly: needs a
-    // new `HV_NICKNAME`-equivalent lazy-placeholder hash-entry flag and a
-    // one-shot expansion step inside parseObj()'s own word-matching loop
-    // (ParserPackage.cpp), not yet built. Not attempted here -- ROADMAP.md
-    // row 0.13a's own note records this as the row's one remaining real
-    // gap.
+    // own word loop actually encounters that word), is real as of
+    // 2026-08-20 -- re-confirmed directly against
+    // `packages/parser.c:1095-1108` (`add_nicknames()`) and `:1302-1323`
+    // (`expand_node()`, four lines longer than the prior session's own
+    // citation, which stopped one line short of the function's own
+    // closing brace) before building anything. See `loadObjects()`'s own
+    // comment for the eager flag-marking half (`add_nicknames()`) and
+    // `ParserPackage.cpp`'s own `expandNode()` for the lazy resolution
+    // half (`expand_node()`), including two real quirks ported
+    // faithfully rather than silently smoothed over: the flag clear runs
+    // unconditionally, before any success/failure check, so a *failed*
+    // resolution (destructed object, an object this call's own
+    // `loadObjects()` never reached) permanently disables re-attempting
+    // that same word for the rest of this call, not just a successful
+    // one; and a missing/non-object mapping value folds into the exact
+    // same "no match" outcome as a missing key, matching real
+    // `find_string_in_mapping()`'s own never-null `&const0u` convention
+    // rather than a null-pointer special case.
     //
     // OBJ/LIV/OBS/LVS tokens resolve real objects for any rule shape
     // (single-object, both-singular two-object, and plural-involving
@@ -479,7 +490,7 @@ public:
     // code's own "apply_master_ob() returned null" -> "*sp = const0"
     // fallback).
     static Value parseSentence(VM& vm, const std::shared_ptr<LpcObject>& caller, const std::string& sentence,
-                                bool debugFlag, const Value* envArray = nullptr);
+                                bool debugFlag, const Value* envArray = nullptr, const Value* nicks = nullptr);
 
     // real f_parse_my_rules() (packages/parser.c): identical matching
     // engine to parseSentence() above, restricted two ways real

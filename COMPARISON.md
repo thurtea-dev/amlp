@@ -18,13 +18,16 @@ below exist so a reader can see how a third, architecturally different
 driver solved the same problems, not because AMLP is trying to match it
 feature-for-feature.
 
-Last updated: 2026-08-20 (refreshed same day: Phase 1's real-blocker count
-moved from 5/11 to 10/11, not from new feature work but from five stale
-checkboxes -- rows 1.2, 1.3, 1.4, 1.9, and 1.16 -- corrected the same
-2026-08-20 session to match real, already-landed work their own cells
-had recorded across many earlier sessions but never checked off. See
-`ROADMAP.md`'s own dated correction on each row and this file's own
-rewritten Phase 1 section below for the honest accounting.)
+Last updated: 2026-08-20 (refreshed twice the same day: first, Phase 1's
+real-blocker count moved from 5/11 to 10/11, not from new feature work
+but from five stale checkboxes -- rows 1.2, 1.3, 1.4, 1.9, and 1.16 --
+corrected to match real, already-landed work their own cells had
+recorded across many earlier sessions but never checked off; second, a
+further session actually built row 0.13a's own last remaining Phase 0
+sub-gap, `parse_sentence()`'s `nicks` argument -- real `add_nicknames()`/
+`expand_node()` now ported and tested. See `ROADMAP.md`'s own dated
+corrections on each row and this file's own rewritten sections below for
+the full accounting.)
 `ROADMAP.md` and `STATUS.md` are the living
 documents; if this file and either of those disagree on a specific row's
 status, trust `ROADMAP.md`'s own checkbox and re-derive this file's own
@@ -154,11 +157,11 @@ LIV") via `dependent_check_functions()`/`check_one_relation()`/
 `check_object_relations()`, all live-verified against a real running
 driver. Real corpus evidence found 77 real two-object rules in Dead
 Souls' own `lib/verbs/` alone, so this was a real, sized piece of work,
-not a theoretical corner case. One real, specific sub-gap remains:
-`parse_sentence()`'s own 4th `nicks` argument (a caller-supplied nickname
-mapping) is still accepted for signature compatibility but never
-consulted. See `ROADMAP.md` row 0.13a for the full component breakdown,
-citations, and live-verification history.
+not a theoretical corner case. `parse_sentence()`'s own 4th `nicks`
+argument (a caller-supplied nickname mapping, real `add_nicknames()`/
+`expand_node()`) is now real too, 2026-08-20 -- this row's own last
+remaining sub-gap is closed. See `ROADMAP.md` row 0.13a for the full
+component breakdown, citations, and live-verification history.
 
 ---
 
@@ -185,7 +188,7 @@ driver ships.
 | FluffOS 2.9 (ds2.08) | 270 | `ROADMAP.md` row 0.13's own `efun_defs.c` accounting (excludes ifdef'd-out/non-runtime entries; a raw `grep -c '^{"'` over the same file gives 276, the 6-name difference being exactly those exclusions) |
 | LDMud | ~305 | Rough estimate: `temp/ldmud/doc/efun/` file count (one doc page per real efun is LDMud's own documentation convention; not independently cross-checked against a table the way the FluffOS/DGD/AMLP numbers were, so treat as approximate) |
 | DGD (this vendored C++ port) | 243 | Real count: `grep -c '^FUNCDEF('` across `temp/dgd/src/kfun/{builtin,std,file,math,extra}.cpp` |
-| **AMLP** | **248 of 270 real FluffOS names** (240 non-`parse_*` + all 8 `parse_*`) | `ROADMAP.md` row 0.13/0.13a's own accounting. The 22-name real gap: 40 non-`parse_*` names are documented, individually-verified exclusions (architecture mismatch, e.g. no `TYPE_CLASS`/buffer-type/ed()-editor equivalent, or zero real call sites across all six vendored mudlib corpora) minus the ones no longer counted against the gap. `parse_*` itself is no longer part of the gap at all (all 8 names implemented as of row 0.13a's own most recent slice, see below), though `parse_sentence()`'s own `nicks` argument stays unconsulted, a feature-completeness gap within an implemented efun rather than a missing-efun gap. AMLP's own efun table primarily targets FluffOS's surface, with LDMud/DGD-specific additions layered on where a dialect diverges (`m_indices`/`m_values`, `#'name`, `nil`, `atomic`) -- it does not separately track coverage against LDMud's or DGD's own full efun/kfun lists the way it does for FluffOS. |
+| **AMLP** | **248 of 270 real FluffOS names** (240 non-`parse_*` + all 8 `parse_*`) | `ROADMAP.md` row 0.13/0.13a's own accounting. The 22-name real gap: 40 non-`parse_*` names are documented, individually-verified exclusions (architecture mismatch, e.g. no `TYPE_CLASS`/buffer-type/ed()-editor equivalent, or zero real call sites across all six vendored mudlib corpora) minus the ones no longer counted against the gap. `parse_*` itself is no longer part of the gap at all (all 8 names implemented, every argument of every one of them real as of 2026-08-20's `nicks` slice, see row 0.13a's own entry). AMLP's own efun table primarily targets FluffOS's surface, with LDMud/DGD-specific additions layered on where a dialect diverges (`m_indices`/`m_values`, `#'name`, `nil`, `atomic`) -- it does not separately track coverage against LDMud's or DGD's own full efun/kfun lists the way it does for FluffOS. |
 
 ## Master/boot apply coverage
 
@@ -228,7 +231,7 @@ applicable).
 | `rlimits` (per-task tick/stack limits) | No (row 1.11, not started) | -- | -- | Yes |
 | `parse_string` (grammar-driven string parsing kfun) | No (row 1.13, not started -- confirmed comparable in size to `parse_*` itself, a dedicated DFA+LALR subsystem) | -- | -- | Yes |
 | Lightweight objects (value-semantics objects) | No (row 1.14, not started) | -- | -- | Yes |
-| `parse_*` natural-language sentence parser | All 8 efuns real, including single- and two-object `OBJ`/`LIV`/`OBS`/`LVS` matching; `nicks` argument unconsulted | Yes (real source this work is ported from) | -- | -- |
+| `parse_*` natural-language sentence parser | All 8 efuns real, including single- and two-object `OBJ`/`LIV`/`OBS`/`LVS` matching and the `nicks` nickname-mapping argument | Yes (real source this work is ported from) | -- | -- |
 | `save_object`/`restore_object`, real `.o` text format | Partial (restore-side only; save still uses this driver's own format) | Yes | Yes (own format) | Statedump-based, different model entirely |
 | PCRE `regexp`/`regexplode`/`reg_assoc` | Yes | Yes | Yes (own regexp efuns) | -- |
 | Full telnet IAC negotiation, echo suppression, NAWS | Yes | Yes | Yes | Yes |
