@@ -265,6 +265,33 @@ void serializeValue(std::ostream& out, const Value& v) {
             for (const auto& item : (*av)->items) serializeValue(out, item);
         }
     } else if (auto* mv = std::get_if<std::shared_ptr<Mapping>>(&v.data)) {
+        // ROADMAP.md row 1.9's own addendum, 2026-08-21 ("Save/restore
+        // silent-truncation finding"): this format has no encoding for
+        // Mapping::width/extraColumns at all -- every entry below only
+        // ever wrote/read column 0. Before this check, a width > 1
+        // mapping (real LDMud N-column, the rune-wall.c width-2 shape)
+        // saved silently, writing only column 0 with every other column
+        // discarded, and restore_object() always rebuilt a width-1
+        // Mapping regardless of what had actually been saved -- a real,
+        // live "accepts input and silently produces wrong results"
+        // hazard, the same category this project already treated as
+        // worse than "not implemented" once before
+        // (`parse_sentence()`'s `nicks` argument). Bounded stopgap only,
+        // not full width-aware serialization (that remains its own,
+        // separately-scoped, larger item, still open on row 1.9): fail
+        // loudly instead of truncating silently. Checked here, inside
+        // the recursive writer, not only at save_object()'s own top-
+        // level per-variable loop, so a width > 1 mapping nested inside
+        // an array or another mapping is caught too, not just one sitting
+        // directly in an object variable.
+        if (*mv && (*mv)->width > 1) {
+            throw LpcRuntimeError(
+                "save_object: cannot save a mapping with width > 1 (real "
+                "LDMud N-column mapping) -- this driver's save_object()/"
+                "restore_object() only serialize column 0 today, so saving "
+                "one would silently discard every other column instead of "
+                "raising this error; see ROADMAP.md row 1.9's own note");
+        }
         size_t count = *mv ? (*mv)->entries.size() : 0;
         out << 'M' << count << ':';
         if (*mv) {
@@ -6890,7 +6917,14 @@ void registerCoreEfuns() {
     // references and closures, which real save_object() cannot
     // serialize either (an object reference saved to disk cannot
     // survive a reboot, and neither real FluffOS nor this driver
-    // attempts it). __SAVE_EXTENSION__ (".o") is appended
+    // attempts it). A width > 1 mapping (real LDMud N-column mapping)
+    // also throws rather than saving, a bounded stopgap added
+    // 2026-08-21 (ROADMAP.md row 1.9's own addendum) once neither this
+    // format nor the real FluffOS one below had any way to represent
+    // one -- see serializeValue()'s own Mapping branch for the full
+    // reasoning; full width-aware serialization remains its own,
+    // separately-scoped, larger item, not attempted here.
+    // __SAVE_EXTENSION__ (".o") is appended
     // by the *caller* in this mudlib's own code (e.g. account_d.c's
     // account_path()+__SAVE_EXTENSION__), so these two efuns use the
     // path normalized the same way real object.c's save_object() itself

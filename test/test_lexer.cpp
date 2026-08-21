@@ -10340,6 +10340,76 @@ static void testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays() {
     std::cout << "testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays OK\n";
 }
 
+// ROADMAP.md row 1.9's own "Save/restore silent-truncation finding"
+// addendum (2026-08-21): a bounded stopgap, not full width-aware
+// serialization (still its own, separately-scoped, larger item on that
+// same row) -- save_object() on a width > 1 mapping (real LDMud
+// N-column mapping) now throws a clear, specific error instead of
+// silently writing only column 0 (see serializeValue()'s own Mapping
+// branch, EfunTable.cpp). The width-1 case above
+// (testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays) already
+// covers, and continues to pass unchanged after this fix, proving zero
+// behavior change for the common (width-1) case; this test isolates the
+// new width > 1 error path specifically.
+static void testSaveObjectThrowsClearErrorForWidthGreaterThanOneMappingInsteadOfSilentlyTruncating() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/save_width_probe.c",
+        "mapping m;\n"
+        // Real LDMud width-2 mapping literal (the rune-wall.c shape,
+        // ROADMAP.md row 1.9's own real corpus citation): each key has
+        // two values, separated by ";".
+        "void create() { m = ([\"weakness\": \"fire\"; 1]); }\n"
+        "int save() { return save_object(\"/probe_wide.o\"); }\n");
+    auto obj = harness.objects.cloneObject("/save_width_probe");
+    assert(obj != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(obj, "save", {});
+    } catch (const amlp::LpcRuntimeError& e) {
+        threw = true;
+        std::string msg = e.what();
+        assert(msg.find("save_object") != std::string::npos);
+        assert(msg.find("width") != std::string::npos);
+    }
+    assert(threw);
+
+    std::cout << "testSaveObjectThrowsClearErrorForWidthGreaterThanOneMappingInsteadOfSilentlyTruncating OK\n";
+}
+
+static void testSaveObjectRestoreObjectStillRoundTripsAWidthOneMappingAfterTheWidthCheck() {
+    // Same width-check code path as the test above, opposite input: a
+    // plain, ordinary width-1 mapping (every mapping this driver
+    // produced before row 1.9, and everything real corpus content still
+    // actually saves today, per that row's own "zero real corpus usage"
+    // finding) must still save and restore exactly as before -- the new
+    // check must not fire, and must not otherwise change this path at
+    // all.
+    ObjectVarHarness harness;
+    harness.writeFile("/save_width1_probe.c",
+        "mapping m;\n"
+        "void create() { m = ([\"a\": 1, \"b\": 2]); }\n"
+        "void clear() { m = 0; }\n"
+        "int save() { return save_object(\"/probe_narrow.o\"); }\n"
+        "int load() { return restore_object(\"/probe_narrow.o\"); }\n"
+        "int query_a() { return m[\"a\"]; }\n"
+        "int query_b() { return m[\"b\"]; }\n");
+    auto obj = harness.objects.cloneObject("/save_width1_probe");
+    assert(obj != nullptr);
+
+    amlp::Value saveResult = harness.vm.callFunction(obj, "save", {});
+    assert(std::get<int64_t>(saveResult.data) == 1);
+
+    harness.vm.callFunction(obj, "clear", {});
+    amlp::Value loadResult = harness.vm.callFunction(obj, "load", {});
+    assert(std::get<int64_t>(loadResult.data) == 1);
+
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "query_a", {}).data) == 1);
+    assert(std::get<int64_t>(harness.vm.callFunction(obj, "query_b", {}).data) == 2);
+
+    std::cout << "testSaveObjectRestoreObjectStillRoundTripsAWidthOneMappingAfterTheWidthCheck OK\n";
+}
+
 static void testRestoreObjectParsesRealFluffosOnDiskFormatScalarsAndNesting() {
     // restore_object() previously only understood this driver's own
     // tab-delimited save format (see serializeValue()/deserializeValue()
@@ -22032,6 +22102,59 @@ static const char* kLoginTestAccountDC =
     "}\n"
     "\n"
     "int\n"
+    "character_name_available(string char_name) {\n"
+    "    if (!char_name || char_name == \"\") {\n"
+    "        return 0;\n"
+    "    }\n"
+    "    return file_size(character_path(char_name) + \".o\") == -1;\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "add_character(string account_name, string char_name) {\n"
+    "    object rec;\n"
+    "    string path;\n"
+    "    string *chars;\n"
+    "\n"
+    "    if (!account_exists(account_name) || !char_name || char_name == \"\") {\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    path = account_path(account_name);\n"
+    "    rec = new(ACCOUNT_RECORD);\n"
+    "    rec->load_me(path);\n"
+    "    chars = rec->query_characters();\n"
+    "    if (!chars) {\n"
+    "        chars = ({});\n"
+    "    }\n"
+    "    if (member_array(char_name, chars) == -1) {\n"
+    "        chars += ({ char_name });\n"
+    "    }\n"
+    "    rec->set_characters(chars);\n"
+    "    rec->save_me(path);\n"
+    "    destruct(rec);\n"
+    "\n"
+    "    ensure_character_dirs(char_name);\n"
+    "    save_object(character_path(char_name));\n"
+    "}\n"
+    "\n"
+    "string *\n"
+    "characters(string account_name) {\n"
+    "    object rec;\n"
+    "    string *chars;\n"
+    "\n"
+    "    if (!account_exists(account_name)) {\n"
+    "        return ({});\n"
+    "    }\n"
+    "\n"
+    "    rec = new(ACCOUNT_RECORD);\n"
+    "    rec->load_me(account_path(account_name));\n"
+    "    chars = rec->query_characters();\n"
+    "    destruct(rec);\n"
+    "\n"
+    "    return chars ? chars : ({});\n"
+    "}\n"
+    "\n"
+    "int\n"
     "account_exists(string name) {\n"
     "    if (!name || name == \"\") {\n"
     "        return 0;\n"
@@ -22093,18 +22216,21 @@ static const char* kLoginTestAccountDC =
 // implicitly at its real int-variable zero default and calls
 // got_account_name() directly instead, the same starting point logon()
 // itself would have left the object in). Updated 2026-08-21 (build
-// ordering item 3, character persistence) to match enter_game()'s own
-// new load_character()/query_login_count() calls.
+// ordering item 4, character creation) to match got_confirm_password()'s
+// own new got_character_name() step and got_login_password()'s own new
+// ACCOUNT_D->characters() lookup, both replacing the old direct
+// account-name-as-character-name shape.
 static const char* kLoginTestLoginC =
     "#include <globals.h>\n"
     "\n"
     "private string account_name;\n"
+    "private string character_name;\n"
     "private int tries;\n"
     "private string pending_password;\n"
     "\n"
     "private\n"
     "int\n"
-    "valid_account_name(string name)\n"
+    "valid_name(string name)\n"
     "{\n"
     "    if (!name || name == \"\") return 0;\n"
     "    if (strsrch(name, \"/\") != -1) return 0;\n"
@@ -22119,8 +22245,8 @@ static const char* kLoginTestLoginC =
     "\n"
     "    write(\"\\n\");\n"
     "    user = new(USER_OB);\n"
-    "    user->set_name(account_name);\n"
-    "    user->load_character(ACCOUNT_D->character_path(account_name));\n"
+    "    user->set_name(character_name);\n"
+    "    user->load_character(ACCOUNT_D->character_path(character_name));\n"
     "    write(\"Welcome back! You have logged in \" + user->query_login_count() +\n"
     "        \" time(s).\\n\");\n"
     "    exec(user, this_object());\n"
@@ -22141,7 +22267,7 @@ static const char* kLoginTestLoginC =
     "{\n"
     "    remove_call_out(\"login_timeout\");\n"
     "\n"
-    "    if (!valid_account_name(str)) {\n"
+    "    if (!valid_name(str)) {\n"
     "        write(\"\\nThat is not a valid account name. What account name do you wish? \");\n"
     "        input_to(\"got_account_name\");\n"
     "        return;\n"
@@ -22163,9 +22289,13 @@ static const char* kLoginTestLoginC =
     "void\n"
     "got_login_password(string str)\n"
     "{\n"
+    "    string *chars;\n"
+    "\n"
     "    remove_call_out(\"login_timeout\");\n"
     "\n"
     "    if (ACCOUNT_D->check_password(account_name, str)) {\n"
+    "        chars = ACCOUNT_D->characters(account_name);\n"
+    "        character_name = sizeof(chars) ? chars[0] : account_name;\n"
     "        enter_game();\n"
     "        return;\n"
     "    }\n"
@@ -22219,6 +22349,29 @@ static const char* kLoginTestLoginC =
     "\n"
     "    pending_password = 0;\n"
     "    write(\"\\nAccount created.\\n\");\n"
+    "    write(\"What would you like to name your character? \");\n"
+    "    input_to(\"got_character_name\");\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "got_character_name(string str)\n"
+    "{\n"
+    "    remove_call_out(\"login_timeout\");\n"
+    "\n"
+    "    if (!valid_name(str)) {\n"
+    "        write(\"\\nThat is not a valid character name. What would you like to name your character? \");\n"
+    "        input_to(\"got_character_name\");\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    if (!ACCOUNT_D->character_name_available(str)) {\n"
+    "        write(\"\\nThat character name is already taken. What would you like to name your character? \");\n"
+    "        input_to(\"got_character_name\");\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    ACCOUNT_D->add_character(account_name, str);\n"
+    "    character_name = str;\n"
     "    enter_game();\n"
     "}\n";
 
@@ -22323,6 +22476,14 @@ static void testLoginAccountCreationFlowEndToEndCreatesRealAccountFile() {
 
     t.harness.vm.callFunction(loginObj, "got_confirm_password",
         {amlp::Value(std::string("goodpass123"))});
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_character_name");
+
+    // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 4: a brand-new
+    // account now names its own character explicitly, rather than the
+    // account name being reused unasked.
+    t.harness.vm.callFunction(loginObj, "got_character_name",
+        {amlp::Value(std::string("newusercharacter"))});
     amlp::OutputContext::set(nullptr);
 
     // enter_game() ran all the way through (new(USER_OB), exec(),
@@ -22340,6 +22501,15 @@ static void testLoginAccountCreationFlowEndToEndCreatesRealAccountFile() {
     std::string contents((std::istreambuf_iterator<char>(accountFile)),
         std::istreambuf_iterator<char>());
     assert(contents.find("newuser") != std::string::npos);
+    // account_d.c's own add_character() must have recorded the chosen
+    // character name against the account record, item 4's own real
+    // point -- not just left the characters array empty the way item
+    // 1-3's create_account() alone still would.
+    assert(contents.find("newusercharacter") != std::string::npos);
+
+    amlp::Value charExists = t.harness.vm.callFunction(t.accountD, "character_name_available",
+        {amlp::Value(std::string("newusercharacter"))});
+    assert(std::get<int64_t>(charExists.data) == 0);
 
     ::close(fds[1]);
     std::cout << "testLoginAccountCreationFlowEndToEndCreatesRealAccountFile OK\n";
@@ -22492,6 +22662,16 @@ static void testCharacterLoginCountPersistsAcrossReconnectViaNetDead() {
     assert(conn1.takePendingInputTo()->function == "got_confirm_password");
     t.harness.vm.callFunction(login1, "got_confirm_password",
         {amlp::Value(std::string("goodpass123"))});
+    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    // Same string as the account name, item 4's own got_character_name()
+    // step, so the rest of this test's own on-disk-path assertions below
+    // (/characters/r/returningplayer.o) stay valid unchanged -- nothing
+    // here actually depends on account name and character name matching,
+    // this is purely to keep this test focused on persistence, not
+    // character naming (already covered by
+    // testLoginAccountCreationFlowEndToEndCreatesRealAccountFile).
+    t.harness.vm.callFunction(login1, "got_character_name",
+        {amlp::Value(std::string("returningplayer"))});
     amlp::OutputContext::set(nullptr);
 
     assert(login1->isDestructed());
@@ -22568,6 +22748,9 @@ static void testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead() {
     assert(conn1.takePendingInputTo()->function == "got_confirm_password");
     t.harness.vm.callFunction(login1, "got_confirm_password",
         {amlp::Value(std::string("anotherpass1"))});
+    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    t.harness.vm.callFunction(login1, "got_character_name",
+        {amlp::Value(std::string("questsmith"))});
     amlp::OutputContext::set(nullptr);
 
     auto user1 = conn1.boundObject();
@@ -22602,6 +22785,163 @@ static void testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead() {
 
     ::close(fds2[1]);
     std::cout << "testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead OK\n";
+}
+
+// ---------------------------------------------------------------------
+// notes/ACCOUNT_LOGIN_PLAN.md build ordering item 4 (character
+// creation, 2026-08-21): a brand-new account now names its own
+// character explicitly, a real, distinct name from the account name,
+// recorded via account_d.c's own new add_character()/characters().
+// ---------------------------------------------------------------------
+
+static void testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount() {
+    LoginTestHarness t;
+
+    // First account claims "heroname" as its character's own name.
+    auto login1 = t.harness.objects.cloneObject("/clone/login");
+    assert(login1 != nullptr);
+    int fds1[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds1) == 0);
+    amlp::Connection conn1(fds1[0]);
+    conn1.attach(login1);
+
+    amlp::OutputContext::set(&conn1);
+    t.harness.vm.callFunction(login1, "got_account_name",
+        {amlp::Value(std::string("firstaccount"))});
+    t.harness.vm.callFunction(login1, "got_new_password",
+        {amlp::Value(std::string("firstpass12"))});
+    t.harness.vm.callFunction(login1, "got_confirm_password",
+        {amlp::Value(std::string("firstpass12"))});
+    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    t.harness.vm.callFunction(login1, "got_character_name",
+        {amlp::Value(std::string("heroname"))});
+    amlp::OutputContext::set(nullptr);
+    assert(login1->isDestructed());
+    ::close(fds1[1]);
+
+    amlp::Value taken = t.harness.vm.callFunction(t.accountD, "character_name_available",
+        {amlp::Value(std::string("heroname"))});
+    assert(std::get<int64_t>(taken.data) == 0);
+
+    // A second, unrelated account tries to claim the identical character
+    // name: must be rejected and reprompted, not silently allowed to
+    // collide with the first account's own character file.
+    auto login2 = t.harness.objects.cloneObject("/clone/login");
+    assert(login2 != nullptr);
+    int fds2[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds2) == 0);
+    amlp::Connection conn2(fds2[0]);
+    conn2.attach(login2);
+
+    amlp::OutputContext::set(&conn2);
+    t.harness.vm.callFunction(login2, "got_account_name",
+        {amlp::Value(std::string("secondaccount"))});
+    t.harness.vm.callFunction(login2, "got_new_password",
+        {amlp::Value(std::string("secondpass1"))});
+    t.harness.vm.callFunction(login2, "got_confirm_password",
+        {amlp::Value(std::string("secondpass1"))});
+    assert(conn2.takePendingInputTo()->function == "got_character_name");
+
+    t.harness.vm.callFunction(login2, "got_character_name",
+        {amlp::Value(std::string("heroname"))});
+    // Rejected: reprompted for another name, not disconnected, not
+    // silently allowed to overwrite the first account's own character.
+    assert(!login2->isDestructed());
+    assert(conn2.hasPendingInputTo());
+    assert(conn2.takePendingInputTo()->function == "got_character_name");
+
+    // A genuinely different name succeeds normally.
+    t.harness.vm.callFunction(login2, "got_character_name",
+        {amlp::Value(std::string("heroname2"))});
+    amlp::OutputContext::set(nullptr);
+    assert(login2->isDestructed());
+
+    ::close(fds2[1]);
+    std::cout << "testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount OK\n";
+}
+
+static void testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountName() {
+    // The real point of item 4: a returning account's login must load
+    // the character it actually named at creation (account_d.c's own
+    // characters() lookup), not silently fall back to the account name
+    // -- that fallback (already covered by
+    // testLoginExistingAccountCorrectPasswordOnASecondConnectionSucceeds
+    // and testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries,
+    // both of which seed their account directly via account_d's own
+    // create_account(), never calling add_character()) exists
+    // specifically for accounts that predate this item.
+    LoginTestHarness t;
+
+    auto login1 = t.harness.objects.cloneObject("/clone/login");
+    assert(login1 != nullptr);
+    int fds1[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds1) == 0);
+    amlp::Connection conn1(fds1[0]);
+    conn1.attach(login1);
+
+    amlp::OutputContext::set(&conn1);
+    t.harness.vm.callFunction(login1, "got_account_name",
+        {amlp::Value(std::string("distinctaccount"))});
+    t.harness.vm.callFunction(login1, "got_new_password",
+        {amlp::Value(std::string("distinctpass"))});
+    t.harness.vm.callFunction(login1, "got_confirm_password",
+        {amlp::Value(std::string("distinctpass"))});
+    assert(conn1.takePendingInputTo()->function == "got_character_name");
+    // Deliberately a different string from the account name.
+    t.harness.vm.callFunction(login1, "got_character_name",
+        {amlp::Value(std::string("wanderingblade"))});
+    amlp::OutputContext::set(nullptr);
+    assert(login1->isDestructed());
+
+    // Persist this first login's own login_count (1) to disk before the
+    // second connection reads it back -- the same real net_dead()
+    // disconnect step testCharacterLoginCountPersistsAcrossReconnect
+    // ViaNetDead already established, needed here too or the second
+    // connection would just see the still-empty reservation file
+    // add_character() itself wrote (see account_d.c's own comment on
+    // that), not this session's own login_count.
+    auto user1 = conn1.boundObject();
+    assert(user1 != nullptr);
+    t.harness.vm.callFunction(user1, "net_dead", {});
+    ::close(fds1[1]);
+
+    // No file should exist under the account's own name -- only under
+    // the chosen character name.
+    std::ifstream wrongPath(t.harness.tempDir + "/characters/d/distinctaccount.o");
+    assert(!wrongPath.good());
+    std::ifstream rightPath(t.harness.tempDir + "/characters/w/wanderingblade.o");
+    assert(rightPath.good());
+
+    // Second connection, same account, correct password: must load
+    // "wanderingblade", not "distinctaccount".
+    auto login2 = t.harness.objects.cloneObject("/clone/login");
+    assert(login2 != nullptr);
+    int fds2[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds2) == 0);
+    amlp::Connection conn2(fds2[0]);
+    conn2.attach(login2);
+
+    amlp::OutputContext::set(&conn2);
+    t.harness.vm.callFunction(login2, "got_account_name",
+        {amlp::Value(std::string("distinctaccount"))});
+    assert(conn2.takePendingInputTo()->function == "got_login_password");
+    t.harness.vm.callFunction(login2, "got_login_password",
+        {amlp::Value(std::string("distinctpass"))});
+    amlp::OutputContext::set(nullptr);
+    assert(login2->isDestructed());
+
+    auto user2 = conn2.boundObject();
+    assert(user2 != nullptr);
+    amlp::Value name2 = t.harness.vm.callFunction(user2, "query_name", {});
+    assert(std::get<std::string>(name2.data) == "wanderingblade");
+    // A second login for the same character: login_count keeps
+    // advancing (2), proving the same character file was loaded again,
+    // not a fresh one silently created under some other name.
+    amlp::Value count2 = t.harness.vm.callFunction(user2, "query_login_count", {});
+    assert(std::get<int64_t>(count2.data) == 2);
+
+    ::close(fds2[1]);
+    std::cout << "testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountName OK\n";
 }
 
 int main() {
@@ -22998,6 +23338,8 @@ int main() {
     testPreviousObjectMinusOneReturnsFullChain();
     testUnguardedClosureRoundTripsThroughSecurityAndMasterShape();
     testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays();
+    testSaveObjectThrowsClearErrorForWidthGreaterThanOneMappingInsteadOfSilentlyTruncating();
+    testSaveObjectRestoreObjectStillRoundTripsAWidthOneMappingAfterTheWidthCheck();
     testRestoreObjectParsesRealFluffosOnDiskFormatScalarsAndNesting();
     testRestoreObjectSkipsRealFormatCommentHeaderLineAndParsesEmptyContainers();
     testRestoreObjectRealFormatStringEscapesAndEmbeddedNewline();
@@ -23341,6 +23683,8 @@ int main() {
     testLoginInvalidAccountNameWithSlashReprompts();
     testCharacterLoginCountPersistsAcrossReconnectViaNetDead();
     testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead();
+    testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount();
+    testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountName();
     std::cout << "all tests passed\n";
     return 0;
 }

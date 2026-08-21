@@ -16,22 +16,29 @@
 // day as this file's own login integration -- see globals.h's own
 // CHARACTERS_DIR comment for the "merge, not a separate object"
 // decision, and /clone/user.c's own load_character()/save_character()
-// for the actual persistence. A successful login still clones/execs
-// /clone/user exactly the way the old flow did, only gated on a real
-// account now (and, since item 3, also carrying real persisted state
-// across a disconnect/reconnect), using the account name itself as the
-// character name (the same single-character-per-account shape this
-// project's own prior scratch-mudlib live verification already
-// exercised for real, see STATUS-ARCHIVE.md's "Confirm <name> as your
-// account and first character name?" walkthrough) -- no per-account
-// character list, no character creation prompts, no y/n account-name
-// confirm step either (a deliberate simplification against that same
-// historical reference: this slice's own scope, per the plan's build-
-// ordering item 2, is "account name -> password, no character concept
-// yet", not a full port of the fuller flow; item 3 added persistence,
-// still not multi-character or a character-creation flow, items 4/5).
+// for the actual persistence.
+//
+// Character creation (that plan's own item 4, 2026-08-21, later the
+// same week): a brand-new account's player now names their own
+// character explicitly (`got_character_name()` below), a real, distinct
+// name from the account name, recorded into `account_d`'s own
+// `characters()` list (built in item 1, never populated until now). A
+// returning account picks up its own first (and, until item 5's own
+// multi-character selection is built, only) character from that same
+// list. Pre-item-4 accounts (created by an earlier session's own
+// account-name-as-character-name shape) still have an empty
+// `characters` list on disk -- `got_login_password()` below falls back
+// to the account name itself for exactly those, so an account created
+// before this item keeps loading its own already-existing character
+// file correctly, not a new, empty one under a name nobody ever chose.
+// Still not built (item 5's own explicit scope, not this item's):
+// multi-character-per-account, a character-select menu -- a returning
+// account with more than one character (not reachable yet, nothing
+// before item 5 can create a second one) would still only ever load
+// `characters[0]`.
 
 private string account_name;
+private string character_name;
 private int tries;
 private string pending_password;
 
@@ -41,15 +48,21 @@ void catch_tell(string str) {
 }
 #endif
 
+// Renamed from valid_account_name() (item 2): the check itself was
+// always generic string-path-safety validation, not account-specific,
+// and item 4 below needs the identical check for a character name too
+// -- reusing it under its real, general name rather than duplicating it
+// under a second, character-specific one.
 private
 int
-valid_account_name(string name)
+valid_name(string name)
 {
     // Kept deliberately simple: real corpora reject far more (reserved
     // words, profanity lists, length caps) but none of that is a driver
     // gap or an account_d.c contract this slice needs to satisfy --
-    // only requirement account_d.c's own account_path() actually has is
-    // "no '/' in the name" (it is used unescaped as a path segment).
+    // only requirement account_d.c's own account_path()/character_path()
+    // actually has is "no '/' in the name" (it is used unescaped as a
+    // path segment).
     if (!name || name == "") return 0;
     if (strsrch(name, "/") != -1) return 0;
     return 1;
@@ -66,15 +79,15 @@ enter_game()
     seteuid(getuid(this_object()));
 #endif
     user = new(USER_OB);
-    user->set_name(account_name);
+    user->set_name(character_name);
     // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 3: restores this
     // character's own persisted state (currently just login_count) if a
-    // save file already exists (a returning account), or leaves every
+    // save file already exists (a returning character), or leaves every
     // variable at its just-initialized default and starts counting from
-    // this login if not (a brand-new account, right after
-    // create_account() above) -- load_character() itself handles both
-    // cases identically, no branch needed here.
-    user->load_character(ACCOUNT_D->character_path(account_name));
+    // this login if not (a brand-new character, right after
+    // got_character_name() below) -- load_character() itself handles
+    // both cases identically, no branch needed here.
+    user->load_character(ACCOUNT_D->character_path(character_name));
     write("Welcome back! You have logged in " + user->query_login_count() +
         " time(s).\n");
     exec(user, this_object());
@@ -114,7 +127,7 @@ got_account_name(string str)
 {
     remove_call_out("login_timeout");
 
-    if (!valid_account_name(str)) {
+    if (!valid_name(str)) {
         write("\nThat is not a valid account name. What account name do you wish? ");
         call_out("login_timeout", LOGIN_TIMEOUT_SECS);
         input_to("got_account_name");
@@ -138,9 +151,19 @@ got_account_name(string str)
 void
 got_login_password(string str)
 {
+    string *chars;
+
     remove_call_out("login_timeout");
 
     if (ACCOUNT_D->check_password(account_name, str)) {
+        // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 4: a returning
+        // account's own first (and, until item 5, only) real character,
+        // per this file's own header comment above -- an empty list
+        // (this account predates item 4) falls back to the account name
+        // itself, the exact shape items 2/3 already used and already
+        // has a real character file saved under it.
+        chars = ACCOUNT_D->characters(account_name);
+        character_name = sizeof(chars) ? chars[0] : account_name;
         enter_game();
         return;
     }
@@ -194,7 +217,7 @@ got_confirm_password(string str)
         // Only real failure path left once got_account_name() has
         // already confirmed !account_exists(): create_account()'s own
         // empty-name/empty-password guards, already ruled out above by
-        // valid_account_name()/the MIN_PASSWORD_LEN check.
+        // valid_name()/the MIN_PASSWORD_LEN check.
         write("\nCould not create that account. Goodbye.\n");
         destruct(this_object());
         return;
@@ -202,5 +225,34 @@ got_confirm_password(string str)
 
     pending_password = 0;
     write("\nAccount created.\n");
+    // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 4: name the first
+    // real character for this brand-new account, rather than reusing the
+    // account name unasked the way items 2/3 did.
+    write("What would you like to name your character? ");
+    call_out("login_timeout", LOGIN_TIMEOUT_SECS);
+    input_to("got_character_name");
+}
+
+void
+got_character_name(string str)
+{
+    remove_call_out("login_timeout");
+
+    if (!valid_name(str)) {
+        write("\nThat is not a valid character name. What would you like to name your character? ");
+        call_out("login_timeout", LOGIN_TIMEOUT_SECS);
+        input_to("got_character_name");
+        return;
+    }
+
+    if (!ACCOUNT_D->character_name_available(str)) {
+        write("\nThat character name is already taken. What would you like to name your character? ");
+        call_out("login_timeout", LOGIN_TIMEOUT_SECS);
+        input_to("got_character_name");
+        return;
+    }
+
+    ACCOUNT_D->add_character(account_name, str);
+    character_name = str;
     enter_game();
 }

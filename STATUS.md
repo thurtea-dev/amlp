@@ -3,6 +3,186 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-21 (a further session, continued the same day, yet again
+still): the row 1.9 fact-check's own bounded stopgap fix (save_object()/
+restore_object() now fail loudly on a width > 1 mapping instead of
+silently truncating it), then `notes/ACCOUNT_LOGIN_PLAN.md`'s build
+ordering item 4, character creation, bounding items 4-5's combined
+scope down to item 4 alone per the plan's own explicit "only after 1-4
+work end to end" sequencing. 725 tests, up from 723.**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**The save/restore stopgap.** The prior session's own fact-check found a
+real, currently-live silent-truncation bug (not full width-aware
+serialization, which remains its own, separately-scoped, larger item,
+still open on `ROADMAP.md` row 1.9): `save_object()` on a width > 1
+mapping silently wrote only column 0, `restore_object()` always
+rebuilt width-1 regardless. Bounded stopgap only, exactly as this
+session's own prompt specified: `serializeValue()`'s own `Mapping`
+branch (`src/efun/EfunTable.cpp`) now checks `Mapping::width > 1` and
+throws a clear, specific error naming `save_object`, the real reason
+(LDMud N-column mapping, not yet supported), and pointing at
+`ROADMAP.md` row 1.9's own note, before ever writing a byte for that
+mapping. Checked inside the recursive writer itself, not only at
+`save_object()`'s own top-level per-variable loop, so a width > 1
+mapping nested inside an array or another mapping is caught too, not
+just one sitting directly in an object variable. No change needed on
+the read side (`deserializeValue()`'s own `'M'` case): once the write
+side refuses to ever serialize width > 1 data, nothing this driver's
+own tab-delimited format can produce still needs detecting there; the
+real-FluffOS-format reader/writer pair (`writeRealSaveValue()`/
+`parseRealSaveValue()`) is a separate efun (`save_variable()`/
+`restore_variable()`), out of this stopgap's own scope (the prompt
+named `save_object()`/`restore_object()` specifically), and real
+FluffOS mappings have no width concept to begin with, so that pair was
+never at risk. Header comment above the `save_object`/`restore_object`
+registration also updated with a pointer to the new check, matching
+this codebase's own convention of documenting a behavior change at its
+canonical read site, not only inline.
+
+Two new regression tests (`test/test_lexer.cpp`):
+`testSaveObjectThrowsClearErrorForWidthGreaterThanOneMappingInsteadOfSilentlyTruncating`
+(a real width-2 mapping, the `rune-wall.c` shape, `dialect: ldmud`,
+`save_object()` throws, message content checked for both "save_object"
+and "width") and
+`testSaveObjectRestoreObjectStillRoundTripsAWidthOneMappingAfterTheWidthCheck`
+(an ordinary width-1 mapping, the common case, saves and restores
+correctly, proving zero behavior change for what real corpus content
+still actually saves today). The pre-existing
+`testSaveObjectRestoreObjectRoundTripsNestedMappingsAndArrays` also
+continues to pass unchanged, independent confirmation of the same zero-
+behavior-change claim for the common case.
+
+**Live-verified against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4155, `dialect: ldmud`, a
+real Python TCP client, two temporary scratch probe files under
+`mudlib/single/`, removed afterward): a real width-2 mapping literal
+(`(["weakness": "fire"; 1])`, the exact `rune-wall.c` shape),
+`save_object()`ed inside a real `catch()`, correctly surfaced the new
+clear error text rather than a silent wrong result; the attempted save
+did leave a real but honestly incomplete file on disk (`"m\t"`, the
+variable name and tab written before `serializeValue()` threw, nothing
+plausible-looking about it, unlike the pre-fix silent-truncation
+failure mode), consistent with this codebase's own existing precedent
+for other mid-write throw paths, not a new risk this fix introduces; a
+real width-1 mapping in the same live session saved, cleared, and
+restored correctly, unaffected. No other errors in the driver's own
+log. Scratch files and the scratch process both removed/stopped
+afterward.
+
+**Item 4 (character creation, `notes/ACCOUNT_LOGIN_PLAN.md` build
+ordering item 4).** Read the plan's own full description first
+("name a character, pick whatever minimal starting attributes are
+decided on") and bounded it down explicitly, not implicitly: this
+bundled mudlib has no attribute/stat/race/class system anywhere (the
+wand of creation and one room are its only real content), so inventing
+one to attach "starting attributes" to would be speculative game-design
+scope creep this plan's own evidence-based discipline does not
+support. The one genuinely real, minimal piece was naming the
+character itself, since `account_record.c`'s own `characters` array
+(built in item 1) already existed to hold it and had never once been
+populated. Also bounded items 4 and 5 to just item 4 this session,
+matching the plan's own explicit "Only after 1-4 work end to end"
+sequencing for item 5, not a size judgment call invented fresh.
+
+Built: a brand-new account, right after `create_account()` succeeds, is
+now prompted for its own character's name (`got_character_name()`,
+new), validated the same way an account name is (`valid_name()`,
+renamed from `valid_account_name()` since the check was always generic,
+not account-specific), checked for availability against the character
+tree (`account_d.c`'s new `character_name_available()`), then recorded
+against the account (`add_character()`, new, appends to
+`account_record.c`'s own `characters` array and re-saves the account
+record). A returning account's login now reads its own real character
+list (`account_d.c`'s new `characters()`) and loads `characters[0]`
+(still single-character-per-account, item 5's own scope, not this
+one), falling back to the account name itself when that list is empty
+-- exactly what every account created before this item still looks
+like on disk, so an old account keeps loading its own already-existing
+character file correctly.
+
+**One real gap caught live while testing this item, fixed before
+calling it done, not left as a known issue.** `add_character()`'s own
+first draft only recorded the chosen name in the account's own list,
+never reserved the character's own file. Since `/clone/user.c`'s own
+`save_character()` (item 3) is the only place a character file actually
+gets written, and that only fires on the character's first real
+disconnect, a real race existed: a second, unrelated account could
+claim the identical name in the window between the first account
+choosing it and that first disconnect, since
+`character_name_available()`'s own file-existence check would keep
+reporting it available the whole time. Caught by this session's own
+first regression test for it failing an assertion that should have
+trivially passed, not found by inspection first. Fixed by having
+`add_character()` also write a real, deliberately empty save file at
+the character's own path the moment the name is claimed
+(`save_object()` called from inside `account_d.c` itself, which
+declares no object variables of its own, so this reserves the name
+without needing a throwaway clone) -- the name is reserved immediately,
+and a genuinely empty file loads back through `load_character()`'s own
+`restore_object()` exactly like a true first login would, no special-
+casing needed on the read side.
+
+Four new regression tests
+(`testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount`,
+`testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountName`,
+plus `testLoginAccountCreationFlowEndToEndCreatesRealAccountFile`
+extended with character-name assertions), plus every pre-existing login
+test's own inline fixtures (`account_d.c`/`login.c`) updated to match
+the new real content, and three pre-existing tests' own call sequences
+updated to add the new `got_character_name()` step their own new-
+account-creation flows now require. Two pre-existing tests needed no
+change at all, confirmed rather than assumed: both seed their account
+directly via `account_d`'s own `create_account()`, bypassing
+`got_character_name()` entirely, so they organically exercise the pre-
+item-4 fallback path this item's own backward-compatibility design
+relies on, real evidence that fallback works without a dedicated test
+written specifically for it.
+
+**Live-verified against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4160, default dialect, a
+real Python TCP client): a brand-new account (`alice_acct`) choosing a
+character name distinct from its own account name (`Nightblade`),
+confirmed correct on both the account record (`characters` array) and
+the character's own save file; a second, unrelated account
+(`bob_acct`) correctly rejected when trying to claim `Nightblade` too,
+correctly succeeding with `Shadowfox` instead, `Nightblade`'s own file
+confirmed untouched afterward; a returning login for `alice_acct`
+correctly loading `Nightblade` again (login count advancing 1 to 2, not
+a fresh character silently created under the account name); and a
+pre-item-4-style account (seeded directly via `eval`, matching how
+every earlier session's own account looks on disk) correctly falling
+back to using its own account name as its character name. No errors in
+the driver's own log across any of it. Scratch `/accounts` and
+`/characters` directories and the scratch process both removed/stopped
+afterward.
+
+**`notes/ACCOUNT_LOGIN_PLAN.md` updated in place**, matching its own
+established per-item update convention: the top status paragraph and
+build-ordering item 4 both marked done with the bounding decision, the
+reservation-race fix, and the live verification above all recorded in
+full; item 5's own entry updated to note its real prerequisite (item 4)
+is now in place, still not started itself.
+
+**Next-session recommendation.** Not re-litigated fresh: the standing
+recommendation (continue `notes/ACCOUNT_LOGIN_PLAN.md`'s own build
+ordering) still holds, and this session picked up exactly the next
+queued item as expected, plus the separately-flagged stopgap fix ahead
+of it per this session's own prompt. Build ordering item 5 (multi-
+character-per-account, a real character-select menu) remains real,
+scoped, and not started -- its own real prerequisite (item 4) is now
+done, so whoever picks it up next can build directly on
+`account_record.c`'s own already-populated `characters` array and
+`account_d.c`'s own `characters()` accessor rather than needing to
+build either first. `ROADMAP.md` row 1.9's own still-open, larger item
+(full width-aware mapping serialization) remains exactly as open as
+this session found it -- the stopgap fix closes the silent-corruption
+risk, not the underlying feature gap, and the row's own addendum
+already says so.
+
 **2026-08-21 (a further session, continued the same day yet again):
 fact-checked two forward-looking architecture concerns from an external
 technical review against the real current code (one confirmed real and
@@ -808,163 +988,6 @@ confirmed clean via `git diff --stat`.
 `ROADMAP.md` row 1.7 updated in place with this session's own citations
 and live-verification account, appended after the prior update rather
 than rewritten. 715 tests passing (up from 709), zero regressions.
-
-Staged with `git add` only, per this project's own standing rule; not
-committed.
-
-**2026-08-20 (a further session): `privilege_violation()`'s real cold-start
-scoping investigation, deferred multiple sessions ago per row 1.7/1.8's own
-long-standing note: real doc catalog cross-checked against the vendored
-LDMud source, real corpus usage checked across every vendored corpus, and
-the first two real, evidence-justified trigger points wired: `bind_lambda()`'s
-cross-object form and `set_driver_hook()` (709 tests, up from 704).**
-
-Oriented fresh per this session's own instructions: read `CLAUDE.md`
-(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
-no em dashes or emojis).
-
-**Real doc read first, then cross-checked against the real source rather
-than trusted alone.** `temp/ldmud/doc/master/privilege_violation` catalogs
-26 named operations. Grepped every real `privilege_violation`/`_2`/`_4`/
-`_n` call site across `temp/ldmud/src` (`interpret.c:8492-8722` for the
-four wrapper functions themselves, `string_spec` for the real `STR_*` op
-name catalog) and found the doc stale in two places for this exact
-vendored 3.6.8 clone: `enable_telnet` and `set_limits` are both still-
-defined string constants with zero real call sites anywhere (superseded
-by the newer unified `configure_interactive`/`configure_driver`
-mechanism: confirmed via `doc/efun/configure_interactive`'s own
-`IC_MAX_COMMANDS` case, which covers what `set_max_commands` used to
-gate); `set_driver_hook`'s own doc text implies two extra args (hook
-number and the value being set) but the real call site
-(`simulate.c:5091`, its own function header comment at `:5070`, "Raises
-a privilege violation (\"set_driver_hook\", this_object, what)") only
-ever passes one, the hook number.
-
-**Also checked, and corrected, this row's own prior framing of which
-operations are gated at all.** `shadow()`'s real LDMud gate is the
-separate `query_allow_shadow()` master apply (row 1.5's own already-
-implemented mechanism), not `privilege_violation()`; `clone_object()` has
-zero `privilege_violation` hits anywhere in the real source; plain file
-access beyond `valid_read`/`valid_write` uses those same separate master
-applies, no overlap; `snoop()`'s real gate is `valid_snoop()`
-(`comm.c:4465`), a different master apply entirely. None of these four
-are real `privilege_violation()` trigger points, despite being named as
-candidates in this session's own starting framing: confirmed directly
-from the C rather than assumed from the framing being correct.
-
-**Real corpus check across every vendored corpus in `temp/`** (extracted
-trees and the zipped/tarred archives alike, searched via stdout
-extraction without writing new files to disk): `privilege_violation`
-itself has zero real hits in every FluffOS-family corpus checked
-(`dead-souls`, `es2_mudlib`, `lima`, `nightmare3`, `mudlib`, `lil`,
-`wiz_tools`, and all 8 zipped FluffOS-family archives), expected, since
-real FluffOS has no `privilege_violation()` mechanism at all (zero hits
-in the vendored `fluffos-2.9-ds2.08` reference tree). Exactly one real
-corpus has a real `privilege_violation()` at all: `core-lib` (the one
-confirmed LDMud-targeting corpus vendored here),
-`secure/master/security.c:216-241`, a real handler explicitly granting
-`call_out_info`/`mysql` unconditionally, checking `nomask simul_efun`
-against a hardcoded path, restricting `input_to` to non-login callers,
-and falling back to a generic privileged-object check for everything
-else, real, if narrow, evidence a real LDMud-targeting mudlib does rely
-on this mechanism, correcting this row's own prior "no corpus signal of
-its own by nature" framing (reasonable before this investigation, not
-wrong at the time it was written). `__PACKAGE_UIDS__` (named in this
-session's own framing as background context, not the actual target) was
-corpus-checked too: every hit across all 8 zipped FluffOS-family
-archives traces back to the same bundled `fluffos-2.23-ds03/testsuite/`
-files already vendored separately as `temp/lil`, one real occurrence
-duplicated by the archives bundling a full driver tree, not seven-times-
-eight independent real ones. The one hit outside that duplication,
-`temp/lima/lib/secure/check_config.c:65-67`, actively requires
-`__PACKAGE_UIDS__` to be undefined, real evidence at least one real
-corpus deliberately rejects the mechanism, not evidence anything needs it
-built.
-
-**Real semantics confirmed directly from `interpret.c:8492-8722`.** Trust
-bypass (`:8552-8553`, identical across all four wrapper functions):
-`current_object == master_ob` or `== simul_efun_object` grants
-immediately, no apply at all. Result contract (`:8570-8578`): a positive
-return grants; a missing lfun, a non-number return, or a negative number
-all raise a hard error; exactly 0 is a real, valid "gently denied"
-answer, not an error. This driver's own `Value{}` (returned by
-`callFunction()` for both "no such function" and "function returned
-nothing") cannot distinguish those two real cases on its own, so the new
-`VM::privilegeViolation()` checks `functionExists()` explicitly first to
-preserve the real distinction rather than losing it to that collapse.
-
-**Bounded first slice, scoped to what real evidence and this row's own
-already-on-record deferrals actually justify.** New shared
-`VM::privilegeViolation(what, args)` (`VM.hpp`/`VM.cpp`) ports the real
-four-wrapper-function core in one place. Wired into the two real trigger
-points this row's own history had already named and explicitly deferred
-pending exactly this investigation: `bind_lambda()`'s cross-object form
-(`EfunTable.cpp`, real arg shape `(what, current_object, ob)`, a denial
-silently returns the closure unharmed, still unbound) and
-`set_driver_hook()` (`EfunTable.cpp`, real arg shape `(what,
-current_object, hook_number)` only, checked after the pre-existing range
-check per real code's own ordering, a denial silently leaves the hook
-unchanged). Both have no FluffOS equivalent at all (confirmed by grep,
-zero hits in the vendored FluffOS tree for either efun), so gating them
-unconditionally carries no dialect-conflict risk.
-
-**Deliberately not wired this session, despite real corpus evidence,**
-and recorded precisely rather than left vague: `call_out_info()` and
-`input_to()`, the two ops core-lib's own handler actually branches on.
-This driver's own `call_out_info()` efun already ports real *FluffOS's*
-`get_all_call_outs()` shape (dialect-neutral, registered
-unconditionally), not LDMud's separate `f_call_out_info()`
-(`call_out.c:805-829`, which additionally gates on `privilege_violation()`
-and degrades to an empty array on denial), gating the existing
-implementation unconditionally would incorrectly reject the default
-FluffOS-dialect caller for an operation real FluffOS never gates at all,
-a real LDMud-vs-FluffOS disambiguation this efun does not yet have
-machinery for. `input_to()`'s own real gate is conditional on the
-`IGNORE_BANG` flag specifically (`comm.c:7315-7317`), which this driver's
-own `input_to()` already accepts positionally but discards with no
-behavior attached, wiring the gate to a flag that currently does
-nothing would be cosmetic, not a real port. Both are precisely scoped as
-follow-ons in ROADMAP.md row 1.7's own cell rather than rushed in. The
-remaining ~20 doc-cataloged ops are correctly left ungated: several
-correspond to efuns/packages this driver does not implement at all
-(mysql/pgsql/sqlite, the erq demon, wizlist), and none has any real
-corpus evidence beyond core-lib's own generic default-case fallback.
-
-**5 new regression tests** (`test_lexer.cpp`): a denied cross-object
-`bind_lambda()` returns the closure unharmed, still unbound; a granted
-one genuinely rebinds (`owner`/`unboundUntilBound` inspected directly,
-not through `funcall()`: a nested `#'name` inside an `unbound_lambda()`'s
-own quoted body is a separately pre-built `CLOSURE_LFUN` pinned to
-whichever object's source literally wrote it, confirmed while writing
-this test, not something the outer wrapper's own rebind would ever move);
-a master with no `privilege_violation()` lfun at all hard-errors on a
-cross-object bind attempt; the master object itself bypasses the check
-entirely with no lfun needed (trust bypass); a denied `set_driver_hook()`
-silently leaves the hook unchanged. Fixed 2 pre-existing tests whose own
-harness never boots a real master object (`master_file: /unused`, never
-loaded) that now correctly need one, matching the established
-`loadMasterObject()` + permissive-`/unused.c` pattern the shadow tests
-already use.
-
-**Verified live against the real running driver, real bundled `mudlib/`**
-(a scratch config on spare port 4134, `dialect: ldmud`, a real Python TCP
-client, a temporary permissive `privilege_violation()` lfun and one
-trust-bypass probe function appended to the real bundled
-`/single/master.c`: reverted via `git checkout` immediately after,
-confirmed clean via `git status`; three temporary scratch mudlib objects,
-removed afterward): a real cross-object `bind_lambda()` grant genuinely
-rebound the closure to the target object, confirmed by destructing that
-object afterward and getting the real "owner of function pointer is
-destructed" error rather than "Uncallable closure" (the tell for "never
-actually bound"); a real `set_driver_hook()` denial from a non-master
-caller silently left the hook unset, confirmed via a subsequent
-`move_object()` still using the plain hardcoded fallback; and the real
-trust bypass let the master install `H_MOVE_OBJECT0` on itself despite
-its own `privilege_violation()` denying "set_driver_hook" for everyone
-else, with the hook then genuinely firing for a different, non-master
-object's own `move_object()` call afterward.
-
-709 tests passing (up from 704), zero regressions.
 
 Staged with `git add` only, per this project's own standing rule; not
 committed.
