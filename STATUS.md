@@ -3,6 +3,290 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-21 (a further session, continued the same day): a fresh
+full-project status sweep (Phase 0 confirmed still 16/16, Phase 1
+confirmed still 10/11 with the full remaining item list re-verified,
+Phase 2/3 confirmed still 0/22 and 0/8), `COMPARISON.md` refreshed to
+match, and this session's own next-priority recommendation written
+directly into this entry, not left in chat only, closing a real gap
+this project has now hit twice (see below). No test count change this
+session (715, unchanged, no driver code touched).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Why this entry is written the way it is.** The user asked directly
+for the recommendation below to be written into this file in enough
+detail that a future session or a different reviewer could read it cold
+and understand the choice without the original conversation, because
+the immediately prior session's own equivalent recommendation was given
+only in the chat reply and turned out to be unrecoverable afterward.
+That is not a one-off: this project has hit the exact same failure mode
+before, on record in this very file, `STATUS.md`'s own 2026-08-19 entry
+for the `parse_*`-versus-Phase-2 decision ends with "Full reasoning
+given directly to the user this turn, not duplicated here: see this
+same session's own reply for the three-way comparison." That reasoning
+is also gone now, for the same reason. This entry is written to not
+repeat that mistake a third time.
+
+**Phase 0: confirmed still 16 of 16 rows checked, 100%, no open
+sub-gap.** Re-read every row's own checkbox directly rather than
+trusted from memory: all 16 rows (`0.1` through `0.15`, including
+`0.13a`) read `[x]`, and `0.13a`'s own cell text confirms no remaining
+sub-gap ("Nicks implemented, 2026-08-20", the last item this row had on
+record). Unchanged from the last status-read pass.
+
+**Phase 1: confirmed still 10 of 11 real (non-DGD) rows closed, 91%,
+the fraction itself unchanged by this session's own driver work.** Row
+1.7 was already checkbox-closed before this session (it was one of the
+already-counted 10, "partial" status, real evidence-backed items still
+open inside its own cell); this session's `call_out_info()`/`input_to()`
+work closed the last of those items, but did not move the row-level
+fraction, since the row was already counted as closed at the row
+granularity `ROADMAP.md`'s own table tracks. Row 1.8 remains the only
+row genuinely still open. Exact remaining scope, read directly from
+each row's own current cell text rather than summarized from memory:
+
+- **Row 1.8, `#'lfun::name`/`#'sefun::name`** (more forced-tier closure
+  prefixes, reusable on the same mechanism `#'efun::` already
+  established) **and `#'var::variable_name`** (a structurally distinct
+  closure kind, real `CLOSURE_IDENTIFIER`, a reference to a global
+  variable, not a callable at all, `doc/LPC/closures:43`,
+  `closure.c:450`/`524`/`977`/`1198`/`4178`). Zero real mudlib call
+  sites for any of the three across every corpus vendored in `temp/`,
+  re-confirmed fresh by this row's own investigating session
+  (2026-08-20); the only hit anywhere is the LDMud driver's own
+  changelog prose noting when it added them.
+- **Row 1.7's own remaining sub-items** (the row itself is closed,
+  these are named exceptions inside it): `H_LOAD_UIDS`/`H_CLONE_UIDS`/
+  `H_INCLUDE_DIRS` driver-hook trigger points (3 real call sites, all
+  in one file, `secure/master/hooks.c`); real per-hook type-map
+  validation (`hook_type_map[]`); plain dialect-agnostic `lambda()`;
+  `inaugurate_master()`'s own arg=1/2/3 master-reload/reactivation
+  cases (only arg=0, first boot, is wired); the remaining plain-string
+  `hooks.c` hooks (`H_CREATE_SUPER`/`H_CREATE_OB`/`H_CREATE_CLONE`/
+  `H_MODIFY_COMMAND_FNAME`/`H_NOTIFY_FAIL`/`H_TELNET_NEG`/
+  `H_AUTO_INCLUDE`); and roughly 20 of the 26 real doc-cataloged
+  `privilege_violation()` operations still ungated (several correspond
+  to packages this driver does not implement at all, mysql/pgsql/
+  sqlite, the erq demon, wizlist, so gating them would be meaningless
+  until those packages exist; the rest have no real corpus evidence
+  beyond `core-lib`'s own generic default-case fallback). All zero real
+  corpus pressure, deferred on the same evidence discipline as
+  everywhere else in this row.
+- **Row 1.9's own remaining sub-items** (row itself closed): the
+  `m_allocate`/`m_entry`/`m_reallocate`/`m_add`/`m_contains` N-columns-
+  wide efun family and the `([:width])` empty-mapping literal, zero
+  real call sites across every corpus in `temp/`.
+- **DGD's own five still-open rows (1.11-1.15)**: real, scoped,
+  cited against `temp/dgd/`'s own source, but comparison context, not a
+  Phase 1 blocker, per this project's own explicit goal (a FluffOS/
+  LDMud-level driver done better than either, not three-way DGD
+  parity).
+
+**Phase 2/3: confirmed still 0/22 and 0/8, planning documents only.**
+Every row in both phases reads `[ ]`. Checked `src/jit`, `src/gc`,
+`src/lsp`, `src/persist`, `src/security`, `src/scheduler`, `src/proto`:
+each contains its own `instruct.md` and nothing else, no implementation
+of coroutines, JIT, hotboot, statedump, a generational GC, TLS, or any
+other Phase 2/3 item exists anywhere in this repository.
+
+**`COMPARISON.md` refreshed to match**, in place, the same "refreshed
+in place, not narrated" convention this file already used rather than
+appending new prose sections: the Phase 0 summary no longer claims a
+remaining `parse_*` sub-gap (closed last session); the row 1.7 bullet
+describing `privilege_violation()` now states its real, current
+four-trigger-point scope instead of framing it as an unbuilt future
+candidate; the "Driver hooks" feature-table row now reads 5 real
+trigger points wired (`H_MOVE_OBJECT0/1`, `H_MODIFY_COMMAND`, `H_RESET`,
+`H_CLEAN_UP`), up from 2; a new feature-table row was added for
+`privilege_violation()` itself (4 of 26 real operations gated); the
+"what AMLP does not have" bullet's hook-trigger-point count updated to
+match; and the closing test-count line bumped from 694 to 715. The
+Phase/rows/done/open/percent table itself needed no change, both real
+fractions (Phase 0 100%, Phase 1 real-blockers-only 91%) were already
+correct. `ROADMAP.md`'s own Phase 1 status-read header gained a dated
+"Update, 2026-08-21" paragraph closing the loop on its own prior
+`privilege_violation()` framing, rather than being rewritten in place,
+matching this file's own established per-row update convention.
+
+**The recommendation, written here in full rather than left in chat.**
+Three real candidates were weighed, the same three named in this
+session's own prompt: (A) continue closing Phase 1's remaining
+low-corpus-usage items anyway, for completeness; (B) pick up
+`notes/ACCOUNT_LOGIN_PLAN.md`, now that Phase 1's well-evidenced work
+has thinned out; (C) begin real Phase 2 planning-to-code work (JIT,
+hotboot, a real GC, statedump, the LSP server).
+
+**(A), continuing to close Phase 1's zero-evidence items anyway, is
+rejected outright, not merely deprioritized.** Every one of the items
+listed above under Phase 1's own remaining scope was already deferred
+on an explicit, repeatedly-applied project discipline: real corpus
+evidence decides what gets built, not checkbox completeness for its
+own sake (the same discipline that correctly rejected a `bind_lambda()`
+stand-in, deferred plain `lambda()`, and deferred DGD's own five rows).
+Building `#'var::`, a structurally distinct closure kind needing its
+own new value-representation work, for zero confirmed real callers
+anywhere in `temp/`, or gating 20 more `privilege_violation()`
+operations, several for packages this driver does not even implement,
+would directly reverse that discipline for the sake of a cosmetic 11/11
+rather than real compatibility value. Real evidence does not support
+this candidate; it is not a live option unless new corpus evidence
+surfaces.
+
+**(C), beginning real Phase 2 planning-to-code work, is real and not
+blocked, but is the weaker pick this session, for reasons specific to
+how this project has made every other build decision, not a
+size-based preference.** `ROADMAP.md`'s own stated sequencing
+principle is "Phase 1 before Phase 2. Dialect abstraction unlocks
+concurrent dialect work" (Phase 2's own header). Phase 1 being 10/11
+with the 11th deliberately, permanently deferred pending evidence that
+does not currently exist arguably satisfies that principle's actual
+intent (a stable dialect abstraction to build on, which already
+exists: `BootApi`, dialect-gated efuns throughout `EfunTable.cpp`), so
+Phase 1's own incompleteness is not by itself a hard block. The real
+reason to not pick this now: every other "big" item this project has
+built (`parse_*`, `valid_read`/`valid_write`, `privilege_violation()`
+itself) got its own dedicated cold-start scoping session, real source
+read in full, real corpus usage checked, before any code was written,
+specifically because guessing at scope for something this size wastes
+a session or worse, produces an unfaithful shim. Phase 2 has 22 rows
+across 5 genuinely different sub-areas (persistence, concurrency,
+apply-cache/JIT, efun breadth, developer experience) with no single
+obvious next row, and, unlike every Phase 0/1 item, none of it is
+mudlib-compatibility work this project's own citation-against-real-
+source methodology directly applies to: Phase 2 is novel
+differentiation, not a compatibility gap, so the evidence bar that
+decided every prior priority call (corpus call-site counts) does not
+transfer cleanly. Picking a specific Phase 2 row well enough to build
+it faithfully this session, rather than speculatively, would need its
+own scoping investigation first, the same discipline `privilege_violation()`
+got two sessions ago, not a same-session jump straight to code.
+
+**(B), picking up `notes/ACCOUNT_LOGIN_PLAN.md`, is the recommendation,
+on real evidence, not just because A is rejected and C is deferred.**
+Four concrete reasons: first, it is the only candidate that is already
+fully scoped and immediately buildable right now, not something
+needing its own investigation session first, its own document already
+did that work (2026-08-19): every efun it needs (`crypt`, `save_object`/
+`restore_object`, `input_to`, `exec`, `mkdir`/`get_dir`/`file_size`,
+`valid_read`/`valid_write`) is confirmed real and working today, a real
+reference implementation shape was already read directly from
+`temp/core-lib/secure/login.c`'s own real `input_to()`-driven state
+machine, and a concrete first build slice is already named (`/single/
+account_d.c`: account file format, `create_account`, `check_password`,
+`account_exists`, testable in isolation via `eval`, no login
+integration yet). Second, the document's own explicit self-deferral,
+"does not compete with, block, or get worked ahead of the current
+Phase 0/1 driver priority", was written when Phase 0 was still open and
+Phase 1 still had real, well-evidenced driver-side work in flight
+(`parse_*`, then `privilege_violation()`'s first two trigger points);
+that condition has now genuinely lapsed, Phase 0 is 100% and Phase 1's
+real corpus-driven work is exhausted down to (A)'s explicitly-rejected
+items and (C)'s DGD-only rows, so picking this up now honors the
+document's own stated condition rather than jumping the queue. Third,
+it directly grows the bundled mudlib past its current "one room, a
+wand, no real login" state into something a real player could actually
+use, a different, concrete kind of value than either A (a cosmetic
+percentage) or C (architecture nobody outside this project can observe
+yet). Fourth, choosing it does not foreclose C: Phase 2 stays exactly
+as real and as open as it is today, ready for its own dedicated
+scoping session whenever it is picked up next, nothing about building
+mudlib content this session makes that scoping work any smaller or
+larger later.
+
+**Built this same session, after the recommendation above: build
+ordering item 1 from `notes/ACCOUNT_LOGIN_PLAN.md`, real account
+storage.** New `/single/account_record.c` (a small per-account
+data-holder object, `name`/`hash`/`created`/`characters` variables,
+cloned fresh per operation and destructed right after: real
+`save_object()`/`restore_object()` always act on `current_object()`'s
+own variables, no target-object argument, so a per-account on-disk
+file needs a per-account object to be `current_object()` while the
+efun runs, not the daemon calling it from outside). New
+`/single/account_d.c`: `account_exists()`, `create_account()`,
+`check_password()`, files bucketed by the account name's own first
+letter under a new `ACCOUNTS_DIR` (`/accounts`), the exact same
+`name[0..0]` idiom this mudlib's own pre-existing `simul_efun.c:55`
+already uses for `user_path()`, confirmed by reading that file rather
+than invented fresh. `crypt(password, 0)` hashes a new password (real
+salt-generation idiom, already cited in `crypt()`'s own EfunTable.cpp
+registration comment); `crypt(password, existingHash) == existingHash`
+verifies one (passing an already-computed hash back in as the "salt"
+argument re-derives it with the same embedded salt, confirmed directly
+from this driver's own `crypt()` implementation, a string salt of
+length >= 2 is used as-is, not regenerated). Two new `globals.h`
+constants, `ACCOUNT_D`/`ACCOUNT_RECORD`/`ACCOUNTS_DIR`.
+
+**One tangential finding surfaced while researching real reference
+material for this, flagged rather than silently passed over.**
+`src/efun/EfunTable.cpp`'s own `save_object`/`restore_object`
+registration comment, and two comments in `test/test_lexer.cpp`
+(`testBareParentCallInvokesInheritedFunctionNotLocalOverride`'s own
+header and one other), cite a file at `secure/daemon/account_d.c` as
+something "found live compiling" with "confirmed live" behavior
+against it. Searched for it directly before trusting the citation, the
+same discipline used everywhere else in this project: it does not
+exist anywhere in any vendored corpus, extracted or zipped
+(`temp/core-lib`, every other extracted tree, and every zip/tar
+archive under `temp/`, searched by name). The closest real match,
+`temp/lima/lib/daemons/account_d.c`, is a same-named but unrelated
+in-game banking/currency daemon (`query_account`/`deposit`/`withdraw`,
+gold and credit balances), not a login/account-auth file at all, read
+in full before ruling it out rather than assumed from the filename
+alone, the same false-positive-by-name trap `notes/ACCOUNT_LOGIN_PLAN.md`
+had already separately flagged for `skylib_fluffos_v3`'s own
+`bank_accounts/`. This session's own new `/single/account_d.c` is
+therefore original design work against this plan's own real citations
+(`temp/core-lib/secure/login.c`'s state-machine shape, the real
+`crypt()`/`save_object()` semantics already confirmed elsewhere), not
+a port of the phantom-cited file, and does not reuse its path or
+naming. The stale citation itself was not corrected this session,
+tangential to this session's own actual task and not investigated
+further than confirming it does not point at anything real: flagged
+here so a future session does not build on it as if it were a
+confirmed real source the way every other citation in this codebase is
+meant to be.
+
+**Live-verified against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4144, default dialect, a
+real Python TCP client, real `eval` calls only, no scratch objects or
+master edits needed this time): `account_exists("bob")` correctly `0`
+before creation; `create_account("bob", "hunter2")` returns `1`, the
+real on-disk file (`mudlib/accounts/b/bob.o`) inspected directly,
+correct bucketed path and correct saved fields; `account_exists("bob")`
+now `1`; `check_password("bob", "hunter2")` returns `1`,
+`check_password("bob", "wrongpass")` returns `0`; a duplicate
+`create_account("bob", ...)` correctly returns `0`, does not overwrite;
+case-insensitivity confirmed (`account_exists("BOB")`/
+`check_password("BOB", "hunter2")` both resolve to the same account); a
+second account (`"Alice"`, a different bucket letter) created
+independently and correctly; empty name and empty password both
+correctly rejected (`0`, no file written). Scratch accounts directory
+removed afterward, confirmed via `git status` that `mudlib/` shows only
+the two genuinely new files plus the `globals.h` addition.
+
+**No new C++ regression tests for this slice, a deliberate choice, not
+an oversight, stated so it reads as one on a future review.** Checked
+first: every one of this suite's roughly 715 tests that touches mudlib
+content writes its own scratch temp mudlib (`ObjectVarHarness`'s own
+`mkdtemp()`-based tempdir), none exercises the real bundled `mudlib/`
+tree directly, confirmed by grep, zero hits for a config pointing at
+the real `mudlib_root: mudlib` anywhere in `test_lexer.cpp`. This
+project's own established split, confirmed by precedent rather than
+decided fresh here: driver-level C++ mechanisms (efuns, VM behavior,
+dialect gates) get unit tests in this suite; real bundled mudlib
+content (`master.c`/`simul_efun.c`/`wand_of_creation.c`/`login.c`
+before it) gets live-running-driver verification instead, documented
+in `STATUS.md`'s own dated entries, the same pattern this entry follows
+above. `notes/ACCOUNT_LOGIN_PLAN.md` updated in place to record this
+slice done and the reasoning above, matching its own established
+per-item update convention.
+
+715 tests passing (unchanged: no driver-side `src/` code was touched
+this session at all, only documentation and new mudlib content).
+
 **2026-08-21 (a further session): docs cleanup (personal scoping/plan
 notes relocated to an untracked `notes/` folder, the `" -- "` em-dash
 stand-in rewritten to proper punctuation across every active doc), then
@@ -513,148 +797,4 @@ over continuing to close Phase 1's zero-evidence items defensively or
 starting Phase 2 planning-to-code work.** Full reasoning given directly
 to the user this turn, not duplicated here: see this same session's
 own reply for the three-way comparison and why `nicks` won.
-
-**2026-08-20 (a further session): resolved the prior session's own open
-same-cycle reset/clean_up dialect question (was hardcoded to LDMud's rule
-for every dialect, now genuinely `Config::dialect()`-gated, plus one
-latent dialect-independent ordering bug fixed along the way), ROADMAP row
-1.7 updated to reflect it, then continued the same evidence-based Phase 1
-re-ranking: row 1.9's own checkbox corrected to match its own already-
-recorded close-out (re-verified fresh, still zero real usage for its five
-deferred sub-items), and row 1.8, previously a completely blank
-placeholder, properly investigated and documented for the first time,
-confirmed zero real corpus evidence for its own remaining `#'lfun::`/
-`#'sefun::`/`#'var::` scope and correctly left deferred rather than built
-speculatively (701 tests, up from 700).**
-
-Oriented fresh per this session's own instructions: read `CLAUDE.md`
-(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
-no em dashes or emojis).
-
-**Dialect-gate resolution.** Read `Scheduler::tickResetsAndCleanup()`
-directly: the prior session's own same-cycle "a real reset() firing
-suppresses clean_up() this same tick" rule was hardcoded to LDMud's own
-`!bResetCalled` behavior (`backend.c:1402-1406`) for every dialect, not
-gated on `Config::dialect()` at all. Re-read both real sources side by
-side to confirm the actual divergence rather than trusting the prior
-session's own "more conservative choice" framing: real FluffOS
-`backend.c:241-267` (`look_for_objects_to_swap()`) computes
-`ready_for_clean_up` into a local *before* calling `reset_object()`
-(`backend.c:251`) and never re-checks it against whether that call
-actually ran ("Check reference time before reset() is called.": the
-comment directly above the check). Confirmed no same-cycle suppression
-exists in real FluffOS at all, and confirmed this is a real,
-corpus-plausible collision, not a hypothetical one: reachable whenever
-`O_RESET_STATE` gets cleared by something that does not also touch
-`time_of_ref` (this driver's own `set_environment()`/`move_object()`
-fallback three-way `O_RESET_STATE` clear, `VM.cpp:1163-1176`, confirmed
-not to touch `timeOfRef()`).
-
-While fixing this, found and fixed one further, dialect-independent
-latent ordering bug in the same code: `readyForCleanUp` was read from
-`obj->timeOfRef()` *after* the reset block ran, but a real reset()'s own
-call touches `timeOfRef()` like any other call into the object
-(`VM::callFunction()`'s real `apply_low()`-equivalent touch), reading
-it post-reset would have silently defeated a same-cycle collision under
-*either* dialect even after adding the dialect flag, since the
-elapsed-time check would already read as "just touched." Both real
-drivers avoid exactly this by latching their own equivalent value
-(`ready_for_clean_up`/`time_since_ref`) *before* calling `reset_object()`
-each cycle (`backend.c:241` FluffOS, `backend.c:1321` LDMud), reproduced
-here the same way: `readyForCleanUp` is now latched at the top of each
-object's own iteration, before the reset block runs, and only the
-*suppression* on top of that latched value is gated on
-`dialect == LpcDialect::LdMud`.
-
-2 new regression tests replace the prior single one
-(`test/test_lexer.cpp`): `testTickResetsAndCleanupSkipsCleanUpOnTheSame
-CycleARealResetFiredUnderLdmudDialect` (same setup as before, now under
-an explicit `dialect: ldmud` harness) and `testTickResetsAndCleanupDoes
-NotSuppressCleanUpOnTheSameCycleARealResetFiredUnderFluffosDialect`
-(identical setup, default FluffOS dialect, opposite outcome from
-identical inputs, proving the divergence is real and dialect-driven).
-701 tests passing (up from 700), zero regressions.
-
-**Verified live against the real running driver, real bundled
-`mudlib/`** (`TIME_TO_RESET`/`TIME_TO_CLEAN_UP` temporarily shrunk to 4/6
-real seconds for one verification build, reverted immediately after,
-full suite re-confirmed passing at both settings): booted the real
-driver under both `dialect: fluffos` (default) and `dialect: ldmud` with
-the refactored code, confirmed no crash under either; a real scratch
-object cloned and moved into the real bundled `/single/start_room` (so a
-real `shared_ptr` reference from the room's own inventory kept it alive
-across separate eval connections, the same live-object-lifetime lesson
-the prior session's own live verification had already surfaced) had its
-real `clean_up()` fire correctly via a genuine wall-clock timer under
-both dialects, with the correct real clone argument (`0`), confirming
-the refactored `readyForCleanUp` latch did not regress the ordinary
-(non-colliding) path under either dialect. One honest live-session loose
-end, not a code-correctness concern: the same scenario's own `reset()`
-did not fire within the observed window under either dialect
-(`resetCalls` stayed 0 while `cleanUpCalls` reached 1), identically
-reproduced under both dialects against byte-identical, unmodified
-reset-block code, most likely an artifact of this specific interactive
-test setup (repeated eval connections independently touching the object)
-rather than a driver defect, since the exact same reset-firing mechanism
-is independently and deterministically confirmed correct by
-`testTickResetsAndCleanupCallsRealResetOnceDueAndNotInResetState` and 4
-other passing unit tests exercising it directly, not chased further
-given the unit-level proof already stands, flagged here rather than
-silently omitted. Scratch object file and log removed before stopping
-both scratch processes, confirmed via `git status` that `mudlib/` is
-exactly as found.
-
-**Phase 1 re-ranking, continued.** Surveyed every remaining open Phase 1
-row (1.2, 1.3, 1.4, 1.8, 1.9, 1.16; DGD-only rows 1.11-1.15 deprioritized
-per this file's own 2026-08-18 scope note) against its own current cell
-text rather than trusting the checkbox alone. Found two real
-checkbox/cell mismatches, both corrected rather than picking a new
-speculative feature to build:
-
-Row 1.9 (LDMud mapping width): its own 2026-08-19 close-out text already
-said the real, evidenced work was done and its five remaining sub-items
-(`m_allocate`/`m_entry`/`m_reallocate`/`m_add`/`m_contains`,
-`([:width])`) were deferred on zero real corpus evidence, but the
-checkbox itself was still `[ ]`. Re-verified the zero-evidence claim
-fresh rather than trusting it stale (the close-out's own explicit
-standing instruction): every fresh hit for any of those five is the
-LDMud driver's own test/doc/HISTORY/CHANGELOG tree, its own bundled
-`mud/lp-245` example mudlib (not one of this project's seven tracked
-real gameplay corpora), or its own `mudlib/deprecated/`-namespaced
-backward-compat stub definitions, zero real game-content call sites.
-Checkbox corrected to `[x]`.
-
-Row 1.8 (`LDMud #'symbol references baked at construction`): found
-completely blank: title only, no investigation ever recorded. Traced
-the gap to `PROMPT-ARCHIVE.md`'s own original `P1-B` prompt (its own
-stale framing per `CLAUDE.md`'s standing warning about that file),
-which had lumped rows 1.7 and 1.8 together as one task; the real
-`#'`-closure work that followed happened entirely under row 1.7's own
-cell across several later sessions, leaving row 1.8 never actually
-written up. Read real LDMud source directly (`doc/LPC/closures`,
-`closure.c`) to determine row 1.8's real remaining scope distinct from
-row 1.7's already-done bare-`#'name`/`#'efun::` work: `#'lfun::`/
-`#'sefun::` (reusable on the same forced-tier mechanism `#'efun::`
-already established) and `#'var::variable_name` (real `CLOSURE_IDENTIFIER`,
-a reference-to-a-global-variable closure kind, not a callable at all --
-`doc/LPC/closures:43`, `closure.c:450`/`524`/`977`/`1198`/`4178`).
-Re-checked real corpus usage fresh for all three (not reused from row
-1.7's own prior count): `grep -rn "#'var::"`/`"#'lfun::"`/`"#'sefun::"`
-across every corpus vendored in `temp/`, zero real mudlib call sites
-for any of the three; the only hit anywhere is `temp/ldmud/HISTORY:226`,
-the driver's own changelog prose. Per this project's own repeatedly-
-applied zero-corpus-evidence discipline (row 1.7's own `bind_lambda()`
-stand-in rejected on the same grounds; row 1.9's own five deferred
-sub-items above), row 1.8 stays open and deferred rather than built
-speculatively, now properly documented with real citations instead of
-left blank, so a future session does not have to re-derive this from
-scratch.
-
-No further open Phase 1 row (1.2, 1.3, 1.4, 1.16) turned up a new,
-real-evidence-backed, buildable gap this pass beyond what prior sessions
-had already investigated and correctly deferred (connect/disconnect,
-`rlimits`, the DGD `&ident(args)` closure syntax, the LDMud master-apply
-table's own remaining items): see each row's own cell for that already-
-recorded reasoning, none of it re-litigated here since nothing new was
-found to change it.
 

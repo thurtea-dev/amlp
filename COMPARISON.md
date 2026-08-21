@@ -18,16 +18,17 @@ below exist so a reader can see how a third, architecturally different
 driver solved the same problems, not because AMLP is trying to match it
 feature-for-feature.
 
-Last updated: 2026-08-20 (refreshed twice the same day: first, Phase 1's
-real-blocker count moved from 5/11 to 10/11, not from new feature work
-but from five stale checkboxes, rows 1.2, 1.3, 1.4, 1.9, and 1.16 --
-corrected to match real, already-landed work their own cells had
-recorded across many earlier sessions but never checked off; second, a
-further session actually built row 0.13a's own last remaining Phase 0
-sub-gap, `parse_sentence()`'s `nicks` argument, real `add_nicknames()`/
-`expand_node()` now ported and tested. See `ROADMAP.md`'s own dated
-corrections on each row and this file's own rewritten sections below for
-the full accounting.)
+Last updated: 2026-08-21 (a fresh full-project status sweep: Phase 0
+confirmed still 16/16 with no open sub-gap of its own, row 1.7's own
+`privilege_violation()` authorization gate now real for four trigger
+points, `bind_lambda()`'s cross-object form, `set_driver_hook()`,
+`call_out_info()`, and `input_to()`, and every driver-hook/efun-surface
+number below re-checked against `ROADMAP.md`'s own current row text
+rather than assumed carried forward. Phase 1's real-blocker fraction
+itself is unchanged at 10/11, row 1.7 was already checked off before
+this pass; what changed is how much of its own remaining cell is now
+closed. See `ROADMAP.md`'s own dated corrections on each row and this
+file's own rewritten sections below for the full accounting.)
 `ROADMAP.md` and `STATUS.md` are the living
 documents; if this file and either of those disagree on a specific row's
 status, trust `ROADMAP.md`'s own checkbox and re-derive this file's own
@@ -52,10 +53,10 @@ substantially exhausted: see immediately below.
 **Phase 0 (stabilize the current base): complete.**
 16 of 16 rows checked off, including `parse_*` (0.13a), the large
 natural-language parser package that was the one still-open row as of
-this file's prior revision: now checked (partial: one real sub-gap
-remains, see below, but all 8 named efuns are implemented, including
-real two-object matching, and the row's own multi-session scope has
-landed).
+an earlier revision of this file: all 8 named efuns are implemented,
+including real two-object matching and the `nicks` nickname-mapping
+argument (`parse_sentence()`'s own last remaining sub-gap, closed
+2026-08-20), no open sub-gap remains anywhere in this row.
 
 **Phase 1 (dialect universality): the real, corpus-driven work is now
 substantially exhausted, not "a bit under half done."** An earlier
@@ -111,20 +112,26 @@ guessed at here):
   when it added them, not a real mudlib using them.
 - **Row 1.7's own remaining sub-items (the row itself is closed, these
   are real, named exceptions inside it, not a separate open row)**:
-  `H_LOAD_UIDS`/`H_CLONE_UIDS`/`H_INCLUDE_DIRS` driver-hook trigger
-  points have real but minimal evidence, 3 real call sites, all in one
-  file (`secure/master/hooks.c`), versus 324 files defining `reset()`
-  and 43 defining `clean_up()`, which is why `H_RESET`/`H_CLEAN_UP` (now
-  real, dialect-gated where the two real drivers genuinely disagree) was
-  picked first. Plain dialect-agnostic `lambda()`, `bind_lambda()`'s
-  cross-object form, and per-hook type-map validation all have zero real
-  corpus pressure, `privilege_violation()` (which the cross-object
-  `bind_lambda()` form is gated behind) is a security-relevant
-  authorization gate with no corpus call-site signal of its own by
-  nature, a defensive-completeness question rather than a
-  compatibility gap, flagged as a candidate for its own future
-  evidence-independent evaluation rather than silently grouped with the
-  zero-usage items above.
+  `privilege_violation()`, once flagged as a defensive-completeness
+  question with no corpus signal of its own by nature rather than a
+  compatibility gap, was picked up on exactly that basis and is now
+  real for four trigger points: `bind_lambda()`'s cross-object form,
+  `set_driver_hook()`, `call_out_info()` (dialect-gated, real FluffOS
+  never had this mechanism at all), and `input_to()` (gated on the real
+  `INPUT_IGNORE_BANG` flag bit specifically). `call_out_info()`/
+  `input_to()` were this row's own last precisely-scoped, real-evidence
+  items; both are now closed. `H_LOAD_UIDS`/`H_CLONE_UIDS`/
+  `H_INCLUDE_DIRS` driver-hook trigger points have real but minimal
+  evidence, 3 real call sites, all in one file (`secure/master/
+  hooks.c`), versus 324 files defining `reset()` and 43 defining
+  `clean_up()`, which is why `H_RESET`/`H_CLEAN_UP` (now real,
+  dialect-gated where the two real drivers genuinely disagree) was
+  picked first. Plain dialect-agnostic `lambda()`, per-hook type-map
+  validation, `inaugurate_master()`'s own arg=1/2/3 master-reload/
+  reactivation cases (only arg=0, first boot, is wired), and the
+  remaining plain-string `hooks.c` hooks all have zero real corpus
+  pressure, deferred on the same evidence discipline as everywhere
+  else in this row, not forgotten.
 - **Row 1.9's own remaining sub-items (the row itself is closed, same
   pattern as row 1.7 above)**: `m_allocate`/`m_entry`/`m_reallocate`/
   `m_add`/`m_contains` (the real N-columns-wide efun family) and the
@@ -221,7 +228,8 @@ applicable).
 |---|---|---|---|---|
 | Dialect selectable via config, one driver | Yes (`fluffos`/`ldmud`/`dgd`) |, (is FluffOS) |, (is LDMud) |, (is DGD) |
 | Closures: `(: name :)` / `#'name` (FluffOS-style) | Yes | Yes | Yes (also has its own richer kinds) |, |
-| Driver hooks (`set_driver_hook()`, `inaugurate_master()` boot wiring) | Partial (full 32-slot storage/dispatch real; 2 of several real trigger points wired, `H_MOVE_OBJECT0/1`, `H_MODIFY_COMMAND`) |, | Yes |, |
+| Driver hooks (`set_driver_hook()`, `inaugurate_master()` boot wiring) | Partial (full 32-slot storage/dispatch real; 5 of several real trigger points wired, `H_MOVE_OBJECT0/1`, `H_MODIFY_COMMAND`, `H_RESET`, `H_CLEAN_UP`; only `inaugurate_master()`'s arg=0 first-boot case is wired, arg=1/2/3 reload/reactivation cases are not) |, | Yes |, |
+| `privilege_violation()` authorization gate | Partial (4 real trigger points wired: `bind_lambda()` cross-object, `set_driver_hook()`, `call_out_info()` dialect-gated, `input_to()`'s `INPUT_IGNORE_BANG` flag; ~20 of 26 real doc-cataloged operations remain ungated, zero real corpus evidence or no implemented mechanism to gate for each) |, | Yes |, |
 | Closures: real `lambda()`/`unbound_lambda()`/`bind_lambda()` kind distinction | Partial (`unbound_lambda()`/`bind_lambda()` real for the one confirmed corpus quoted-code shape; plain `lambda()` and the full closure-kind matrix not started, row 1.7/1.8 open) |, | Yes |, |
 | Mapping width > 1 (`m_allocate`, N-column values) | Partial (`m_indices`/`m_values` real names ported, single-column only; row 1.9 open) |, | Yes |, |
 | Shadows (`shadow()`, LDMud `unshadow()`/`query_allow_shadow`) | Yes | Yes (FluffOS shape) | Yes (LDMud shape, done) |, |
@@ -270,7 +278,10 @@ applicable).
   master-object callback surface: see the section above. LDMud's
   separate driver-hook mechanism (`set_driver_hook()`,
   `inaugurate_master()`) is real and automatically wired at boot, but
-  only 2 of its many real trigger points actually dispatch anything yet.
+  only 5 of its many real trigger points actually dispatch anything
+  yet, and `privilege_violation()`, the real authorization gate several
+  of those hooks and efuns sit behind, covers only 4 of 26 real
+  doc-cataloged operations.
 - **Dialect coverage is asymmetric.** FluffOS is the primary, most
   complete target (this is where the bundled mudlib and most of the
   regression corpus point); LDMud has real, working, dialect-gated
@@ -298,7 +309,7 @@ undersells what already works: AMLP is not a wrapper or a fork of any
 of the three real drivers: its own lexer, parser, code generator,
 bytecode VM, object system, and network layer are original
 implementations, verified continuously against real vendored source and
-a real bundled mudlib rather than against assumption. 694 regression
+a real bundled mudlib rather than against assumption. 715 regression
 tests pass as of this writing (see `STATUS.md` for the current count,
 which changes every session), and the discipline behind every checked
 row above is the same: read the real source, port the real behavior

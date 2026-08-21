@@ -325,6 +325,24 @@ of its own by nature rather than a compatibility gap, see
 `COMPARISON.md`'s own refreshed Phase 1 section for the full numbers and
 per-row citations.
 
+**Update, 2026-08-21: `privilege_violation()`, the one item this note
+called a defensive-completeness question with no corpus signal of its
+own by nature, was picked up on exactly that basis across two further
+sessions and is real now, for four trigger points: `bind_lambda()`'s
+cross-object form, `set_driver_hook()`, `call_out_info()`, and
+`input_to()` (row 1.7's own cell has the full citations and
+live-verification history for each). That closes row 1.7's own last
+precisely-scoped, real-evidence item. Fresh full-project sweep this
+session confirms the fraction itself is unchanged: still 10 of 11 real
+(non-DGD) rows closed, 91%, row 1.7 was already counted among the 10
+before this update since it was already checkbox-closed; what changed
+is how much of its own remaining cell is now built rather than
+deferred. Row 1.8 remains the only real row still open, same
+zero-corpus-evidence basis as when this note was first written, not
+re-investigated this pass since nothing new surfaced to revisit it on.
+See `STATUS.md`'s own 2026-08-21 dated entry for the full next-priority
+reasoning produced this session.**
+
 | # | Task | Directory | Status |
 |---|------|-----------|--------|
 | 1.1 | `LpcDialect` enum + config key `dialect` | `src/config` + `src/dialect` | [x] (the enum, `LpcDialect`, `dialectName()`/`dialectFromString()`, implemented 2026-08-24 in `src/dialect/LpcDialect.hpp`/`.cpp`; the `dialect` config key implemented 2026-08-24 (continued) in `Config::dialect()` (`src/config/Config.hpp`/`.cpp`, plain `"fluffos"`/`"ldmud"`/`"dgd"` string, kept out of the `LpcDialect` enum itself to avoid a `config`<->`dialect` library cycle since `src/dialect` already depends on `src/config`; parsed via `dialectFromString()` at the one real call site that needs the enum, `src/dialect/DialectSelect.cpp`). Defaults to `"fluffos"`, matching this driver's prior behavior exactly for every config file that never sets the key. Actually consumed by exactly one call site so far, `main.cpp`'s `masterUidApply()` boot query, see row 1.4, every other applies still hardcodes FluffOS or is unimplemented) |

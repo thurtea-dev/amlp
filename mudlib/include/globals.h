@@ -45,6 +45,16 @@
 
 #define WAND_OB "/clone/wand_of_creation"
 
+// notes/ACCOUNT_LOGIN_PLAN.md's own first build slice: a real login/
+// account system, greenlit 2026-08-19, this daemon and its per-account
+// record object built 2026-08-21. ACCOUNTS_DIR is bucketed by the
+// account name's own first letter (account_d.c's own account_path()),
+// matching the pattern several vendored corpora use for large flat
+// save trees, e.g. skylib_fluffos_v3's own save/bank_accounts/<letter>/.
+#define ACCOUNT_D      "/single/account_d"
+#define ACCOUNT_RECORD "/single/account_record"
+#define ACCOUNTS_DIR   "/accounts"
+
 // include/command.h's own "inherit CLEAN_UP;" -- every kept command
 // file that includes command.h (who.c, say.c, quit.c, shutdown.c)
 // depends on this. Confirmed live: removing this and inherit/clean_up.c
