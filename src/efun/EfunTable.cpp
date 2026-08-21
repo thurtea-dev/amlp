@@ -2067,9 +2067,29 @@ void registerCoreEfuns() {
     // current_object, "s->ob = current_object").
     //
     // Echo/escape flags (I_NOECHO, I_NOESC, I_SINGLE_CHAR, I_NORMAL) are
-    // accepted, positionally consumed exactly like the real efun, and
-    // then discarded: this driver does not negotiate telnet echo
-    // suppression yet, so there is nothing to apply them to.
+    // accepted, positionally consumed exactly like the real efun; I_NOECHO
+    // (bit 0x1) is genuinely applied below via Connection::suppressEcho(),
+    // the rest have no behavior attached (this driver does not negotiate
+    // telnet charmode/no-escape yet).
+    //
+    // Real LDMud's own f_input_to() additionally gates on a privilege
+    // violation, but only when the caller passes the LDMud-only
+    // `INPUT_IGNORE_BANG` flag bit (real value 128,
+    // `mudlib/sys/input_to.h`): "((flags & IGNORE_BANG) &&
+    // !privilege_violation4(STR_INPUT_TO, svalue_object(command_giver), 0,
+    // flags, sp))" (`comm.c:7315-7317`) -- real `privilege_violation4()`'s
+    // own "whom && !how_str" branch (`interpret.c:8578-8621`) resolves
+    // that to `master->privilege_violation("input_to", current_object,
+    // command_giver, flags)`. Real FluffOS's own input_to() flag bits
+    // (`I_NOECHO`=0x1, `I_NOESC`=0x2, `I_SINGLE_CHAR`=0x4, get_char only,
+    // confirmed against `comm.h`) never define bit 128 at all, so gating
+    // on that one bit is safe under either dialect: a FluffOS-targeting
+    // caller has no reason to ever set it, and only setting it now
+    // genuinely risks a denial, wired 2026-08-21 via the same shared
+    // `VM::privilegeViolation()` the `bind_lambda()`/`set_driver_hook()`/
+    // `call_out_info()` gates already use. A denial here mirrors the real
+    // efun exactly: silently returns 0, the same as any other input_to()
+    // failure, no pending handler registered.
     t.registerEfun("input_to", [](VM& vm, std::vector<Value>& args) -> Value {
         if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
             throw LpcRuntimeError("input_to: expected a string function name as the first argument");
@@ -2091,6 +2111,15 @@ void registerCoreEfuns() {
             extraStart = 2;
         }
         std::vector<Value> extraArgs(args.begin() + static_cast<long>(extraStart), args.end());
+
+        // real "(flags & IGNORE_BANG) && !privilege_violation4(...)"
+        // (comm.c:7316-7317) -- see this efun's own registration comment
+        // above for the full citation and dialect reasoning.
+        if (flags & 128) {
+            if (!vm.privilegeViolation("input_to", {Value(conn->boundObject()), Value(flags)})) {
+                return Value(int64_t{0});
+            }
+        }
 
         conn->setPendingInputTo(currentObj, function, std::move(extraArgs));
         // Phase 0.8: real set_call()'s own "if (flags & I_NOECHO)
@@ -2208,7 +2237,29 @@ void registerCoreEfuns() {
     // function pointer" (real svalue_to_string()) is approximated as the
     // closure's own bare functionName, not a byte-exact format match --
     // no real call site parses that string, both just print it.
+    //
+    // Real LDMud's own f_call_out_info() (call_out.c:805-829) additionally
+    // gates the whole call behind a real privilege_violation() first:
+    // "if (privilege_violation(STR_CALL_OUT_INFO, &const0, sp))
+    // push_array(sp, get_all_call_outs()); else push_ref_array(sp,
+    // &null_vector);" -- real master->privilege_violation("call_out_info",
+    // current_object, 0) (privilege_violation2()'s own real 3-arg shape,
+    // interpret.c:8518-8524, arg here is the constant 0, not the object
+    // itself). Real FluffOS's own f_call_out_info() (efuns_main.c:292ff)
+    // has no such gate at all -- FluffOS never had a privilege_violation()
+    // mechanism (confirmed 2026-08-20, ROADMAP.md row 1.7/1.8's own
+    // scoping investigation), so this driver's pre-existing ungated
+    // behavior above already matches real FluffOS exactly and stays
+    // unconditional under that dialect; only under `dialect: ldmud` is
+    // the gate real, wired 2026-08-21 via the same shared
+    // VM::privilegeViolation() the bind_lambda()/set_driver_hook() gates
+    // already use.
     t.registerEfun("call_out_info", [](VM& vm, std::vector<Value>&) -> Value {
+        if (vm.config().dialect() == "ldmud") {
+            if (!vm.privilegeViolation("call_out_info", {Value(int64_t{0})})) {
+                return Value(std::make_shared<Array>());
+            }
+        }
         auto result = std::make_shared<Array>();
         if (!vm.scheduler()) return Value(result);
         auto now = std::chrono::steady_clock::now();

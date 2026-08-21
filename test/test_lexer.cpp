@@ -17941,6 +17941,195 @@ static void testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage() {
     std::cout << "testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage OK\n";
 }
 
+// Real LDMud's own f_call_out_info() gate (call_out.c:805-829, real as of
+// 2026-08-21) -- see this efun's own EfunTable.cpp registration comment
+// for the full citation. A denial returns the real empty array, not an
+// error, even though a real pending call_out exists.
+static void testCallOutInfoLdmudDialectDeniedByRealPrivilegeViolationReturnsEmptyArray() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/coid_test.c",
+        "int probe() { return call_out(\"idle\", 60); }\n"
+        "mixed *probe_info() { return call_out_info(); }\n"
+        "void idle() {}\n");
+    auto ob = harness.objects.cloneObject("/coid_test");
+    assert(ob != nullptr);
+
+    harness.vm.callFunction(ob, "probe", {});
+    amlp::Value infoResult = harness.vm.callFunction(ob, "probe_info", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&infoResult.data);
+    assert(arr != nullptr && (*arr)->items.empty());
+
+    std::cout << "testCallOutInfoLdmudDialectDeniedByRealPrivilegeViolationReturnsEmptyArray OK\n";
+}
+
+// Grant path: the same real pending entry the pre-existing (dialect-
+// neutral) test already proves, now confirmed to survive a real
+// privilege_violation() grant too, not just the absence of a gate.
+static void testCallOutInfoLdmudDialectGrantedByRealPrivilegeViolationReturnsPendingEntry() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) {\n"
+        "    return what == \"call_out_info\" ? 1 : -1;\n"
+        "}\n");
+    assert(harness.objects.loadMasterObject());
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/coig_test.c",
+        "int probe() { return call_out(\"idle\", 60); }\n"
+        "mixed *probe_info() { return call_out_info(); }\n"
+        "void idle() {}\n");
+    auto ob = harness.objects.cloneObject("/coig_test");
+    assert(ob != nullptr);
+
+    harness.vm.callFunction(ob, "probe", {});
+    amlp::Value infoResult = harness.vm.callFunction(ob, "probe_info", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&infoResult.data);
+    assert(arr != nullptr && (*arr)->items.size() == 1);
+    auto* entry = std::get_if<std::shared_ptr<amlp::Array>>(&(*arr)->items[0].data);
+    assert(entry != nullptr && (*entry)->items.size() == 3);
+    assert(std::get<std::shared_ptr<amlp::LpcObject>>((*entry)->items[0].data) == ob);
+
+    std::cout << "testCallOutInfoLdmudDialectGrantedByRealPrivilegeViolationReturnsPendingEntry OK\n";
+}
+
+// Real FluffOS's own f_call_out_info() (efuns_main.c) has no gate at all
+// -- confirms this driver's pre-existing default-dialect behavior stays
+// completely unconditional, never consulting privilege_violation() even
+// when a master is loaded whose own lfun would deny everything.
+static void testCallOutInfoUnderFluffosDialectStaysUngatedEvenWithADenyingMaster() {
+    ObjectVarHarness harness; // default dialect (fluffos)
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+    amlp::Scheduler scheduler(harness.vm);
+    harness.vm.setScheduler(&scheduler);
+    harness.writeFile("/coif_test.c",
+        "int probe() { return call_out(\"idle\", 60); }\n"
+        "mixed *probe_info() { return call_out_info(); }\n"
+        "void idle() {}\n");
+    auto ob = harness.objects.cloneObject("/coif_test");
+    assert(ob != nullptr);
+
+    harness.vm.callFunction(ob, "probe", {});
+    amlp::Value infoResult = harness.vm.callFunction(ob, "probe_info", {});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&infoResult.data);
+    assert(arr != nullptr && (*arr)->items.size() == 1);
+
+    std::cout << "testCallOutInfoUnderFluffosDialectStaysUngatedEvenWithADenyingMaster OK\n";
+}
+
+// Real LDMud's own f_input_to() IGNORE_BANG gate (comm.c:7315-7317, real
+// as of 2026-08-21) -- see this efun's own EfunTable.cpp registration
+// comment for the full citation and real bit value (128). A denial
+// silently fails to register the pending handler and returns 0, matching
+// every other privilege_violation() denial path in this row: no error,
+// no side effect.
+static void testInputToIgnoreBangFlagDeniedByRealPrivilegeViolationDoesNotRegisterHandler() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/itib_test.c",
+        "int start() { return input_to(\"get_pw\", 128); }\n"
+        "void get_pw(string str) {}\n");
+    auto ob = harness.objects.cloneObject("/itib_test");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    conn.attach(ob);
+
+    amlp::OutputContext::set(&conn);
+    amlp::Value startResult = harness.vm.callFunction(ob, "start", {});
+    amlp::OutputContext::set(nullptr);
+    assert(std::holds_alternative<int64_t>(startResult.data));
+    assert(std::get<int64_t>(startResult.data) == 0);
+    assert(conn.hasPendingInputTo() == false);
+
+    std::cout << "testInputToIgnoreBangFlagDeniedByRealPrivilegeViolationDoesNotRegisterHandler OK\n";
+}
+
+// Grant path: the pending handler registers exactly as the pre-existing
+// (no-flag) input_to() tests already prove, now confirmed to survive a
+// real privilege_violation() grant on the IGNORE_BANG flag too.
+static void testInputToIgnoreBangFlagGrantedByRealPrivilegeViolationRegistersNormally() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) {\n"
+        "    return what == \"input_to\" ? 1 : -1;\n"
+        "}\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/itig_test.c",
+        "int start() { return input_to(\"get_pw\", 128); }\n"
+        "void get_pw(string str) {}\n");
+    auto ob = harness.objects.cloneObject("/itig_test");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    conn.attach(ob);
+
+    amlp::OutputContext::set(&conn);
+    amlp::Value startResult = harness.vm.callFunction(ob, "start", {});
+    amlp::OutputContext::set(nullptr);
+    assert(std::holds_alternative<int64_t>(startResult.data));
+    assert(std::get<int64_t>(startResult.data) == 1);
+    assert(conn.hasPendingInputTo() == true);
+    auto pending = conn.takePendingInputTo();
+    assert(pending.has_value() && pending->function == "get_pw");
+
+    std::cout << "testInputToIgnoreBangFlagGrantedByRealPrivilegeViolationRegistersNormally OK\n";
+}
+
+// Real "(flags & IGNORE_BANG) && ..." (comm.c:7316): the gate is only
+// ever consulted when the caller actually sets that one bit -- confirmed
+// here the other direction from the two tests above, a flags value that
+// omits bit 128 (NOECHO, bit 1) registers normally even against a master
+// whose privilege_violation() would deny everything, proving the gate is
+// genuinely conditional on the flag, not unconditionally active once a
+// master exists.
+static void testInputToWithoutIgnoreBangFlagNeverConsultsPrivilegeViolation() {
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/itnb_test.c",
+        "int start() { return input_to(\"get_pw\", 1); }\n"
+        "void get_pw(string str) {}\n");
+    auto ob = harness.objects.cloneObject("/itnb_test");
+    assert(ob != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    makeNonBlocking(fds[0]);
+    conn.attach(ob);
+
+    amlp::OutputContext::set(&conn);
+    amlp::Value startResult = harness.vm.callFunction(ob, "start", {});
+    amlp::OutputContext::set(nullptr);
+    assert(std::holds_alternative<int64_t>(startResult.data));
+    assert(std::get<int64_t>(startResult.data) == 1);
+    assert(conn.hasPendingInputTo() == true);
+
+    std::cout << "testInputToWithoutIgnoreBangFlagNeverConsultsPrivilegeViolation OK\n";
+}
+
 // ROADMAP.md row 1.7/1.8's own set_driver_hook() first real slice, the
 // actual point of the whole investigation: real secure/master/hooks.c's
 // own exact H_MOVE_OBJECT0 shape (addDriverHooks()'s own literal
@@ -22386,6 +22575,12 @@ int main() {
     testPrivilegeViolationTrustBypassGrantsTheMasterObjectItselfWithNoLfunNeeded();
     testSetDriverHookDeniedByRealPrivilegeViolationSilentlyLeavesHookUnchanged();
     testSetDriverHookRejectsOutOfRangeHookNumberWithRealMessage();
+    testCallOutInfoLdmudDialectDeniedByRealPrivilegeViolationReturnsEmptyArray();
+    testCallOutInfoLdmudDialectGrantedByRealPrivilegeViolationReturnsPendingEntry();
+    testCallOutInfoUnderFluffosDialectStaysUngatedEvenWithADenyingMaster();
+    testInputToIgnoreBangFlagDeniedByRealPrivilegeViolationDoesNotRegisterHandler();
+    testInputToIgnoreBangFlagGrantedByRealPrivilegeViolationRegistersNormally();
+    testInputToWithoutIgnoreBangFlagNeverConsultsPrivilegeViolation();
     testSetDriverHookH_MOVE_OBJECT0DispatchesThroughRealMoveObjectEfun();
     testMoveObjectFallsBackToHardcodedLogicWhenNoHookIsSet();
     testHModifyCommandRewritesBareAbbreviationToTheMappedFullVerb();
