@@ -23,22 +23,38 @@
 // character explicitly (`got_character_name()` below), a real, distinct
 // name from the account name, recorded into `account_d`'s own
 // `characters()` list (built in item 1, never populated until now). A
-// returning account picks up its own first (and, until item 5's own
-// multi-character selection is built, only) character from that same
+// returning account picks up its own first character from that same
 // list. Pre-item-4 accounts (created by an earlier session's own
 // account-name-as-character-name shape) still have an empty
 // `characters` list on disk -- `got_login_password()` below falls back
 // to the account name itself for exactly those, so an account created
 // before this item keeps loading its own already-existing character
 // file correctly, not a new, empty one under a name nobody ever chose.
-// Still not built (item 5's own explicit scope, not this item's):
-// multi-character-per-account, a character-select menu -- a returning
-// account with more than one character (not reachable yet, nothing
-// before item 5 can create a second one) would still only ever load
-// `characters[0]`.
+//
+// Character selection (that plan's own item 5, 2026-08-21, later still
+// the same week): if `characters()` returns more than one name,
+// `got_login_password()` below now shows a numbered menu
+// (`got_character_selection()`) instead of silently defaulting to
+// `characters[0]`. This plan's own "Proposed architecture" section for
+// this item also describes "list existing characters, pick one or
+// create new" -- only the "pick one" half is built this slice.
+// "Create new" from an *existing, already-authenticated* account is a
+// genuinely separate, larger piece (a new login-flow branch reachable
+// after selection, not before it, plus deciding what happens to an
+// account already past `MAX_LOGIN_TRIES`-style abuse concerns for
+// repeated character creation) deliberately not attempted here, noted
+// separately rather than forced -- and, structurally, nothing before
+// this item ever gives an account more than one character to select
+// among in real play either way (`add_character()` is still only ever
+// called once, from `got_character_name()` below, itself only reachable
+// from brand-new-account creation), so this slice's own menu is real,
+// correct, and tested, but not yet reachable through ordinary play
+// without that follow-on piece -- the same honest gap this plan's own
+// per-item writeups have flagged before rather than glossed over.
 
 private string account_name;
 private string character_name;
+private string *pending_characters;
 private int tries;
 private string pending_password;
 
@@ -157,12 +173,18 @@ got_login_password(string str)
 
     if (ACCOUNT_D->check_password(account_name, str)) {
         // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 4: a returning
-        // account's own first (and, until item 5, only) real character,
-        // per this file's own header comment above -- an empty list
-        // (this account predates item 4) falls back to the account name
-        // itself, the exact shape items 2/3 already used and already
-        // has a real character file saved under it.
+        // account's own real character list, per this file's own header
+        // comment above -- an empty list (this account predates item 4)
+        // falls back to the account name itself, the exact shape items
+        // 2/3 already used and already has a real character file saved
+        // under it.
         chars = ACCOUNT_D->characters(account_name);
+        if (sizeof(chars) > 1) {
+            // Item 5: more than one real character, show the menu
+            // instead of silently defaulting to chars[0].
+            show_character_menu(chars);
+            return;
+        }
         character_name = sizeof(chars) ? chars[0] : account_name;
         enter_game();
         return;
@@ -178,6 +200,51 @@ got_login_password(string str)
     write("\nIncorrect password. Password: ");
     call_out("login_timeout", LOGIN_TIMEOUT_SECS);
     input_to("got_login_password", INPUT_NOECHO);
+}
+
+// show_character_menu()/got_character_selection(): notes/
+// ACCOUNT_LOGIN_PLAN.md build ordering item 5 (character selection,
+// 2026-08-21). chars is stashed in pending_characters so
+// got_character_selection() below can resolve a chosen number back to
+// a real name without re-querying account_d (the account's own real
+// character list cannot change mid-selection, nothing else touches it
+// during this same login attempt).
+private
+void
+show_character_menu(string *chars)
+{
+    int i;
+
+    pending_characters = chars;
+    write("\nChoose a character:\n");
+    for (i = 0; i < sizeof(chars); i++) {
+        write("  " + (i + 1) + ". " + chars[i] + "\n");
+    }
+    write("Character number: ");
+    call_out("login_timeout", LOGIN_TIMEOUT_SECS);
+    input_to("got_character_selection");
+}
+
+void
+got_character_selection(string str)
+{
+    int choice;
+
+    remove_call_out("login_timeout");
+
+    // sscanf()'s own real "did this actually match" contract: a return
+    // of 1 means the whole pattern (a plain %d) matched end to end, not
+    // just a numeric prefix of a longer, partly-garbage string.
+    if (!str || sscanf(str, "%d", choice) != 1 ||
+            choice < 1 || choice > sizeof(pending_characters)) {
+        write("\nNot a valid choice.");
+        show_character_menu(pending_characters);
+        return;
+    }
+
+    character_name = pending_characters[choice - 1];
+    pending_characters = 0;
+    enter_game();
 }
 
 void

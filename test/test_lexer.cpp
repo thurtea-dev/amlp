@@ -22216,15 +22216,16 @@ static const char* kLoginTestAccountDC =
 // implicitly at its real int-variable zero default and calls
 // got_account_name() directly instead, the same starting point logon()
 // itself would have left the object in). Updated 2026-08-21 (build
-// ordering item 4, character creation) to match got_confirm_password()'s
-// own new got_character_name() step and got_login_password()'s own new
-// ACCOUNT_D->characters() lookup, both replacing the old direct
-// account-name-as-character-name shape.
+// ordering item 5, character selection) to match got_login_password()'s
+// own new show_character_menu()/got_character_selection() branch for
+// characters().size() > 1, on top of item 4's own already-embedded
+// got_character_name() step and ACCOUNT_D->characters() lookup.
 static const char* kLoginTestLoginC =
     "#include <globals.h>\n"
     "\n"
     "private string account_name;\n"
     "private string character_name;\n"
+    "private string *pending_characters;\n"
     "private int tries;\n"
     "private string pending_password;\n"
     "\n"
@@ -22295,6 +22296,10 @@ static const char* kLoginTestLoginC =
     "\n"
     "    if (ACCOUNT_D->check_password(account_name, str)) {\n"
     "        chars = ACCOUNT_D->characters(account_name);\n"
+    "        if (sizeof(chars) > 1) {\n"
+    "            show_character_menu(chars);\n"
+    "            return;\n"
+    "        }\n"
     "        character_name = sizeof(chars) ? chars[0] : account_name;\n"
     "        enter_game();\n"
     "        return;\n"
@@ -22309,6 +22314,38 @@ static const char* kLoginTestLoginC =
     "\n"
     "    write(\"\\nIncorrect password. Password: \");\n"
     "    input_to(\"got_login_password\", INPUT_NOECHO);\n"
+    "}\n"
+    "\n"
+    "private\n"
+    "void\n"
+    "show_character_menu(string *chars)\n"
+    "{\n"
+    "    int i;\n"
+    "\n"
+    "    pending_characters = chars;\n"
+    "    write(\"\\nChoose a character:\\n\");\n"
+    "    for (i = 0; i < sizeof(chars); i++) {\n"
+    "        write(\"  \" + (i + 1) + \". \" + chars[i] + \"\\n\");\n"
+    "    }\n"
+    "    write(\"Character number: \");\n"
+    "    input_to(\"got_character_selection\");\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "got_character_selection(string str)\n"
+    "{\n"
+    "    int choice;\n"
+    "\n"
+    "    if (!str || sscanf(str, \"%d\", choice) != 1 ||\n"
+    "            choice < 1 || choice > sizeof(pending_characters)) {\n"
+    "        write(\"\\nNot a valid choice.\");\n"
+    "        show_character_menu(pending_characters);\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    character_name = pending_characters[choice - 1];\n"
+    "    pending_characters = 0;\n"
+    "    enter_game();\n"
     "}\n"
     "\n"
     "void\n"
@@ -22942,6 +22979,161 @@ static void testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountN
 
     ::close(fds2[1]);
     std::cout << "testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountName OK\n";
+}
+
+// ---------------------------------------------------------------------
+// notes/ACCOUNT_LOGIN_PLAN.md build ordering item 5 (character
+// selection, 2026-08-21): got_login_password() now shows a real,
+// numbered character menu when an account's own characters() list has
+// more than one entry, instead of silently defaulting to characters[0].
+// Nothing before this item ever gives an account more than one
+// character through the login flow itself (add_character() is only
+// ever called once, from got_character_name(), itself only reachable
+// from brand-new-account creation) -- every test below seeds a second
+// character directly via account_d's own add_character(), the same
+// "seed via account_d directly, bypass the UI for what is not under
+// test" pattern testLoginExistingAccountCorrectPasswordOnASecond
+// ConnectionSucceeds and testLoginWrongPasswordRejectedAndDisconnects
+// AfterMaxLoginTries already established for accounts.
+// ---------------------------------------------------------------------
+
+static void testGotLoginPasswordShowsMenuAndLoadsTheChosenCharacter() {
+    LoginTestHarness t;
+
+    t.harness.vm.callFunction(t.accountD, "create_account",
+        {amlp::Value(std::string("multichar")), amlp::Value(std::string("multipass1"))});
+    t.harness.vm.callFunction(t.accountD, "add_character",
+        {amlp::Value(std::string("multichar")), amlp::Value(std::string("Warrior"))});
+    t.harness.vm.callFunction(t.accountD, "add_character",
+        {amlp::Value(std::string("multichar")), amlp::Value(std::string("Mage"))});
+
+    // First connection: log in, then choose character 1 ("Warrior").
+    auto login1 = t.harness.objects.cloneObject("/clone/login");
+    assert(login1 != nullptr);
+    int fds1[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds1) == 0);
+    amlp::Connection conn1(fds1[0]);
+    conn1.attach(login1);
+
+    amlp::OutputContext::set(&conn1);
+    t.harness.vm.callFunction(login1, "got_account_name",
+        {amlp::Value(std::string("multichar"))});
+    assert(conn1.takePendingInputTo()->function == "got_login_password");
+    t.harness.vm.callFunction(login1, "got_login_password",
+        {amlp::Value(std::string("multipass1"))});
+    // A real menu, not enter_game() directly: still connected, still
+    // pending, a real new input_to registered for the choice itself.
+    assert(!login1->isDestructed());
+    assert(conn1.hasPendingInputTo());
+    assert(conn1.takePendingInputTo()->function == "got_character_selection");
+
+    t.harness.vm.callFunction(login1, "got_character_selection",
+        {amlp::Value(std::string("1"))});
+    amlp::OutputContext::set(nullptr);
+    assert(login1->isDestructed());
+
+    auto user1 = conn1.boundObject();
+    assert(user1 != nullptr);
+    amlp::Value name1 = t.harness.vm.callFunction(user1, "query_name", {});
+    assert(std::get<std::string>(name1.data) == "Warrior");
+
+    ::close(fds1[1]);
+
+    // Second, independent connection, same account: choosing 2 loads
+    // "Mage" instead, proving the menu is not hardcoded to the first
+    // entry.
+    auto login2 = t.harness.objects.cloneObject("/clone/login");
+    assert(login2 != nullptr);
+    int fds2[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds2) == 0);
+    amlp::Connection conn2(fds2[0]);
+    conn2.attach(login2);
+
+    amlp::OutputContext::set(&conn2);
+    t.harness.vm.callFunction(login2, "got_account_name",
+        {amlp::Value(std::string("multichar"))});
+    t.harness.vm.callFunction(login2, "got_login_password",
+        {amlp::Value(std::string("multipass1"))});
+    assert(conn2.takePendingInputTo()->function == "got_character_selection");
+
+    t.harness.vm.callFunction(login2, "got_character_selection",
+        {amlp::Value(std::string("2"))});
+    amlp::OutputContext::set(nullptr);
+    assert(login2->isDestructed());
+
+    auto user2 = conn2.boundObject();
+    assert(user2 != nullptr);
+    amlp::Value name2 = t.harness.vm.callFunction(user2, "query_name", {});
+    assert(std::get<std::string>(name2.data) == "Mage");
+    // Each character has its own independent login_count -- Mage's own
+    // first login, not Warrior's count carried over.
+    amlp::Value count2 = t.harness.vm.callFunction(user2, "query_login_count", {});
+    assert(std::get<int64_t>(count2.data) == 1);
+
+    ::close(fds2[1]);
+    std::cout << "testGotLoginPasswordShowsMenuAndLoadsTheChosenCharacter OK\n";
+}
+
+static void testGotCharacterSelectionRejectsOutOfRangeAndNonNumericChoices() {
+    LoginTestHarness t;
+
+    t.harness.vm.callFunction(t.accountD, "create_account",
+        {amlp::Value(std::string("pickytest")), amlp::Value(std::string("pickypass1"))});
+    t.harness.vm.callFunction(t.accountD, "add_character",
+        {amlp::Value(std::string("pickytest")), amlp::Value(std::string("Rogue"))});
+    t.harness.vm.callFunction(t.accountD, "add_character",
+        {amlp::Value(std::string("pickytest")), amlp::Value(std::string("Cleric"))});
+
+    auto loginObj = t.harness.objects.cloneObject("/clone/login");
+    assert(loginObj != nullptr);
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(loginObj);
+
+    amlp::OutputContext::set(&conn);
+    t.harness.vm.callFunction(loginObj, "got_account_name",
+        {amlp::Value(std::string("pickytest"))});
+    t.harness.vm.callFunction(loginObj, "got_login_password",
+        {amlp::Value(std::string("pickypass1"))});
+    assert(conn.takePendingInputTo()->function == "got_character_selection");
+
+    // Zero: below range.
+    t.harness.vm.callFunction(loginObj, "got_character_selection",
+        {amlp::Value(std::string("0"))});
+    assert(!loginObj->isDestructed());
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_character_selection");
+
+    // Three: above range (only 2 characters exist).
+    t.harness.vm.callFunction(loginObj, "got_character_selection",
+        {amlp::Value(std::string("3"))});
+    assert(!loginObj->isDestructed());
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_character_selection");
+
+    // Non-numeric: sscanf() matches nothing at all.
+    t.harness.vm.callFunction(loginObj, "got_character_selection",
+        {amlp::Value(std::string("banana"))});
+    assert(!loginObj->isDestructed());
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_character_selection");
+
+    // A genuinely valid choice after all those rejections still works
+    // normally -- the repeated invalid input did not corrupt
+    // pending_characters.
+    t.harness.vm.callFunction(loginObj, "got_character_selection",
+        {amlp::Value(std::string("2"))});
+    amlp::OutputContext::set(nullptr);
+    assert(loginObj->isDestructed());
+
+    auto user = conn.boundObject();
+    assert(user != nullptr);
+    amlp::Value name = t.harness.vm.callFunction(user, "query_name", {});
+    assert(std::get<std::string>(name.data) == "Cleric");
+
+    ::close(fds[1]);
+    std::cout << "testGotCharacterSelectionRejectsOutOfRangeAndNonNumericChoices OK\n";
 }
 
 int main() {
@@ -23685,6 +23877,8 @@ int main() {
     testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead();
     testGotCharacterNameRejectsANameAlreadyTakenByAnotherAccount();
     testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountName();
+    testGotLoginPasswordShowsMenuAndLoadsTheChosenCharacter();
+    testGotCharacterSelectionRejectsOutOfRangeAndNonNumericChoices();
     std::cout << "all tests passed\n";
     return 0;
 }

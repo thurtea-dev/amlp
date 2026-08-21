@@ -29,6 +29,26 @@ itself is unchanged at 10/11, row 1.7 was already checked off before
 this pass; what changed is how much of its own remaining cell is now
 closed. See `ROADMAP.md`'s own dated corrections on each row and this
 file's own rewritten sections below for the full accounting.)
+
+**Re-swept 2026-08-21 (later the same day, once more, after
+`notes/ACCOUNT_LOGIN_PLAN.md` closed out its own originally scoped
+build ordering):** every Phase/row number above re-checked directly
+against `ROADMAP.md`'s own current checkboxes (`awk`-counted per phase
+section, not eyeballed) rather than trusted stale -- all five numbers
+in the table below are unchanged (Phase 0 16/16, Phase 1 10/11 real-
+blockers-only and 10/16 including DGD, Phase 2 0/22, Phase 3 0/8), row
+1.8 confirmed still `[ ]` with the same zero-real-evidence scope
+already on record, and every Phase 2/3 `src/` directory confirmed still
+`instruct.md`-only (the one exception, `src/scheduler/Scheduler.cpp`,
+predates this sweep by many sessions and backs Phase 0/1's own already-
+shipped `call_out()`/`heart_beat()`, not any Phase 2 concurrency item).
+This session's own real work (`notes/ACCOUNT_LOGIN_PLAN.md`'s build
+ordering items 4 and 5, character creation and character selection,
+plus a bounded stopgap fix for a width > 1 mapping save/restore
+silent-truncation bug found by the immediately prior session's own
+fact-check) is real mudlib content and a driver-level correctness fix,
+not a `ROADMAP.md` row of its own -- see `STATUS.md`'s own dated
+entries for the full writeups.
 `ROADMAP.md` and `STATUS.md` are the living
 documents; if this file and either of those disagree on a specific row's
 status, trust `ROADMAP.md`'s own checkbox and re-derive this file's own
@@ -309,7 +329,7 @@ undersells what already works: AMLP is not a wrapper or a fork of any
 of the three real drivers: its own lexer, parser, code generator,
 bytecode VM, object system, and network layer are original
 implementations, verified continuously against real vendored source and
-a real bundled mudlib rather than against assumption. 715 regression
+a real bundled mudlib rather than against assumption. 727 regression
 tests pass as of this writing (see `STATUS.md` for the current count,
 which changes every session), and the discipline behind every checked
 row above is the same: read the real source, port the real behavior
