@@ -185,14 +185,14 @@ changes made):
   `temp/ldmud/src/efuns.c`'s own `f_process_string()`/`process_value()`,
   read in full, make no such call at all. Grepped the generated constant
   `STR_GET_BB_UID` across every real `.c`/`.h` file in `temp/ldmud/src`:
-  zero call sites anywhere in the driver -- the name appears only in the
+  zero call sites anywhere in the driver: the name appears only in the
   string-table declaration and in `applied_spec` (a compile-time
   type-check spec for the compiler, not a call-site generator, confirmed
   by that file's own header comment). Dead scaffolding in this exact
   build, the doc is stale, the C is authoritative. See ROADMAP.md row
   1.16.
 - `"valid_read"` / `"valid_write"` - path-level filesystem permission
-  checks. **Investigated 2026-08-18:** not LDMud-specific at all -- real
+  checks. **Investigated 2026-08-18:** not LDMud-specific at all, real
   FluffOS has the identical applies (`fluffos-2.9-ds2.08/applies.h`'s own
   `APPLY_VALID_READ`(33)/`APPLY_VALID_WRITE`(38)) and this driver
   currently gates none of its 11 existing file efuns with either
@@ -202,14 +202,14 @@ changes made):
   `path, uid-or-0, func, ob`, matching `doc/master/valid_read`/
   `valid_write`'s own SYNOPSIS exactly) called from every file-touching
   efun this driver already has. A whole missing cross-cutting security
-  feature for both dialects at once -- a new shared path-check helper
-  plus wiring into 11+ call sites -- not a single-efun signature
+  feature for both dialects at once, a new shared path-check helper
+  plus wiring into 11+ call sites, not a single-efun signature
   divergence; recommended as its own future row rather than staying
   folded into 1.16. See ROADMAP.md row 1.16 for the full citation.
 - `"make_path_absolute"` - resolve a relative path. **Investigated
   2026-08-18:** exactly one real call site in the whole driver,
   `temp/ldmud/src/ed.c:1128`, inside the built-in line editor's own
-  relative-filename resolution -- blocked on this driver having no
+  relative-filename resolution: blocked on this driver having no
   `ed()` efun at all (already excluded elsewhere, see
   `src/efun/instruct.md`'s own "`get_char`/`ed`/`origin`/`resolve`" note).
   No other real caller to model against until `ed()` itself exists. See
@@ -241,7 +241,7 @@ changes made):
     LDMud's own two doc files even disagree on what to call it
     (`query_prevent_shadow()` vs `prevent_shadow()`). Also added real
     LDMud's `unshadow()`, which has no FluffOS equivalent at all. The
-    `bind_lambda()` half remains genuinely unimplemented -- investigated
+    `bind_lambda()` half remains genuinely unimplemented: investigated
     in real depth this same pass, confirmed bigger than a normal batch
     item (closure-kind matrix plus a `privilege_violation()` subsystem
     this driver has no equivalent of); see ROADMAP.md row 1.7 and
@@ -264,7 +264,7 @@ changes made):
   `put_number(sp, i)` are what the driver actually does. Implemented in
   `src/efun/EfunTable.cpp`'s `snoop` registration, gated on
   `Config::dialect()`, 5 new regression tests. `valid_query_snoop` left
-  unimplemented on purpose -- it only ever gated `query_snoop()`, which is
+  unimplemented on purpose: it only ever gated `query_snoop()`, which is
   itself obsolete in this exact 3.6.8 clone
   (`temp/ldmud/doc/obsolete/query_snoop`), replaced by the much larger
   `interactive_info(ob, II_SNOOP_*)` this driver has no equivalent of.

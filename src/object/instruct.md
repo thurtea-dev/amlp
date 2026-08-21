@@ -74,7 +74,7 @@ match real LDMud: re-grepped `temp/ldmud/src/prolang.y`'s own
 `replaces` token anywhere in the inherit grammar (the complete modifier
 set is `static`/`private`/`public`/`protected`/`nosave`/`nomask`/
 `deprecated`/`virtual`/`visible`). Nothing here for `src/object` or
-`ObjectManager` to build -- the real per-dialect divergence turned out to
+`ObjectManager` to build: the real per-dialect divergence turned out to
 live entirely in the `replace_program()` **efun**'s own argument handling
 (a runtime call, not an `inherit` directive), implemented 2026-08-17 in
 `src/efun/EfunTable.cpp`. See ROADMAP.md row 1.6 for the full citation
@@ -87,16 +87,16 @@ Section 0.6 above names the FluffOS master apply as `query_allow_shadow()`
 FluffOS apply is `valid_shadow()`, `applies_table.c`'s own
 `APPLY_VALID_SHADOW`, and that is what the actual implementation in
 `src/efun/EfunTable.cpp` correctly uses). `query_allow_shadow()` is real,
-but it is LDMud's name, not FluffOS's -- confirmed against
+but it is LDMud's name, not FluffOS's, confirmed against
 `temp/ldmud/doc/master/query_allow_shadow`. Row 1.5 (LDMud shadow work)
 turned out to need no changes here in `src/object` at all: the shadow-chain
 `call_other` redirection built under 0.6 (`VM::callFunction()`'s shadow
 walk) is already dialect-agnostic and matches LDMud's own documented
 model too (`temp/ldmud/doc/efun/shadow`'s "not even object B can
 call_other() itself", already covered by the existing `!= current_object`
-re-entry guard). The real, narrow divergence -- `shadow()`'s own argument
+re-entry guard). The real, narrow divergence, `shadow()`'s own argument
 count/return type/master-apply-name, plus the LDMud-only `unshadow()`
-efun -- lives entirely in `src/efun/EfunTable.cpp`, gated on
+efun: lives entirely in `src/efun/EfunTable.cpp`, gated on
 `Config::dialect()`, implemented 2026-08-17. See ROADMAP.md row 1.5 for
 the full citation trail.
 

@@ -47,10 +47,10 @@ the real name is `bind_lambda(closure cl [, object ob])`, confirmed against
 `temp/ldmud/doc/efun/bind_lambda` and `temp/ldmud/src/closure.c`'s own
 `v_bind_lambda()` (this project's vendored 3.6.8 clone). Investigated in real
 depth this pass (see ROADMAP.md row 1.7 for the full writeup) while doing the
-adjacent row 1.5 shadow work -- **not implemented**, confirmed genuinely
+adjacent row 1.5 shadow work, **not implemented**, confirmed genuinely
 bigger than a normal batch item. Two things the plan below does not yet
 account for, found by reading `v_bind_lambda()` in full: (1) real
-`CLOSURE_BOUND_LAMBDA` rebinding is reference-count-aware -- a shared bound
+`CLOSURE_BOUND_LAMBDA` rebinding is reference-count-aware, a shared bound
 lambda (`ref > 1`) gets copy-on-write cloned rather than rebound in place,
 so `bind_lambda()` itself needs more than a single `Kind::UnboundLambda`
 case; (2) a non-`this_object()` target `ob` goes through
@@ -70,13 +70,13 @@ from anything currently planned for closures.
   is one of `FP_EFUN`, `FP_LOCAL`, `FP_SIMUL` - resolve and cache on first call.
   **Naming note (2026-08-18, from the row 1.2/1.3 scoping pass, ROADMAP.md):**
   despite the name, this `Closure::Kind` has nothing to do with real
-  LDMud's own `symbol` *value type* -- a genuinely separate, previously
+  LDMud's own `symbol` *value type*, a genuinely separate, previously
   undocumented construct confirmed this same pass: `'name` (a bare
   leading quote, `L_SYMBOL` in `temp/ldmud/src/lex.c`) produces an LPC
   `symbol` value, distinct from `#'name`'s `L_CLOSURE`, with real efuns
   `symbol_function()`/`symbol_variable()`/`symbolp()` and no equivalent
   anywhere in this driver's `Value` variant. Do not conflate the two when
-  this row is actually picked up -- `Kind::LdmudSymbol` here is about
+  this row is actually picked up, `Kind::LdmudSymbol` here is about
   `#'name` closures only; a real `symbol` value would need its own new
   `ValueVariant` member entirely, not a `Closure::Kind`.
 
@@ -116,7 +116,7 @@ using ValueVariant = std::variant<
 1.2/1.3's next slice after `atomic`):** this plan turned out accurate on
 every semantic rule above once checked against the real DGD source
 (`temp/dgd/src/data.h`'s own `VAL_TRUE`/`VAL_NIL` macros,
-`temp/dgd/src/comp/compile.cpp`'s `matchType()`) -- confirmed and
+`temp/dgd/src/comp/compile.cpp`'s `matchType()`): confirmed and
 implemented exactly as written, plus one real nuance not previously on
 record here: DGD's own `nil` is only genuinely distinct under **strict
 typechecking** (`temp/dgd/src/data.cpp`'s own `"nil.type = (stricttc) ?

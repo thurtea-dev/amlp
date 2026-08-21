@@ -15,16 +15,16 @@ files under `src/*/CMakeLists.txt` (not assumed):
   `CMAKE_CXX_STANDARD 20`/`CMAKE_CXX_STANDARD_REQUIRED ON` at the top
   level; any reasonably recent GCC or Clang works.
 - CMake >= 3.20 (`cmake_minimum_required(VERSION 3.20)`). `ctest` is
-  not a separate package -- it ships inside the `cmake` package itself.
+  not a separate package: it ships inside the `cmake` package itself.
 - `pkg-config` (or Fedora's `pkgconf-pkg-config`, which provides the
-  same `pkg-config` command) -- `src/efun/CMakeLists.txt` calls
+  same `pkg-config` command): `src/efun/CMakeLists.txt` calls
   `find_package(PkgConfig REQUIRED)`.
-- `libpcre2-8` development headers -- the same file uses
+- `libpcre2-8` development headers: the same file uses
   `pkg_check_modules(PCRE2 REQUIRED libpcre2-8)`, and links
   `${PCRE2_LIBRARIES}` into the `efun` library (this driver's own
   `pcre_*`-family LPC efuns).
 - `libcrypt` development files (the `crypt()` password-hashing
-  function) -- `src/efun/CMakeLists.txt` links a plain `crypt` target
+  function): `src/efun/CMakeLists.txt` links a plain `crypt` target
   (`-lcrypt`) into the `efun` library.
 
 On Fedora:
@@ -51,7 +51,7 @@ library).
 
 ## 2. Build
 
-Exactly `README.md`'s own three commands -- this file does not invent
+Exactly `README.md`'s own three commands: this file does not invent
 any new steps, and `Makefile`'s own `build`/`test` targets are themselves
 just a thin wrapper around these same three commands (see `Makefile`'s
 own header comment):
@@ -71,7 +71,7 @@ the absolute repo root in at configure time
 own `readMudlibFile()` helper for tests that read real files under
 `mudlib/`), specifically so the same test binary gives the same result
 whether it's run directly, via `ctest --test-dir build`, or from
-`build/test/` -- confirmed by that file's own comment, not assumed.
+`build/test/`: confirmed by that file's own comment, not assumed.
 
 Equivalently, from the repo root:
 
@@ -82,7 +82,7 @@ make test
 
 A full clean rebuild (not just recompiling changed objects) is
 `make clean && make build`, or plain `rm -rf build` followed by the
-three commands above -- `Makefile`'s own `clean` target removes the
+three commands above: `Makefile`'s own `clean` target removes the
 whole `build/` directory, including the CMake cache, not just compiled
 objects.
 
@@ -108,7 +108,7 @@ see below). Confirmed directly from `Config.hpp`/`Config.cpp`
 (`src/config/`), not assumed:
 
 - `Config::loadFromFile()` parses a plain `key: value` line format,
-  `#`-comments allowed, into a small fixed set of named keys -- no
+  `#`-comments allowed, into a small fixed set of named keys: no
   compiled-in path or port anywhere in the driver itself.
 - The real keys, confirmed against `Config.cpp`'s own parser (every one
   of them, not a subset): `mud_name`, `mudlib_root`, `master_file`,
@@ -130,16 +130,16 @@ see below). Confirmed directly from `Config.hpp`/`Config.cpp`
 
 - `mudlib_root`/`include_dir` are relative paths here, and relative
   paths in a config file resolve against the **current working
-  directory the driver process is launched from** -- not against the
+  directory the driver process is launched from**, not against the
   config file's own location, and not against any path baked in at
   build time. Confirmed directly from `main.cpp`'s own comment on this
   exact point (`Config::loadFromFile()` is handed whatever path is
   passed on the command line, with no fallback default, specifically
   because defaulting to a fixed path "would still silently assume the
-  process runs from the repo root -- an assumption nothing else here
+  process runs from the repo root, an assumption nothing else here
   makes"). `include_dir`'s own entries are additionally resolved
   against `mudlib_root` itself when they don't already start with `/`
-  (`ObjectManager.cpp`'s `splitIncludeDirs()`) -- which is why
+  (`ObjectManager.cpp`'s `splitIncludeDirs()`), which is why
   `include_dir: include` here correctly finds
   `mudlib/include/config.h` (the file `global_include_file: <config.h>`
   auto-`#include`s into every compiled object), not this repo's own
@@ -149,7 +149,7 @@ see below). Confirmed directly from `Config.hpp`/`Config.cpp`
   run **from the repo root** (so `mudlib` and `include` resolve where
   they're supposed to). This matches every invocation documented in
   `README.md` and every prior live-verification session recorded in
-  `STATUS.md` -- none of them ever `cd`s anywhere else first.
+  `STATUS.md`: none of them ever `cd`s anywhere else first.
 
 ### Pointing a fresh checkout somewhere else
 
@@ -201,13 +201,13 @@ source.
 ./build/amlp <config-path> [max-iterations]
 ```
 
-`<config-path>` is required (no fallback default -- `main.cpp` exits
+`<config-path>` is required (no fallback default, `main.cpp` exits
 with a usage message rather than guessing one). `[max-iterations]`, or
 the `AMLP_MAX_ITERATIONS` environment variable if the argument is
 omitted, is real "test mode": it bounds how many scheduler poll
 iterations the process runs before exiting on its own
 (`main.cpp`'s own "(test mode: will exit after N poll iterations)"
-message, `scheduler.run(server, maxIterations)`) -- useful for
+message, `scheduler.run(server, maxIterations)`), useful for
 scripted/test invocations, not needed for an ordinary long-running
 deployment (0, the default either way, means "run forever until
 `SIGINT`/`SIGTERM`").

@@ -9,16 +9,16 @@ That said, amlp did not invent the LPC language or its surrounding driver
 conventions out of nothing. Its dialect support, efun surface, and object
 lifecycle semantics were built by reading the real, publicly available
 source of several existing LPC drivers and porting their documented,
-verified behavior -- including real quirks and edge cases -- so that
+verified behavior, including real quirks and edge cases, so that
 existing LPC mudlib code has a reasonable chance of running on amlp
 unmodified. Credit for that prior art belongs to the projects and their
 maintainers and contributors:
 
-- **FluffOS** -- an actively maintained LPC driver descended from the
+- **FluffOS**: an actively maintained LPC driver descended from the
   original MudOS lineage.
-- **LDMud** -- an actively maintained LPC driver descended from the
+- **LDMud**: an actively maintained LPC driver descended from the
   original LPMud lineage.
-- **DGD** (Dworkin's Game Driver) -- an LPC-family driver with a distinct
+- **DGD** (Dworkin's Game Driver): an LPC-family driver with a distinct
   architecture (statedump-based persistence, lightweight objects, atomic
   functions) that amlp draws on for comparison and, in a few specific
   places, real feature support.

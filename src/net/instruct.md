@@ -8,7 +8,7 @@
 | `Connection.cpp` + `include/.../Connection.hpp` | One player TCP connection: buffered reads, `input_to` state, `pendingNotifyFail_`, echo mode. |
 | `InteractiveRegistry.cpp` + `include/.../InteractiveRegistry.hpp` | Global map of live connections (for `users()`, `find_player()`, etc.). |
 | `OutputContext.cpp` + `include/.../OutputContext.hpp` | Thread-local current-output-connection pointer for `write()`/`printf()`. |
-| `SnoopRelay.cpp` + `include/.../SnoopRelay.hpp` | `deliverToConnection(VM&, Connection*, string)` -- the snoop-output-duplication chokepoint every text-outputting efun (`write`/`receive`/`printf`/`message`/`say`) and `Server::dispatchLine()`'s own `notify_fail()` dispatch route through instead of calling `Connection::send()` directly; fires `receive_snoop(string)` on `conn->boundObject()->snoopedBy()` if set. See `EfunTable.cpp`'s `snoop`/`query_snoop`/`query_snooping` registration for the full real-semantics writeup (Phase 0.13). |
+| `SnoopRelay.cpp` + `include/.../SnoopRelay.hpp` | `deliverToConnection(VM&, Connection*, string)`: the snoop-output-duplication chokepoint every text-outputting efun (`write`/`receive`/`printf`/`message`/`say`) and `Server::dispatchLine()`'s own `notify_fail()` dispatch route through instead of calling `Connection::send()` directly; fires `receive_snoop(string)` on `conn->boundObject()->snoopedBy()` if set. See `EfunTable.cpp`'s `snoop`/`query_snoop`/`query_snooping` registration for the full real-semantics writeup (Phase 0.13). |
 
 ## Files to read before touching this directory
 
@@ -134,7 +134,7 @@ See `src/proto/instruct.md` for the detailed implementation plan - the
 
 ## Known gap, fixed 2026-08-18 (continued)
 
-The driver process used to have no `SIGPIPE` handling at all -- confirmed
+The driver process used to have no `SIGPIPE` handling at all: confirmed
 directly, zero hits for `SIGPIPE`/`MSG_NOSIGNAL`/`SO_NOSIGPIPE` anywhere in
 `src/`/`include/`; `main.cpp` registered handlers only for `SIGINT`/
 `SIGTERM`. A client connection closing at the wrong moment relative to the
@@ -147,7 +147,7 @@ alongside the existing `SIGINT`/`SIGTERM` registration, matching this
 codebase's own existing `std::signal()` convention rather than introducing
 `sigaction()`. `Connection::send()` (`Connection.cpp`) already tolerated a
 failed `write()` gracefully on its own (`if (n < 0) { if (errno == EINTR)
-continue; break; }`) -- it was only ever the process-wide signal
+continue; break; }`): it was only ever the process-wide signal
 disposition that was missing, not anything in the write path itself, so no
 other code needed to change. Deterministically regression-tested (`test/
 test_lexer.cpp`'s own `testSigpipeIsIgnoredSoAWriteAfterThePeerCloses...`:

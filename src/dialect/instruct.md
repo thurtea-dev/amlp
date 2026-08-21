@@ -64,7 +64,7 @@ LDMud apply names - all of the above, plus:
   side shadow gate - confirmed real and correctly named already,
   implemented 2026-08-17, row 1.5)
   **2026-08-18, all three of the remaining names investigated in full,
-  none small enough to implement this pass -- see ROADMAP.md row 1.16 for
+  none small enough to implement this pass: see ROADMAP.md row 1.16 for
   the complete citations:** `get_bb_uid` is genuinely dead in this exact
   vendored 3.6.8 driver - grepped `STR_GET_BB_UID` across every real `.c`/
   `.h` file, zero call sites; `doc/master/get_bb_uid`'s own claim that
@@ -119,7 +119,7 @@ earlier draft of this file carried:
   layer at all. The driver only ever calls one apply,
   `query_allow_shadow()`; whether *that* apply's own LPC body consults
   the victim (e.g. `victim->prevent_shadow(...)`) is entirely a mudlib
-  convention, not something `validate_shadowing()` itself checks -- and
+  convention, not something `validate_shadowing()` itself checks, and
   even LDMud's own two doc files disagree on the convention's name
   (`doc/efun/shadow` says `query_prevent_shadow()`,
   `doc/master/query_allow_shadow` says `prevent_shadow()`), further
@@ -135,7 +135,7 @@ earlier draft of this file carried:
   object. Row 1.7's "`bind()`" should read `bind_lambda()`.
   **Investigated 2026-08-17, not implemented:** read
   `temp/ldmud/src/closure.c`'s own `v_bind_lambda()` in full. Genuinely
-  bigger than a normal batch item -- it switches on a closure-kind
+  bigger than a normal batch item: it switches on a closure-kind
   distinction (`CLOSURE_LFUN`/`CLOSURE_BOUND_LAMBDA`/
   `CLOSURE_UNBOUND_LAMBDA`/efun-simul_efun-operator, including
   reference-count-aware copy-on-write for shared bound lambdas) this

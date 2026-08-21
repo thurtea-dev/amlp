@@ -35,7 +35,7 @@ None directly in the compiler. The stub/gap work is in `src/efun` and
 **This is the biggest compiler change in the roadmap. Do not start until
 Phase 0 is complete and the test suite is green.**
 
-**Rescoped 2026-08-18 (scoping pass only, nothing implemented yet -- see
+**Rescoped 2026-08-18 (scoping pass only, nothing implemented yet: see
 ROADMAP.md rows 1.2/1.3 for the full citation trail this section
 summarizes):** the plan below had several load-bearing errors, corrected
 here by reading the real grammar/lexer sources directly
@@ -46,8 +46,8 @@ here by reading the real grammar/lexer sources directly
 
 The `Lexer` must accept a `LpcDialect` value (from `src/dialect/`) and
 change its tokenization rules accordingly. **Neither `Lexer` nor `Parser`
-takes one today** -- confirmed via both constructors and their one real
-call site, `ObjectManager::compile()` -- this is the genuine prerequisite
+takes one today**, confirmed via both constructors and their one real
+call site, `ObjectManager::compile()`, this is the genuine prerequisite
 everything else here sits on top of, and the proposed first slice
 (ROADMAP.md row 1.2/1.3 scoping note) is exactly this plumbing, added
 with zero behavior change before any real new keyword lands.
@@ -67,7 +67,7 @@ with zero behavior change before any real new keyword lands.
   addition:** `ObjectManager::compile()` shells out to the real system
   `cpp -x c` before the Lexer ever runs, and standard GCC `cpp`
   hard-errors on any line whose first non-whitespace character is `#`
-  and isn't a real directive -- a bare `#'this_player;` statement on its
+  and isn't a real directive: a bare `#'this_player;` statement on its
   own line would fail the whole file's preprocessing before this driver's
   own tokenizer ever sees it. Needs a real decision (mask `#'`-shaped
   lines before `cpp` sees them and restore after, or stop using real
@@ -77,14 +77,14 @@ with zero behavior change before any real new keyword lands.
   anywhere in this repo**: a distinct `L_SYMBOL` token producing an LPC
   `symbol` value (used as `lambda()`'s own parameter-name convention,
   `'x`, and by `symbol_function()`/`symbol_variable()`/`symbolp()`).
-  This driver's `Value` variant has no `symbol` member at all -- needs a
+  This driver's `Value` variant has no `symbol` member at all: needs a
   `src/vm` decision first (row 1.9's neighbor problem: a token with
   nowhere real to go yet).
 - ~~The `lambda` keyword~~ / ~~`unbound_lambda` keyword~~ / ~~`bind`
   keyword~~ - **wrong, removed entirely.** `temp/ldmud/src/func_spec`:
   `closure lambda(null|mixed *, mixed);` / `closure unbound_lambda(...)`
   are ordinary efuns (the same mechanism already confirmed for
-  `bind_lambda()` and `replace_program()`, rows 1.5-1.7) -- no keyword,
+  `bind_lambda()` and `replace_program()`, rows 1.5-1.7): no keyword,
   no special lexer handling, nothing for this row. `bind()` doesn't exist
   as an LDMud name at all (row 1.7's own correction); the real name,
   `bind_lambda()`, is likewise a plain efun call.
@@ -111,7 +111,7 @@ with zero behavior change before any real new keyword lands.
   (unrelated to `parse_*`, row 0.13a's FluffOS package)
 - Newly found, not previously tracked anywhere: DGD's own closure/
   function-pointer syntax is a third, distinct family from FluffOS's
-  `(: :)` and LDMud's `#'` -- `&ident(args)` / `&(*cast)(args)` (a "call
+  `(: :)` and LDMud's `#'`: `&ident(args)` / `&(*cast)(args)` (a "call
   template"), plus `->`/`<-` for DGD's own persistent-object-call and
   inherited-super-call conventions. Zero DGD lexer work exists for any of
   this yet; flagged for whenever DGD's own dialect work is picked up, not
@@ -135,7 +135,7 @@ function-declaration modifier only under the same condition
 generic modifier-consumption loop unchanged, plus excluded from
 `isTypeKeyword()`'s default-true classification so it can never be
 misread as a type). `nil`, `#'`, `'name`, mapping width, and `rlimits`
-all remain exactly as scoped above -- none of them touched. 2 new
+all remain exactly as scoped above: none of them touched. 2 new
 regression tests (`test_lexer.cpp`) cover the Lexer-level token
 classification directly and a full end-to-end compile of the same
 source under all three dialects.
@@ -144,7 +144,7 @@ source under all three dialects.
 same gated-per-dialect pattern:** read `temp/dgd/src/comp/parser.y`'s
 own `"NIL { $$ = Node::createNil(); }"`, `temp/dgd/src/comp/node.cpp`'s
 `Node::createNil()`, and `temp/dgd/src/data.h`'s own `T_NIL`/
-`VAL_TRUE`/`VAL_NIL` macros directly before writing anything -- see
+`VAL_TRUE`/`VAL_NIL` macros directly before writing anything: see
 ROADMAP.md row 1.10 for the full citation trail, including the real
 strict-typechecking nuance (`temp/dgd/src/data.cpp`'s own `"nil.type =
 (stricttc) ? T_NIL : T_INT;"`) this implementation targets. `nil` is
@@ -169,7 +169,7 @@ untouched.
 ### 2. Make the Parser dialect-aware
 
 `Parser` already takes a `Lexer`; add a `LpcDialect` parameter (see the
-plumbing note above -- this is genuinely one parameter threading through
+plumbing note above: this is genuinely one parameter threading through
 one real call site today, `ObjectManager::compile()`).
 
 **LDMud additions**
@@ -187,7 +187,7 @@ one real call site today, `ObjectManager::compile()`).
   closure from the array-encoded body.
 - ~~Parse `replaces` as an optional qualifier on `inherit "path";`.~~
   Resolved 2026-08-17 (ROADMAP row 1.6, rescoped): real LDMud has no
-  `replaces` token anywhere in `inherit`'s own grammar -- re-grepped
+  `replaces` token anywhere in `inherit`'s own grammar: re-grepped
   `temp/ldmud/src/prolang.y`'s `inheritance_qualifier`/
   `inheritance_modifier` productions directly. Nothing for the Parser to
   add here; the real divergence is `replace_program()`'s own zero-argument
@@ -209,10 +209,10 @@ one real call site today, `ObjectManager::compile()`).
   level too (`m_allocate`/`m_values`/`m_entry`/`m_reallocate`/`m_add`/
   `m_contains`, none implemented), and this driver's own `Mapping`
   (`std::vector<std::pair<Value, Value>>`) has no width dimension at
-  all -- load-bearing throughout `MakeMapping`/`Index`/`IndexAssign`/
+  all, load-bearing throughout `MakeMapping`/`Index`/`IndexAssign`/
   `sizeof`/`map_delete`/mapping `+`/save-restore. A parser-only slice
   that silently discarded extra values would not "work end to end". See
-  ROADMAP.md row 1.9 for the full finding -- it now owns both literal
+  ROADMAP.md row 1.9 for the full finding, it now owns both literal
   syntaxes, not split from the runtime side across two rows.
 
 **DGD additions**
@@ -238,13 +238,13 @@ one real call site today, `ObjectManager::compile()`).
 - `RlimitsStmt` → new `PushRlimits` / `PopRlimits` opcodes (see `src/vm`),
   corrected grammar above
 - `atomic` modifier → mark `FunctionEntry::isAtomic = true` (see
-  `src/vm`, row 1.12's own separate VM-level concern -- landing the
+  `src/vm`, row 1.12's own separate VM-level concern, landing the
   keyword alone is inert until then)
-- `NilLiteral` → `PushNil` opcode -- **implemented 2026-08-18, real, not
+- `NilLiteral` → `PushNil` opcode, **implemented 2026-08-18, real, not
   a placeholder** (see the row 1.10 note below)
-- Mapping width literals (`([ k: v1; v2 ])`, `([: N ])`) -- **investigated
+- Mapping width literals (`([ k: v1; v2 ])`, `([: N ])`), **investigated
   2026-08-18, not implemented, bigger than expected** (see the row 1.9
-  note above, under "Mapping width" -- CodeGen work here is inseparable
+  note above, under "Mapping width", CodeGen work here is inseparable
   from the `Mapping`-structure rework row 1.9 owns)
 
 Explicitly **removed** from this section, not real: `LambdaExpr`/
