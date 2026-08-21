@@ -49,6 +49,119 @@ content altered, to keep `STATUS.md` to its own 5-most-recent-sessions
 rule after this session's new entry. Same discipline, same insertion
 placement as the four passes above.
 
+**Sixth archival pass, 2026-08-21 (later still the same day):** moved
+the single oldest entry (the "audited the prior session's own two real-
+reset/clean_up fixes" Phase 1 status-read session) into this file,
+verbatim, no content altered, to keep `STATUS.md` to its own 5-most-
+recent-sessions rule after this session's new entry (login integration,
+build ordering item 2 of `notes/ACCOUNT_LOGIN_PLAN.md`). Same
+discipline, same insertion placement as the five passes above.
+
+**2026-08-20 (a further session): audited the prior session's own two
+real-reset/clean_up fixes for independent regression coverage (found and
+fixed a real gap, 2 tests were not one apiece), then produced a full
+Phase 1 status read: five stale checkboxes corrected (rows 1.2, 1.3,
+1.4, 1.9, 1.16), a plain "real, corpus-driven work is substantially
+exhausted" statement added to ROADMAP.md, COMPARISON.md's Phase 1
+numbers refreshed from 5/11 to 10/11, and an evidence-based next-session
+recommendation produced without building anything this session
+(702 tests, up from 701).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Test-coverage audit.** The prior session's own two real fixes (the
+same-cycle reset/clean_up dialect gate, and the readyForCleanUp-latched-
+before-reset ordering fix it exposed) landed with only 2 new tests, one
+per dialect (LDMud/FluffOS), not one per fix. Rather than assume that was
+fine or assume it was a gap, tested it directly: reverted each fix in
+isolation (keeping the other applied), rebuilt, and ran the suite each
+time. Result: reverting the ordering fix alone, or the dialect gate
+alone, each independently flips the FluffOS-dialect test's own
+`cleanUpCalls` assertion from 1 to 0, so that one test *does*
+independently catch either regression, confirmed by direct experiment,
+not assumed. The LDMud-dialect test does not catch either regression in
+isolation (it asserts `cleanUpCalls == 0`, which is also what both
+reverted states produce under `dialect: ldmud`, since LDMud's own real
+behavior wants suppression regardless of which mechanism, correct or
+broken, currently produces it), also confirmed by the same
+experiment. This is not accidental undercoverage: a real reset() call
+can only ever move `timeOfRef()` forward, never backward, so the
+ordering fix has no observable effect except in exactly the same
+same-cycle-collision-under-a-non-suppressing-dialect window the dialect
+gate also governs; there is no black-box scenario where one fix's
+reversion is visible and the other's is not. Documented this finding
+directly in both existing tests' own comments (previously written under
+an unverified assumption, now corrected to state what was actually
+proven). Added one further test, `dialect: dgd`, closing a real, distinct
+adjacent gap this same audit surfaced: neither existing test would catch
+a plausible future "simplification" of the dialect check from an
+allowlist (`dialect == LpcDialect::LdMud`) to a denylist (`dialect !=
+LpcDialect::FluffOS`): DGD is the one dialect where the two phrasings
+disagree. 702 tests passing (up from 701), zero regressions, restored
+code confirmed byte-identical to the pre-experiment version via `diff`
+before rebuilding for real.
+
+**Phase 1 status read.** Surveyed every Phase 1 row's own current cell
+text against its checkbox, not just the checkbox alone, continuing the
+same discipline as the immediately prior session's own row 1.9
+correction. Found four more stale checkboxes, each with real, already-
+landed work sitting in its own cell across earlier sessions:
+
+- Row 1.2/1.3 (dialect-aware Lexer/Parser): `atomic`/`nil` (DGD-gated),
+  bare `#'name`/`'name`, and `#'efun::name` are all real and tested,
+  recorded directly in these rows' own cells across several earlier
+  sessions; mapping-width syntax was explicitly absorbed into row 1.9's
+  own scope, not split across rows. Remaining real scope is `rlimits`
+  (both rows) and DGD's own `&ident(args)` closure syntax (row 1.3) --
+  both DGD-only, out of this project's own explicit Phase 1 completion
+  scope. Checkboxes corrected to `[x]`.
+- Row 1.16 (LDMud master apply name table): re-read its own below-table
+  prose in full (the row's own cell ends mid-sentence, "recorded below
+  rather than forced," referring to that prose, not a truncated cell).
+  `get_bb_uid` is confirmed dead code in this exact vendored LDMud build
+  itself (zero real driver call sites, a doc-vs-code divergence);
+  `make_path_absolute` is blocked on `ed()`, an already-and-separately-
+  excluded efun; `valid_read`/`valid_write` are real and tested;
+  `disconnect()` is zero real corpus usage. No real open item remains.
+  Checkbox corrected to `[x]`.
+- Row 1.4 (pluggable boot API): re-checked whether `Server.cpp`'s
+  hardcoded `"connect"` master apply is genuinely FluffOS-specific
+  (which would make the "not routed through `BootApi`" note a real
+  functional gap, not just hygiene) rather than assuming the prior
+  framing was complete, confirmed both real dialects use the identical
+  apply name and role (`temp/reference/fluffos-2.9-ds2.08/applies_table.c`'s
+  own `"connect"`, real LDMud's own `doc/master/connect`, `"object
+  connect(void)"`). An initial check of this returned zero results for
+  both dialects and nearly got reported as a real, newly-discovered
+  functional gap, caught before trusting it: the grep had been run
+  from `build/`, not the repo root, so `temp/ldmud/...` silently did not
+  exist under that working directory. Re-run from the correct directory,
+  confirmed the apply names genuinely match. So the un-routed applies
+  are exactly what the row's own prior note already said, an
+  abstraction-hygiene gap, not a functional one. Checkbox corrected to
+  `[x]`.
+
+**Refreshed numbers.** `ROADMAP.md`'s own Phase 1 header gained a plain
+"real, corpus-driven work is substantially exhausted" status statement:
+10 of 11 real-blocker rows closed (DGD-only 1.11-1.15 excluded per this
+project's own stated goal), the one remaining open row (1.8) confirmed
+zero-evidence for its own remaining scope this same session (see its own
+2026-08-20 entry above). `COMPARISON.md`'s Phase 1 section rewritten from
+its own stale "5 of 11, a bit under half done" (predating several
+sessions' worth of already-landed work) to the current 10/11 (91%)/
+16-row 10/16 (63%) numbers, with a rewritten "what is left open, and why"
+bullet list replacing the old, now-inaccurate one.
+
+**Next-session recommendation, not built this session (see the reply to
+the user this same turn for the full reasoning): return to Phase 0's own
+one remaining open item, row 0.13a's `parse_sentence()` `nicks` argument,
+over continuing to close Phase 1's zero-evidence items defensively or
+starting Phase 2 planning-to-code work.** Full reasoning given directly
+to the user this turn, not duplicated here: see this same session's
+own reply for the three-way comparison and why `nicks` won.
+
 **2026-08-20 (a further session): resolved the prior session's own open
 same-cycle reset/clean_up dialect question (was hardcoded to LDMud's rule
 for every dialect, now genuinely `Config::dialect()`-gated, plus one

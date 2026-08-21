@@ -9631,7 +9631,12 @@ static void testCryptWithExplicitSaltIsDeterministicAndSaltIsThePrefix() {
 // calls (grammar.y's function_name production; found live compiling
 // secure/daemon/account_d.c's own "::create();", the parser gap the
 // live login-sequence test hit right after the connect/input protocol
-// work above).
+// work above -- account_d.c here is a since-discarded early scratch
+// mudlib object used only for that live verification, not real vendored
+// corpus content and not this driver's own real, shipped /single/
+// account_d.c, which does not inherit anything and has no ::create() at
+// all, see notes/ACCOUNT_LOGIN_PLAN.md and STATUS.md's 2026-08-21
+// entry).
 // ---------------------------------------------------------------------
 
 static void testBareParentCallInvokesInheritedFunctionNotLocalOverride() {
@@ -10239,8 +10244,9 @@ static void testUnguardedClosureRoundTripsThroughSecurityAndMasterShape() {
     // files actually need for this), proving the closure mechanism,
     // evaluate(), and previous_object() all compose correctly through a
     // real call_other hop -- the same chain that blocked
-    // secure/daemon/account_d.c live (see STATUS.md's closure recon and
-    // "next real blocker" notes).
+    // secure/daemon/account_d.c live (a since-discarded early scratch
+    // object, see this file's own CallParent test comment above; see
+    // STATUS.md's closure recon and "next real blocker" notes).
     ObjectVarHarness harness;
     harness.writeFile("/master_probe.c",
         "mixed apply_unguarded(mixed f) {\n"
@@ -10465,7 +10471,9 @@ static void testEvaluateOfEfunBoundClosureSetsCurrentObjectToClosureOwnerNotCall
     // account_d.c's own "unguarded((: save_object, path :))" chain
     // (account_d.c -> security.c's unguarded() -> master.c's
     // apply_unguarded() -> evaluate(f)) saved *master.c's own*
-    // variables instead of account_d.c's, because VM::callClosure()'s
+    // variables instead of account_d.c's (account_d.c here is a since-
+    // discarded early scratch object, see this file's own CallParent
+    // test comment above), because VM::callClosure()'s
     // core-efun branch called straight into EfunTable without updating
     // vm.currentObject() -- save_object() (like real FluffOS's own
     // f_save_object(), confirmed against efuns_main.c: "save_object
@@ -21933,6 +21941,476 @@ static void testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess
     std::cout << "testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess OK\n";
 }
 
+// ---------------------------------------------------------------------
+// notes/ACCOUNT_LOGIN_PLAN.md build ordering item 2 (login integration,
+// 2026-08-21): /clone/login.c's real input_to() state machine, wired to
+// /single/account_d.c (item 1). Uses the same ObjectVarHarness +
+// socketpair + Connection + OutputContext + Server::dispatchLine()
+// pattern as the "connect/input protocol" tests above, for the same
+// reason given there: input_to()/save_object()/crypt() all need a
+// genuine VM::run() call reached through ObjectManager, not hand-
+// assembled bytecode. account_d.c/account_record.c/login.c are written
+// into the harness with their real, current, shipped content (kept in
+// sync with mudlib/single/account_d.c, mudlib/single/account_record.c,
+// and mudlib/clone/login.c respectively -- if any of the three is
+// edited, this fixture needs updating too, the same tradeoff every
+// other inline-fixture test in this file already makes rather than
+// reading real files off disk, which would make this suite fragile to
+// its own working directory the way nothing else in it is). /clone/
+// user.c and /single/start_room.c are deliberately NOT real copies --
+// minimal stand-ins for what login.c's own enter_game() needs
+// (set_name(), setup(), move()), genuinely orthogonal to the account/
+// login mechanism under test here, matching how login1.c/login2.c/
+// login3.c above are also test-local fixtures, not real mudlib content.
+// This is a companion to, not a replacement for, this same session's
+// own live-running-driver verification against the real bundled
+// mudlib/ tree (STATUS.md's 2026-08-21 dated entry): this project's
+// established split keeps that as the bar for the real shipped files
+// themselves, this suite as the bar for the mechanism regressing.
+// ---------------------------------------------------------------------
+
+static const char* kLoginTestGlobalsH =
+    "#define SINGLE_DIR \"/single\"\n"
+    "#define LOGIN_OB   \"/clone/login\"\n"
+    "#define USER_OB    \"/clone/user\"\n"
+    "#define START_LOC  \"/single/start_room\"\n"
+    "#define ACCOUNT_D      \"/single/account_d\"\n"
+    "#define ACCOUNT_RECORD \"/single/account_record\"\n"
+    "#define ACCOUNTS_DIR   \"/accounts\"\n"
+    "#define INPUT_NOECHO 1\n"
+    "#define MAX_LOGIN_TRIES    3\n"
+    "#define LOGIN_TIMEOUT_SECS 90\n"
+    "#define MIN_PASSWORD_LEN   5\n";
+
+static const char* kLoginTestAccountRecordC =
+    "string name;\n"
+    "string hash;\n"
+    "int created;\n"
+    "string *characters;\n"
+    "\n"
+    "void set_name(string n) { name = n; }\n"
+    "void set_hash(string h) { hash = h; }\n"
+    "void set_created(int t) { created = t; }\n"
+    "void set_characters(string *c) { characters = c; }\n"
+    "\n"
+    "string query_name() { return name; }\n"
+    "string query_hash() { return hash; }\n"
+    "int query_created() { return created; }\n"
+    "string *query_characters() { return characters; }\n"
+    "\n"
+    "int save_me(string path) { return save_object(path); }\n"
+    "int load_me(string path) { return restore_object(path); }\n"
+    "\n"
+    "void create() {\n"
+    "    characters = ({});\n"
+    "}\n";
+
+static const char* kLoginTestAccountDC =
+    "#include <globals.h>\n"
+    "\n"
+    "private\n"
+    "string account_path(string name) {\n"
+    "    name = lower_case(name);\n"
+    "    return ACCOUNTS_DIR + \"/\" + name[0..0] + \"/\" + name;\n"
+    "}\n"
+    "\n"
+    "private\n"
+    "void ensure_dirs(string name) {\n"
+    "    mkdir(ACCOUNTS_DIR);\n"
+    "    mkdir(ACCOUNTS_DIR + \"/\" + lower_case(name)[0..0]);\n"
+    "}\n"
+    "\n"
+    "int\n"
+    "account_exists(string name) {\n"
+    "    if (!name || name == \"\") {\n"
+    "        return 0;\n"
+    "    }\n"
+    "    return file_size(account_path(name) + \".o\") != -1;\n"
+    "}\n"
+    "\n"
+    "int\n"
+    "create_account(string name, string password) {\n"
+    "    object rec;\n"
+    "    string path;\n"
+    "\n"
+    "    if (!name || name == \"\" || !password || password == \"\") {\n"
+    "        return 0;\n"
+    "    }\n"
+    "    if (account_exists(name)) {\n"
+    "        return 0;\n"
+    "    }\n"
+    "\n"
+    "    ensure_dirs(name);\n"
+    "    path = account_path(name);\n"
+    "\n"
+    "    rec = new(ACCOUNT_RECORD);\n"
+    "    rec->set_name(lower_case(name));\n"
+    "    rec->set_hash(crypt(password, 0));\n"
+    "    rec->set_created(time());\n"
+    "    rec->set_characters(({}));\n"
+    "    rec->save_me(path);\n"
+    "    destruct(rec);\n"
+    "\n"
+    "    return 1;\n"
+    "}\n"
+    "\n"
+    "int\n"
+    "check_password(string name, string password) {\n"
+    "    object rec;\n"
+    "    string path;\n"
+    "    string hash;\n"
+    "    int ok;\n"
+    "\n"
+    "    if (!account_exists(name)) {\n"
+    "        return 0;\n"
+    "    }\n"
+    "\n"
+    "    path = account_path(name);\n"
+    "    rec = new(ACCOUNT_RECORD);\n"
+    "    rec->load_me(path);\n"
+    "    hash = rec->query_hash();\n"
+    "    ok = hash && crypt(password, hash) == hash;\n"
+    "    destruct(rec);\n"
+    "\n"
+    "    return ok;\n"
+    "}\n";
+
+// Real /clone/login.c's own state-transition functions, verbatim
+// (logon() itself deliberately not exercised here: it calls this
+// mudlib's own cat()/motd simul_efun content, orthogonal to the
+// account/login mechanism under test -- each test below seeds "tries"
+// implicitly at its real int-variable zero default and calls
+// got_account_name() directly instead, the same starting point logon()
+// itself would have left the object in).
+static const char* kLoginTestLoginC =
+    "#include <globals.h>\n"
+    "\n"
+    "private string account_name;\n"
+    "private int tries;\n"
+    "private string pending_password;\n"
+    "\n"
+    "private\n"
+    "int\n"
+    "valid_account_name(string name)\n"
+    "{\n"
+    "    if (!name || name == \"\") return 0;\n"
+    "    if (strsrch(name, \"/\") != -1) return 0;\n"
+    "    return 1;\n"
+    "}\n"
+    "\n"
+    "private\n"
+    "void\n"
+    "enter_game()\n"
+    "{\n"
+    "    object user;\n"
+    "\n"
+    "    write(\"\\n\");\n"
+    "    user = new(USER_OB);\n"
+    "    user->set_name(account_name);\n"
+    "    exec(user, this_object());\n"
+    "    user->setup();\n"
+    "    user->move(START_LOC);\n"
+    "    destruct(this_object());\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "login_timeout()\n"
+    "{\n"
+    "    write(\"\\nTimed out waiting for input. Goodbye.\\n\");\n"
+    "    destruct(this_object());\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "got_account_name(string str)\n"
+    "{\n"
+    "    remove_call_out(\"login_timeout\");\n"
+    "\n"
+    "    if (!valid_account_name(str)) {\n"
+    "        write(\"\\nThat is not a valid account name. What account name do you wish? \");\n"
+    "        input_to(\"got_account_name\");\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    account_name = str;\n"
+    "    if (ACCOUNT_D->account_exists(account_name)) {\n"
+    "        write(\"\\nPassword: \");\n"
+    "        input_to(\"got_login_password\", INPUT_NOECHO);\n"
+    "    } else {\n"
+    "        write(\"\\nNo such account. Creating a new account named '\" +\n"
+    "            account_name + \"'.\\n\");\n"
+    "        write(\"Please choose a password of at least \" + MIN_PASSWORD_LEN +\n"
+    "            \" letters: \");\n"
+    "        input_to(\"got_new_password\", INPUT_NOECHO);\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "got_login_password(string str)\n"
+    "{\n"
+    "    remove_call_out(\"login_timeout\");\n"
+    "\n"
+    "    if (ACCOUNT_D->check_password(account_name, str)) {\n"
+    "        enter_game();\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    tries++;\n"
+    "    if (tries >= MAX_LOGIN_TRIES) {\n"
+    "        write(\"\\nToo many failed attempts. Goodbye.\\n\");\n"
+    "        destruct(this_object());\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    write(\"\\nIncorrect password. Password: \");\n"
+    "    input_to(\"got_login_password\", INPUT_NOECHO);\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "got_new_password(string str)\n"
+    "{\n"
+    "    remove_call_out(\"login_timeout\");\n"
+    "\n"
+    "    if (!str || strlen(str) < MIN_PASSWORD_LEN) {\n"
+    "        write(\"\\nToo short. Please choose a password of at least \" +\n"
+    "            MIN_PASSWORD_LEN + \" letters: \");\n"
+    "        input_to(\"got_new_password\", INPUT_NOECHO);\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    pending_password = str;\n"
+    "    write(\"\\nPlease confirm your password choice: \");\n"
+    "    input_to(\"got_confirm_password\", INPUT_NOECHO);\n"
+    "}\n"
+    "\n"
+    "void\n"
+    "got_confirm_password(string str)\n"
+    "{\n"
+    "    remove_call_out(\"login_timeout\");\n"
+    "\n"
+    "    if (str != pending_password) {\n"
+    "        pending_password = 0;\n"
+    "        write(\"\\nPasswords did not match. Please choose a password of at least \" +\n"
+    "            MIN_PASSWORD_LEN + \" letters: \");\n"
+    "        input_to(\"got_new_password\", INPUT_NOECHO);\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    if (!ACCOUNT_D->create_account(account_name, pending_password)) {\n"
+    "        write(\"\\nCould not create that account. Goodbye.\\n\");\n"
+    "        destruct(this_object());\n"
+    "        return;\n"
+    "    }\n"
+    "\n"
+    "    pending_password = 0;\n"
+    "    write(\"\\nAccount created.\\n\");\n"
+    "    enter_game();\n"
+    "}\n";
+
+// Minimal stand-ins, not real mudlib content -- see this section's own
+// header comment.
+static const char* kLoginTestUserC =
+    "string name;\n"
+    "void set_name(string n) { name = n; }\n"
+    "string query_name() { return name; }\n"
+    "void setup() {}\n"
+    "void move(mixed dest) { move_object(dest); }\n";
+
+static const char* kLoginTestStartRoomC = "void create() {}\n";
+
+struct LoginTestHarness {
+    ObjectVarHarness harness;
+    std::shared_ptr<amlp::LpcObject> accountD;
+
+    LoginTestHarness() {
+        // ObjectVarHarness::writeFile() only ever ofstream()s straight
+        // to "tempDir + relPath" (matching real save_object()'s own "no
+        // missing parent directories" contract, see EfunTable.cpp's own
+        // save_object() comment) -- every existing fixture in this file
+        // uses flat top-level names ("/outer.c", "/login1.c", ...), so
+        // this is the first one needing real subdirectories, made here
+        // rather than in writeFile() itself, to keep every other call
+        // site's behavior unchanged.
+        ::mkdir((harness.tempDir + "/single").c_str(), 0755);
+        ::mkdir((harness.tempDir + "/clone").c_str(), 0755);
+
+        harness.writeFile("/globals.h", kLoginTestGlobalsH);
+        harness.writeFile("/single/account_record.c", kLoginTestAccountRecordC);
+        harness.writeFile("/single/account_d.c", kLoginTestAccountDC);
+        harness.writeFile("/clone/login.c", kLoginTestLoginC);
+        harness.writeFile("/clone/user.c", kLoginTestUserC);
+        harness.writeFile("/single/start_room.c", kLoginTestStartRoomC);
+        accountD = harness.objects.loadObject("/single/account_d");
+        assert(accountD != nullptr);
+    }
+};
+
+static void testLoginAccountCreationFlowEndToEndCreatesRealAccountFile() {
+    LoginTestHarness t;
+    auto loginObj = t.harness.objects.cloneObject("/clone/login");
+    assert(loginObj != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(loginObj);
+
+    // Each step below extracts the pending handler's own name via
+    // takePendingInputTo() (destructive -- see this section's own
+    // Connection::takePendingInputTo() precedent comment above) and then
+    // calls that exact function directly, rather than routing back
+    // through Server::dispatchLine(): dispatchLine's own job (finding
+    // and consuming a pending registration) is already this file's own
+    // separate mechanism test above
+    // (testDispatchLinePrefersPendingInputToHandlerOverProcessInput),
+    // not something this login-flow test needs to re-prove, and taking
+    // the registration here to assert its name would otherwise leave
+    // nothing for a later dispatchLine call to find.
+    amlp::OutputContext::set(&conn);
+    t.harness.vm.callFunction(loginObj, "got_account_name",
+        {amlp::Value(std::string("newuser"))});
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_new_password");
+
+    t.harness.vm.callFunction(loginObj, "got_new_password",
+        {amlp::Value(std::string("goodpass123"))});
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_confirm_password");
+
+    t.harness.vm.callFunction(loginObj, "got_confirm_password",
+        {amlp::Value(std::string("goodpass123"))});
+    amlp::OutputContext::set(nullptr);
+
+    // enter_game() ran all the way through (new(USER_OB), exec(),
+    // setup(), move(), then destruct(this_object())) without an
+    // uncaught error -- the same proof-of-completion this file's own
+    // isDestructed() precedent elsewhere in this suite relies on.
+    assert(loginObj->isDestructed());
+
+    amlp::Value exists = t.harness.vm.callFunction(t.accountD, "account_exists",
+        {amlp::Value(std::string("newuser"))});
+    assert(std::get<int64_t>(exists.data) == 1);
+
+    std::ifstream accountFile(t.harness.tempDir + "/accounts/n/newuser.o");
+    assert(accountFile.good());
+    std::string contents((std::istreambuf_iterator<char>(accountFile)),
+        std::istreambuf_iterator<char>());
+    assert(contents.find("newuser") != std::string::npos);
+
+    ::close(fds[1]);
+    std::cout << "testLoginAccountCreationFlowEndToEndCreatesRealAccountFile OK\n";
+}
+
+static void testLoginExistingAccountCorrectPasswordOnASecondConnectionSucceeds() {
+    LoginTestHarness t;
+
+    amlp::Value created = t.harness.vm.callFunction(t.accountD, "create_account",
+        {amlp::Value(std::string("returningplayer")), amlp::Value(std::string("realpass1"))});
+    assert(std::get<int64_t>(created.data) == 1);
+
+    // A second, independent connection/login clone, matching the real
+    // driver's own one-clone-per-connect() shape -- not the same object
+    // the account was created through.
+    auto loginObj = t.harness.objects.cloneObject("/clone/login");
+    assert(loginObj != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(loginObj);
+
+    amlp::OutputContext::set(&conn);
+    t.harness.vm.callFunction(loginObj, "got_account_name",
+        {amlp::Value(std::string("returningplayer"))});
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_login_password");
+
+    t.harness.vm.callFunction(loginObj, "got_login_password",
+        {amlp::Value(std::string("realpass1"))});
+    amlp::OutputContext::set(nullptr);
+
+    assert(loginObj->isDestructed());
+    assert(!conn.hasPendingInputTo());
+
+    ::close(fds[1]);
+    std::cout << "testLoginExistingAccountCorrectPasswordOnASecondConnectionSucceeds OK\n";
+}
+
+static void testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries() {
+    LoginTestHarness t;
+
+    t.harness.vm.callFunction(t.accountD, "create_account",
+        {amlp::Value(std::string("targetacct")), amlp::Value(std::string("correcthorse"))});
+
+    auto loginObj = t.harness.objects.cloneObject("/clone/login");
+    assert(loginObj != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(loginObj);
+
+    amlp::OutputContext::set(&conn);
+    t.harness.vm.callFunction(loginObj, "got_account_name",
+        {amlp::Value(std::string("targetacct"))});
+    assert(conn.takePendingInputTo()->function == "got_login_password");
+
+    // MAX_LOGIN_TRIES is 3: two wrong passwords must each leave the
+    // connection alive with another password prompt pending, only the
+    // third disconnects.
+    t.harness.vm.callFunction(loginObj, "got_login_password",
+        {amlp::Value(std::string("wrongpass1"))});
+    assert(!loginObj->isDestructed());
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_login_password");
+
+    t.harness.vm.callFunction(loginObj, "got_login_password",
+        {amlp::Value(std::string("wrongpass2"))});
+    assert(!loginObj->isDestructed());
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_login_password");
+
+    t.harness.vm.callFunction(loginObj, "got_login_password",
+        {amlp::Value(std::string("wrongpass3"))});
+    assert(loginObj->isDestructed());
+
+    amlp::OutputContext::set(nullptr);
+
+    // The account itself must survive three failed guesses unharmed --
+    // the real password still checks out afterward.
+    amlp::Value stillOk = t.harness.vm.callFunction(t.accountD, "check_password",
+        {amlp::Value(std::string("targetacct")), amlp::Value(std::string("correcthorse"))});
+    assert(std::get<int64_t>(stillOk.data) == 1);
+
+    ::close(fds[1]);
+    std::cout << "testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries OK\n";
+}
+
+static void testLoginInvalidAccountNameWithSlashReprompts() {
+    LoginTestHarness t;
+    auto loginObj = t.harness.objects.cloneObject("/clone/login");
+    assert(loginObj != nullptr);
+
+    int fds[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    amlp::Connection conn(fds[0]);
+    conn.attach(loginObj);
+
+    amlp::OutputContext::set(&conn);
+    t.harness.vm.callFunction(loginObj, "got_account_name",
+        {amlp::Value(std::string("bad/name"))});
+    amlp::OutputContext::set(nullptr);
+
+    // Rejected before ever touching account_d: reprompted for another
+    // name, not disconnected, not treated as a real (nonexistent)
+    // account.
+    assert(!loginObj->isDestructed());
+    assert(conn.hasPendingInputTo());
+    assert(conn.takePendingInputTo()->function == "got_account_name");
+
+    ::close(fds[1]);
+    std::cout << "testLoginInvalidAccountNameWithSlashReprompts OK\n";
+}
+
 int main() {
     // Matches src/main.cpp's own real startup sequence exactly (see its
     // own comment) -- this test binary has its own separate main(), so
@@ -22664,6 +23142,10 @@ int main() {
     testParseMyRulesRequiresParseInitOnBothTheUserAndTheCallingObject();
     testParseMyRulesRejectsARecursiveCallWhileOneIsAlreadyInProgress();
     testSigpipeIsIgnoredSoAWriteAfterThePeerClosesDoesNotCrashTheProcess();
+    testLoginAccountCreationFlowEndToEndCreatesRealAccountFile();
+    testLoginExistingAccountCorrectPasswordOnASecondConnectionSucceeds();
+    testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries();
+    testLoginInvalidAccountNameWithSlashReprompts();
     std::cout << "all tests passed\n";
     return 0;
 }

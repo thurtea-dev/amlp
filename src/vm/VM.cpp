@@ -115,7 +115,12 @@ void coerceIfDestructed(Value& v) {
 // looks at "the current object" (save_object() being exactly the one
 // that surfaced this live: secure/daemon/account_d.c's own "unguarded((:
 // save_object, path :))" was saving master.c's own variables instead of
-// account_d.c's).
+// account_d.c's -- account_d.c here is a since-discarded early scratch
+// mudlib object used only for that live verification, not real vendored
+// corpus content and not this driver's own real, shipped /single/
+// account_d.c, which calls save_object() directly with no unguarded()
+// closure hop at all, see notes/ACCOUNT_LOGIN_PLAN.md and STATUS.md's
+// 2026-08-21 entry).
 //
 // Object-change detection mirrors real FRAME_OB_CHANGE: only push a new
 // objectChangeStack_ entry when obj actually differs from the

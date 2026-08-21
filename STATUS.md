@@ -3,6 +3,204 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-21 (a further session, continued the same day again): resolved
+a loose end flagged (not fixed) by the prior session, a stale citation
+to a nonexistent `secure/daemon/account_d.c` found in three files, not
+two -- then built `notes/ACCOUNT_LOGIN_PLAN.md`'s build ordering item 2,
+real login integration on top of item 1's `account_d.c`/
+`account_record.c`. `/clone/login.c` reworked into a real `input_to()`
+account-name-then-password state machine wired to `ACCOUNT_D`,
+replacing the previous unconditional clone-and-`exec()` with no auth at
+all. Four new regression tests added; live-verified against the real
+running driver and the real bundled `mudlib/` tree over a real
+connection (new account, correct second-connection login, wrong-
+password rejection through the real retry limit). 719 tests passing, up
+from 715.**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**The dead-citation resolution.** The prior session's own entry below
+named "two other files" citing a nonexistent `secure/daemon/
+account_d.c`, found while researching real reference material for the
+account-storage slice, flagged but explicitly not fixed. Grepped fresh
+rather than trusting that count: the real total is **three files**, not
+two, seven occurrences (`src/efun/EfunTable.cpp`, two separate citation
+sites, plus a third mention inside the `save_object`/`restore_object`
+registration comment; `src/vm/VM.cpp`, one site, entirely missed by the
+prior session's own summary; `test/test_lexer.cpp`, three sites, not
+two). Investigated what the citation actually was before deciding how
+to resolve it, rather than guessing: it is not fabricated and not real
+vendored corpus content either. `git log --all --diff-filter=D -- 'mudlib/
+secure/*'` returns nothing (that path was never tracked in this repo's
+own history at all), and it does not exist in any of the six vendored
+corpora under `temp/` (already confirmed by the prior session). But
+`STATUS-ARCHIVE.md`'s own much earlier dated entries (the closures/
+`ObjectFrameGuard`/`CallParent` recon sessions) describe a real, live,
+extensive walkthrough against it: a full account-creation flow driven
+over a real socket connection, a real save file inspected on disk, real
+bugs found and fixed because of it. Cross-referencing the file paths
+those same entries cite alongside it (`secure/std/login.c`,
+`secure/daemon/chat.c`/`events.c`/`finger.c`/`bank.c`, `daemon/
+intermud.c`, `daemon/services/who.c`/`auth.c`, `domains/Praxis/*`)
+against every corpus under `temp/` found an exact structural match:
+`temp/nightmare3` has every one of those paths for real, except
+`account_d.c` and `wiztools.c` specifically, which do not exist there
+either. Conclusion, not previously on record anywhere: this project's
+own early history ran a scratch mudlib built on a nightmare3-derived
+skeleton with some genuinely original files of its own layered on top
+(`account_d.c` among them), used once for live driver verification and
+then discarded like every other scratch object this project's own
+methodology produces, never committed to this repo, and not preserved
+in any vendored corpus either. The citing comments' own account of what
+they surfaced (the `sizeof()` empty-string idiom, the three-file
+`sprintf()` shape survey, the `CallParent` opcode's `::create()` gap,
+the `ObjectFrameGuard`/closure-owner bug, the `unguarded()`/`security.c`/
+`master.c` three-hop chain) is real project history, not invented, so
+deleting it outright would lose real information the "citing code
+itself is unreachable" removal option does not apply to anyway (every
+one of those mechanisms, `sizeof()`, `sprintf()`, `CallParent`,
+`ObjectFrameGuard`, closures, is real, load-bearing, still-shipping
+driver code today). Resolved instead by correcting each citation in
+place: every mention of `secure/daemon/account_d.c` across all three
+files now carries an explicit note that it is a since-discarded early
+scratch mudlib object, not real vendored corpus content and not this
+session's own real, shipped `/single/account_d.c`, with a cross-
+reference to the real file and (where the original claim no longer
+holds, e.g. the real file uses `name == ""` rather than `!sizeof(name)`,
+calls `save_object()` directly with no `unguarded()` hop, has no
+`::create()` at all since it inherits nothing) an explicit note of the
+difference rather than a silent implication of identity. Rebuilt clean
+after every edit (`src/efun/EfunTable.cpp`, `src/vm/VM.cpp`,
+`test/test_lexer.cpp` all comment-only changes, zero behavior change,
+confirmed by a full rebuild and the unchanged 715-test baseline before
+moving on to new work).
+
+**Login integration (`notes/ACCOUNT_LOGIN_PLAN.md` build ordering item
+2).** Read the plan document's own scope fresh rather than reinventing
+it: item 2 is already exactly sized to one session ("account name ->
+password, no character concept yet"), so no further bounding was
+needed the way the prompt's own fallback instruction anticipated might
+be necessary. Read the current `mudlib/clone/login.c` (`// needs fixed
+to handle passwords`, its own top-of-file comment, clones `/clone/user`
+unconditionally with zero auth), `mudlib/clone/user.c`, and
+`mudlib/single/master.c`'s `connect()` before changing anything.
+
+Reworked `/clone/login.c` into a real `input_to()` state machine:
+`logon()` prompts for an account name -> `got_account_name()` branches
+on `ACCOUNT_D->account_exists()` -> an existing account goes to
+`got_login_password()` (`INPUT_NOECHO`), a new one goes to
+`got_new_password()` then `got_confirm_password()` (both `INPUT_NOECHO`,
+a real confirm-password step, matching `temp/core-lib`'s own
+`setPassword`/`confirmPassword` pair already cited in the plan). Success
+either way reaches `enter_game()`, which does exactly what the old
+`logon()` did (clone `/clone/user`, `set_name()`, `exec()`, `setup()`,
+`move(START_LOC)`, `destruct(this_object())`), now gated on a real
+account instead of running unconditionally, and using the account name
+itself as the character name -- the same single-character-per-account
+shape this project's own prior scratch-mudlib live verification already
+exercised for real (`STATUS-ARCHIVE.md`'s "Confirm `<name>` as your
+account and first character name?" walkthrough), reused rather than
+invented fresh. A login-attempt counter (`MAX_LOGIN_TRIES`, 3,
+disconnects after) and an idle `call_out()` timeout (`LOGIN_TIMEOUT_SECS`,
+90, matching `temp/core-lib`'s own cited `call_out("timeout", 90)`) are
+both in from this first pass, per the plan's own "should be part of
+this from the start, not bolted on later" note. `MIN_PASSWORD_LEN` (5)
+reuses this project's own prior live-verification session's real prompt
+text against the old scratch mudlib ("Please choose a password of at
+least 5 letters"). `INPUT_NOECHO` (real comm.h `I_NOECHO`, `0x1`) is a
+new `globals.h` constant -- this mudlib had never had a header-level
+name for it before, only the driver-side citation. Deliberately not
+built this slice, matching the plan's own item 2 scope exactly rather
+than reaching into item 3's territory: the character object design
+decision, and the y/n account-name confirm step the plan's own fuller
+"Proposed architecture" section describes (flagged as a deliberate
+simplification in `login.c`'s own header comment, not a silently
+smaller scope).
+
+**Regression tests.** Four new tests added to `test/test_lexer.cpp`
+(`testLoginAccountCreationFlowEndToEndCreatesRealAccountFile`,
+`testLoginExistingAccountCorrectPasswordOnASecondConnectionSucceeds`,
+`testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries`,
+`testLoginInvalidAccountNameWithSlashReprompts`), using the same
+`ObjectVarHarness` + `socketpair` + `Connection` + `OutputContext`
+pattern this suite's own pre-existing "connect/input protocol" tests
+already established (the prior session's own "no unit tests were
+added" choice for the account-storage slice was specific to that slice,
+per its own stated reasoning, real bundled mudlib content gets live-
+verification instead of unit tests, not a standing rule against ever
+testing mudlib content this way; this session's own prompt asked for
+tests specifically, so this is that, not a reversal). The real current
+content of `account_d.c`/`account_record.c`/`login.c` is written into
+each test's harness as inline fixtures (kept in sync by hand if any of
+the three is edited later, the same tradeoff every other inline fixture
+in this file already makes rather than reading real files off disk at
+test time, which would make the whole suite fragile to its own working
+directory the way nothing else in it currently is); `/clone/user.c` and
+`/single/start_room.c` are deliberately NOT real copies, minimal stand-
+ins for what `enter_game()` needs and nothing this session's own work
+touches. One real bug caught and fixed while writing these: the first
+draft called `Connection::takePendingInputTo()` (destructive, consumes
+the registration) purely to *inspect* which handler had been
+registered, then separately called `Server::dispatchLine()` expecting
+it to find and route to that same registration -- already consumed by
+the inspection, so the second step silently no-opped instead of
+advancing the state machine, caught by the test's own first real
+assertion failure rather than passing on a false premise. Fixed by
+driving every step directly through the extracted handler name instead
+of round-tripping through `dispatchLine()` a second time (that
+mechanism, "does `dispatchLine()` find and call a pending handler," is
+already this same file's own separate, pre-existing test,
+`testDispatchLinePrefersPendingInputToHandlerOverProcessInput`, not
+something these new tests needed to re-prove).
+
+**Live verification against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4146, default dialect, a
+real Python TCP client, over a real telnet-negotiated connection, not
+`eval` calls this time since the thing under test is the connection-
+level state machine itself): a brand-new account (`aetherwalker`)
+walked through name -> new-account branch -> password -> confirm
+password -> real `crypt()`-hashed account file landing on disk at the
+correct bucketed path (`/accounts/a/aetherwalker.o`) -> straight into
+the one real room, confirmed both via the driver's own output and by
+reading the account file's contents directly; a second, independent
+connection to the same account -> correctly recognized as existing ->
+password prompt (real `INPUT_NOECHO` telnet suppression confirmed in
+the raw byte stream) -> correct password -> straight into the game;
+a third connection given three wrong passwords in a row -> correctly
+rejected each time with a retry count -> real disconnect after the
+third, matching `MAX_LOGIN_TRIES`; a fourth connection given a name
+containing `/` -> correctly rejected and re-prompted rather than either
+crashing or being treated as a literal (nonexistent) account. No
+errors in the driver's own log across any of it. Scratch `/accounts`
+directory and scratch process both removed/stopped afterward, confirmed
+via `git status` that `mudlib/` shows only the intended tracked changes.
+
+**`notes/ACCOUNT_LOGIN_PLAN.md` updated in place**, matching its own
+established per-item update convention: the top status paragraph and
+build-ordering item 2 both marked done with the reasoning above,
+item 2's own scope note preserved verbatim as the record of what was
+deliberately not built this slice.
+
+**Next-session recommendation.** Not re-litigated fresh this session
+(the prior session's own three-way comparison, (A) close Phase 1's
+zero-evidence items, (B) `notes/ACCOUNT_LOGIN_PLAN.md`, (C) begin real
+Phase 2 scoping, still stands and is written in full below in this same
+file's immediately following entry): this session picked up (B)'s own
+next queued item as that comparison's own logic already implied it
+would, and (B) is not yet exhausted. `notes/ACCOUNT_LOGIN_PLAN.md`'s
+own build ordering items 3 through 5 (the character object design
+decision, character creation, multi-character selection) remain real,
+scoped, and not started -- item 3 in particular needs its own design
+decision made (persisted-subclass-of-`user.c` vs. merged single
+object), not a default assumed, before any code gets written, matching
+the plan document's own explicit "deliberately does not pick one yet."
+Whoever continues this next should start there, or re-run (A)/(C)'s own
+evidence check fresh if meaningful time has passed since this was
+written, per this project's own standing discipline against trusting a
+prior session's snapshot blindly.
+
 **2026-08-21 (a further session, continued the same day): a fresh
 full-project status sweep (Phase 0 confirmed still 16/16, Phase 1
 confirmed still 10/11 with the full remaining item list re-verified,
@@ -692,109 +890,4 @@ that `mudlib/` is exactly as found.
 including 0.13a's own last remaining sub-gap, real and tested. `ROADMAP.md`
 row 0.13a and `COMPARISON.md`'s own Phase 0/`parse_*` sections updated to
 match.
-
-**2026-08-20 (a further session): audited the prior session's own two
-real-reset/clean_up fixes for independent regression coverage (found and
-fixed a real gap, 2 tests were not one apiece), then produced a full
-Phase 1 status read: five stale checkboxes corrected (rows 1.2, 1.3,
-1.4, 1.9, 1.16), a plain "real, corpus-driven work is substantially
-exhausted" statement added to ROADMAP.md, COMPARISON.md's Phase 1
-numbers refreshed from 5/11 to 10/11, and an evidence-based next-session
-recommendation produced without building anything this session
-(702 tests, up from 701).**
-
-Oriented fresh per this session's own instructions: read `CLAUDE.md`
-(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
-no em dashes or emojis).
-
-**Test-coverage audit.** The prior session's own two real fixes (the
-same-cycle reset/clean_up dialect gate, and the readyForCleanUp-latched-
-before-reset ordering fix it exposed) landed with only 2 new tests, one
-per dialect (LDMud/FluffOS), not one per fix. Rather than assume that was
-fine or assume it was a gap, tested it directly: reverted each fix in
-isolation (keeping the other applied), rebuilt, and ran the suite each
-time. Result: reverting the ordering fix alone, or the dialect gate
-alone, each independently flips the FluffOS-dialect test's own
-`cleanUpCalls` assertion from 1 to 0, so that one test *does*
-independently catch either regression, confirmed by direct experiment,
-not assumed. The LDMud-dialect test does not catch either regression in
-isolation (it asserts `cleanUpCalls == 0`, which is also what both
-reverted states produce under `dialect: ldmud`, since LDMud's own real
-behavior wants suppression regardless of which mechanism, correct or
-broken, currently produces it), also confirmed by the same
-experiment. This is not accidental undercoverage: a real reset() call
-can only ever move `timeOfRef()` forward, never backward, so the
-ordering fix has no observable effect except in exactly the same
-same-cycle-collision-under-a-non-suppressing-dialect window the dialect
-gate also governs; there is no black-box scenario where one fix's
-reversion is visible and the other's is not. Documented this finding
-directly in both existing tests' own comments (previously written under
-an unverified assumption, now corrected to state what was actually
-proven). Added one further test, `dialect: dgd`, closing a real, distinct
-adjacent gap this same audit surfaced: neither existing test would catch
-a plausible future "simplification" of the dialect check from an
-allowlist (`dialect == LpcDialect::LdMud`) to a denylist (`dialect !=
-LpcDialect::FluffOS`): DGD is the one dialect where the two phrasings
-disagree. 702 tests passing (up from 701), zero regressions, restored
-code confirmed byte-identical to the pre-experiment version via `diff`
-before rebuilding for real.
-
-**Phase 1 status read.** Surveyed every Phase 1 row's own current cell
-text against its checkbox, not just the checkbox alone, continuing the
-same discipline as the immediately prior session's own row 1.9
-correction. Found four more stale checkboxes, each with real, already-
-landed work sitting in its own cell across earlier sessions:
-
-- Row 1.2/1.3 (dialect-aware Lexer/Parser): `atomic`/`nil` (DGD-gated),
-  bare `#'name`/`'name`, and `#'efun::name` are all real and tested,
-  recorded directly in these rows' own cells across several earlier
-  sessions; mapping-width syntax was explicitly absorbed into row 1.9's
-  own scope, not split across rows. Remaining real scope is `rlimits`
-  (both rows) and DGD's own `&ident(args)` closure syntax (row 1.3) --
-  both DGD-only, out of this project's own explicit Phase 1 completion
-  scope. Checkboxes corrected to `[x]`.
-- Row 1.16 (LDMud master apply name table): re-read its own below-table
-  prose in full (the row's own cell ends mid-sentence, "recorded below
-  rather than forced," referring to that prose, not a truncated cell).
-  `get_bb_uid` is confirmed dead code in this exact vendored LDMud build
-  itself (zero real driver call sites, a doc-vs-code divergence);
-  `make_path_absolute` is blocked on `ed()`, an already-and-separately-
-  excluded efun; `valid_read`/`valid_write` are real and tested;
-  `disconnect()` is zero real corpus usage. No real open item remains.
-  Checkbox corrected to `[x]`.
-- Row 1.4 (pluggable boot API): re-checked whether `Server.cpp`'s
-  hardcoded `"connect"` master apply is genuinely FluffOS-specific
-  (which would make the "not routed through `BootApi`" note a real
-  functional gap, not just hygiene) rather than assuming the prior
-  framing was complete, confirmed both real dialects use the identical
-  apply name and role (`temp/reference/fluffos-2.9-ds2.08/applies_table.c`'s
-  own `"connect"`, real LDMud's own `doc/master/connect`, `"object
-  connect(void)"`). An initial check of this returned zero results for
-  both dialects and nearly got reported as a real, newly-discovered
-  functional gap, caught before trusting it: the grep had been run
-  from `build/`, not the repo root, so `temp/ldmud/...` silently did not
-  exist under that working directory. Re-run from the correct directory,
-  confirmed the apply names genuinely match. So the un-routed applies
-  are exactly what the row's own prior note already said, an
-  abstraction-hygiene gap, not a functional one. Checkbox corrected to
-  `[x]`.
-
-**Refreshed numbers.** `ROADMAP.md`'s own Phase 1 header gained a plain
-"real, corpus-driven work is substantially exhausted" status statement:
-10 of 11 real-blocker rows closed (DGD-only 1.11-1.15 excluded per this
-project's own stated goal), the one remaining open row (1.8) confirmed
-zero-evidence for its own remaining scope this same session (see its own
-2026-08-20 entry above). `COMPARISON.md`'s Phase 1 section rewritten from
-its own stale "5 of 11, a bit under half done" (predating several
-sessions' worth of already-landed work) to the current 10/11 (91%)/
-16-row 10/16 (63%) numbers, with a rewritten "what is left open, and why"
-bullet list replacing the old, now-inaccurate one.
-
-**Next-session recommendation, not built this session (see the reply to
-the user this same turn for the full reasoning): return to Phase 0's own
-one remaining open item, row 0.13a's `parse_sentence()` `nicks` argument,
-over continuing to close Phase 1's zero-evidence items defensively or
-starting Phase 2 planning-to-code work.** Full reasoning given directly
-to the user this turn, not duplicated here: see this same session's
-own reply for the three-way comparison and why `nicks` won.
 

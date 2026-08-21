@@ -1244,14 +1244,19 @@ void registerCoreEfuns() {
     // int sizeof(mixed) -- real FluffOS's sizeof() also measures a
     // string's length (func_spec.c literally defines strlen/strstr... no
     // wait, strlen is its own alias: "int strlen sizeof(string);" --
-    // confirmed live: secure/daemon/account_d.c's own "!name ||
-    // !sizeof(name)" idiom, used throughout this mudlib as the standard
-    // "is this string empty" check, was silently always taking the
-    // empty-string branch before this string case existed here, since a
-    // missing case fell through to a plain 0 rather than throwing --
-    // masked because "0" also happens to be account_exists()'s own
-    // correct answer for a brand new account, not because the string
-    // branch was actually running).
+    // confirmed live against secure/daemon/account_d.c, a since-
+    // discarded early scratch mudlib object used only for live driver
+    // verification, not real vendored corpus content and not this
+    // driver's own real, shipped /single/account_d.c (built 2026-08-21,
+    // notes/ACCOUNT_LOGIN_PLAN.md, which checks name == "" instead of
+    // this idiom): its own "!name || !sizeof(name)" idiom, used
+    // throughout that scratch mudlib as the standard "is this string
+    // empty" check, was silently always taking the empty-string branch
+    // before this string case existed here, since a missing case fell
+    // through to a plain 0 rather than throwing -- masked because "0"
+    // also happens to be account_exists()'s own correct answer for a
+    // brand new account, not because the string branch was actually
+    // running).
     auto sizeofImpl = [](VM&, std::vector<Value>& args) -> Value {
         if (!args.empty()) {
             if (auto* arr = std::get_if<std::shared_ptr<Array>>(&args[0].data)) {
@@ -2386,8 +2391,10 @@ void registerCoreEfuns() {
     // sprintf() is a large efun (field widths, padding, table columns,
     // a dozen-plus specifiers). Started from only bare "%s"/"%d",
     // positionally, with no width/precision/flags -- confirmed by grep
-    // across secure/std/login.c, secure/daemon/account_d.c, and
-    // daemon/banish.c, the only shapes used on the original login/
+    // across secure/std/login.c, secure/daemon/account_d.c (a since-
+    // discarded early scratch object, see this file's own sizeof()
+    // comment above), and daemon/banish.c, the only shapes used on the
+    // original login/
     // account-creation path this driver exercised first. Grown live
     // since, each addition confirmed against a real call site rather
     // than spun ahead speculatively: "%c" (daemon/terminal.c's own
@@ -6877,7 +6884,9 @@ void registerCoreEfuns() {
     // history). This driver's own recursive format covers every Value
     // kind this driver has (int, float, string, array, mapping --
     // arbitrarily nested, not just the flat shapes secure/daemon/
-    // account_d.c's own account records happen to use) except object
+    // account_d.c's own account records happen to use (a since-
+    // discarded early scratch object, distinct from the real, shipped
+    // /single/account_d.c named just below) except object
     // references and closures, which real save_object() cannot
     // serialize either (an object reference saved to disk cannot
     // survive a reboot, and neither real FluffOS nor this driver
