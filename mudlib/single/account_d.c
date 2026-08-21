@@ -37,6 +37,30 @@ void ensure_dirs(string name) {
     mkdir(ACCOUNTS_DIR + "/" + lower_case(name)[0..0]);
 }
 
+// character_path()/ensure_character_dirs(): notes/ACCOUNT_LOGIN_PLAN.md
+// build ordering item 3 (2026-08-21). Public, unlike account_path()/
+// ensure_dirs() above: those two are only ever called from inside this
+// same file, but /clone/user.c and /clone/login.c both need the
+// character-file path now (user.c to save/restore itself directly,
+// login.c to pass that path to user.c), and this file is the one place
+// the bucketing rule should live (globals.h's own CHARACTERS_DIR
+// comment). Identical bucketing convention to account_path() above,
+// just under CHARACTERS_DIR instead of ACCOUNTS_DIR -- accounts and
+// characters are two separate trees, not two variables holding the
+// same file, because account_d.c owns auth data (password hash) and
+// user.c owns gameplay state, a real, deliberate separation of concerns
+// even though this slice's own single-character-per-account shape means
+// the two file names happen to match today.
+string character_path(string name) {
+    name = lower_case(name);
+    return CHARACTERS_DIR + "/" + name[0..0] + "/" + name;
+}
+
+void ensure_character_dirs(string name) {
+    mkdir(CHARACTERS_DIR);
+    mkdir(CHARACTERS_DIR + "/" + lower_case(name)[0..0]);
+}
+
 int
 account_exists(string name) {
     if (!name || name == "") {

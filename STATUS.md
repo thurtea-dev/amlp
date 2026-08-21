@@ -3,6 +3,185 @@
 Older session entries (everything before the 5 most recent) live in
 `STATUS-ARCHIVE.md`.
 
+**2026-08-21 (a further session, continued the same day yet again):
+fact-checked two forward-looking architecture concerns from an external
+technical review against the real current code (one confirmed real and
+already live, not just latent, one confirmed overstated with no real
+trigger), then built `notes/ACCOUNT_LOGIN_PLAN.md`'s build ordering
+item 3, character persistence, resolving that item's own open design
+decision. 721 tests, up from 719.**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Fact-check 1: does the row 1.9 N-column `Mapping` evolution already
+"ripple" into `save_object()`/`restore_object()`/comparison operators,
+as an external review warned it eventually would?** Confirmed real and
+already present in shipped code today, sharper than this row's own
+existing "zero real corpus usage" framing already stated, not merely a
+future risk. Read all four real serialization code paths directly
+(`src/efun/EfunTable.cpp`): this driver's own writer, `serializeValue()`
+(~254-284), and reader, `deserializeValue()`'s `'M'` case (~322-334),
+plus the real-FluffOS-on-disk-format writer, `writeRealSaveValue()`
+(~505-515), and reader, `parseRealSaveValue()`'s `'['` case (~429-442)
+-- all four iterate `Mapping::entries` only and never reference
+`Mapping::width`/`extraColumns` (`include/amlp/vm/Value.hpp`) at all.
+None throws or warns on a width > 1 mapping: `save_object()` on one
+silently writes only column 0, and `restore_object()` always
+reconstructs a width-1 `Mapping` regardless of what was actually saved,
+a genuine, currently-live, silent data-loss bug for any width > 1
+mapping a real mudlib does save (still zero real corpus call sites
+today, per this row's own pre-existing finding, so nothing currently
+hits it, but the code path itself is already broken, not merely
+unbuilt). The comparison-operator half of the same concern does not
+apply the way the review frames it: `valuesEqual()`
+(`src/vm/Value.cpp:28-55`), the sole backing for LPC's own `==`/`!=` on
+any two `Value`s, has no case for `shared_ptr<Mapping>` at all (nor
+`shared_ptr<Array>`) for *any* width, falling through to its own final
+`return false` -- whole-mapping `==` was never implemented even for the
+width-1 mappings that predate this row entirely, a separate, wider,
+pre-existing gap the N-column work simply inherited rather than
+complicated. Added a dated addendum to `ROADMAP.md` row 1.9's own cell
+with the full citation (file:line for all four functions), rather than
+leaving this only in chat, matching this project's own standing
+discipline against exactly that failure mode.
+
+**Fact-check 2: could deeply nested `unbound_lambda()`/`lambda()`
+quoted-code bodies see real variable-resolution performance degrade
+during recursive evaluation, as the same review separately warned?**
+Confirmed overstated, no real trigger at either implemented or actually
+reachable nesting depth. Read `VM::evalQuotedLambdaNode()`/
+`VM::callUnboundLambdaBody()` (`src/vm/VM.cpp:985-1043`) directly: a
+symbol lookup (a lambda parameter reference) is a linear scan over
+`params`, a small, fixed-size vector passed by `const&` unchanged
+through every recursive call, never rebuilt, regrown, or accumulated
+per frame -- lookup cost is `O(params.size())` on every call regardless
+of recursion depth, so the specific degradation mechanism the review
+describes does not exist in this implementation at all. The recursion
+itself only ever walks the closure's own already-fully-constructed
+`lambdaBody` tree (each node visited exactly once, standard depth-first
+walk, `O(total nodes)` overall), never a structure that grows during
+evaluation the way ordinary recursive LPC function calls can via
+runtime data -- nesting depth is fixed at construction time by whatever
+literal quoted-code array was authored. Checked real reachability too,
+not just the algorithm: `set_driver_hook()` is now implemented (unlike
+this mechanism's own older row 1.7/1.8 comment, which is stale on this
+point -- a later session built it), and driver-hook firing genuinely
+does call through `callClosure()` into this evaluator
+(`src/vm/VM.cpp:1131`), so it is reachable end to end today, not
+theoretical. The one real corpus source for this exact mechanism,
+`temp/core-lib/secure/master/hooks.c`'s own four `unbound_lambda()`
+hook bodies (`H_MOVE_OBJECT0`, `H_LOAD_UIDS`, `H_CLONE_UIDS`,
+`H_INCLUDE_DIRS`), each nest to depth 1 exactly (a single `({#'closure,
+'param, ...})` call, no nested arrays at all) -- read directly, not
+assumed. No `ROADMAP.md` note added for this one: the instructions were
+to flag a concern only if real and unmitigated, and this one is neither,
+so a note would be noise, not evidence; reported here instead, with the
+code read as proof.
+
+**Item 3 (character persistence, `notes/ACCOUNT_LOGIN_PLAN.md` build
+ordering item 3).** Read the plan's own open design question fresh
+before writing anything: whether the character object is a separate,
+`account_d`-tracked file, or merges with `/clone/user.c` directly.
+Resolved as **merge**: `user.c` itself is the one persisted character
+object, calling `save_object()`/`restore_object()` directly on itself,
+the same `current_object()`-must-be-the-target reasoning
+`account_record.c`'s own header comment already established, and
+`user.c` is already a fresh per-connection clone the same way
+`account_record.c` is a fresh per-operation clone, so no third "record"
+object was needed the way `account_d.c` needed one for itself (a
+singleton daemon, not per-account). Matches real corpus precedent too
+(`temp/core-lib`'s own `execNewPlayer()`/`execGuestPlayer()` each
+resolve straight to one player object, no separate character split),
+not just architectural convenience.
+
+New `CHARACTERS_DIR` (`/characters`, `globals.h`), bucketed the same way
+as `ACCOUNTS_DIR` but a genuinely separate tree (auth data vs. gameplay
+state, a real distinction even though this slice's single-character-
+per-account shape means the file names currently match). The one
+bucketing rule per tree stays owned by `account_d.c`
+(`character_path()`/`ensure_character_dirs()`, new, public since
+`user.c`/`login.c` now call them from outside, unlike `account_path()`/
+`ensure_dirs()` which stay private) rather than being duplicated in
+`user.c`/`login.c` too, the same "one file owns the rule" discipline
+`account_record.c`'s own header comment already established for the
+account tree.
+
+First real persisted player state, deliberately minimal: `login_count`,
+a plain `int` object variable on `user.c`, proving the mechanism end to
+end without inventing game mechanics this slice was not scoped to
+design. `load_character(path)` (new, called once from `login.c`'s own
+`enter_game()`, identically for a brand-new account's first login and a
+returning account's Nth -- `restore_object()` on a not-yet-existing
+path just leaves every variable at its default, no branch needed) calls
+`restore_object()` then increments. A new private `save_character()`
+helper persists it, called from **both** real disconnect paths this
+mudlib has, not just one: `net_dead()` (already existed, the driver's
+own real link-death apply, confirmed live-firing in
+`src/net/Server.cpp:357`) and a new `remove()` override
+(`command/quit.c`'s own real `"previous_object()->remove()"` path;
+`inherit/base.c`'s own `remove()` just destructs with no save at all,
+so an explicit "quit" would have silently lost the count without this
+override -- matches this file's own pre-existing "bare parent call"
+pattern, `id()`'s `base::id(arg)`, rather than reimplementing what
+`base::remove()` already does). `login.c` also now shows the restored
+count back to the player ("Welcome back! You have logged in N
+time(s).") after `load_character()`, a small real touch, not just an
+invisible internal counter.
+
+**Regression tests.** Two new tests in `test/test_lexer.cpp`
+(`testCharacterLoginCountPersistsAcrossReconnectViaNetDead`,
+`testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead`, covering
+each real disconnect path independently rather than assuming one covers
+both), plus the four pre-existing login tests' own inline fixtures
+updated to match the new real content of `account_d.c`/`login.c`/
+`user.c` (all four still pass unchanged otherwise). One real fixture
+gap caught while updating them: `ObjectVarHarness::writeFile()` never
+creates missing parent directories (matching real `save_object()`'s own
+"no missing parent directories either" contract, confirmed already
+documented on that efun's own registration comment) and every fixture
+in this file before this session used only flat top-level paths, so a
+harness needing `/single/*.c`/`/clone/*.c` subdirectories needed
+`::mkdir()` calls added to its own setup that no earlier test in this
+file needed.
+
+**Live-verified against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4150, default dialect, a
+real Python TCP client, over a real telnet-negotiated connection): a
+brand-new account's first login correctly showed "logged in 1 time(s)",
+the real character file landed at the correct bucketed path
+(`/characters/t/thistledown.o`) with the correct fields, confirmed by
+reading it directly; a second, independent connection's login correctly
+restored and showed count 2; a third login followed by an explicit
+`quit` command correctly showed count 3 and, confirmed by reading the
+on-disk file immediately afterward (before any further connection could
+have saved over it), persisted 3 through the `remove()` path
+specifically, not incidentally covered by `net_dead()`; a fourth login
+correctly continued from there to 4. No errors in the driver's own log
+across any of it. Scratch `/accounts` and `/characters` directories and
+the scratch process both removed/stopped afterward, confirmed via
+`git status` that `mudlib/` shows only the intended tracked changes.
+
+**`notes/ACCOUNT_LOGIN_PLAN.md` updated in place**, matching its own
+established per-item update convention: the top status paragraph and
+build-ordering item 3 both marked done with the design decision and
+reasoning above recorded in full, not left implicit the way the prompt
+itself warned against.
+
+**Next-session recommendation.** Not re-litigated fresh this session:
+the standing recommendation (continue `notes/ACCOUNT_LOGIN_PLAN.md`'s
+own build ordering) still holds, and this session picked up exactly the
+next queued item, item 3, as expected. Build ordering items 4 and 5
+(character creation flow for brand-new accounts, then multi-character
+selection once 1-4 work end to end) remain real, scoped, and not
+started -- item 4 in particular now has a real, working persistence
+layer under it (this session's own item 3) to build on, so whoever
+picks it up next does not need to re-derive that part first. The two
+fact-checked review concerns above are closed for now (one flagged for
+real in `ROADMAP.md`, one reported and set aside as not real); neither
+blocks or changes this plan's own next item.
+
 **2026-08-21 (a further session, continued the same day again): resolved
 a loose end flagged (not fixed) by the prior session, a stale citation
 to a nonexistent `secure/daemon/account_d.c` found in three files, not
@@ -789,105 +968,3 @@ object's own `move_object()` call afterward.
 
 Staged with `git add` only, per this project's own standing rule; not
 committed.
-
-**2026-08-20 (a further session): built row 0.13a's own last remaining
-Phase 0 sub-gap, `parse_sentence()`'s 4th `nicks` argument: real
-`add_nicknames()`/`expand_node()`, already concretely scoped from a
-prior session's own citations, re-confirmed against the real source
-before building anything (704 tests, up from 702).**
-
-Oriented fresh per this session's own instructions: read `CLAUDE.md`
-(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
-no em dashes or emojis).
-
-**Re-confirmed the three cited real source sections before trusting
-them.** `add_nicknames()` (`packages/parser.c:1095-1108`) confirmed
-exactly as the prior session's own note had it, plus one detail the
-note left implicit: `mn->values[0]` is the mapping node's own KEY slot,
-not a value column, confirmed against real `mapping.h`'s own
-`mapping_node_t::values[2]` and `mapping.c:39`'s own
-`MAP_SVAL_HASH(mn->values[0])` (a node is hashed by its own key, the
-only way lookup works at all), settling "for string keys" as
-unambiguous. `expand_node()` re-read in full: the real function is
-`:1302-1323`, four lines longer than the prior session's own `:1302-1319`
-citation (the extra lines are the function's own closing brace, not
-missed logic). Two real quirks confirmed directly and ported faithfully
-rather than smoothed over: the `he->flags &= ~HV_NICKNAME;` clear is
-unconditional, the function's own first statement, before any success/
-failure check, so a *failed* resolution permanently disables
-re-attempting that same hash entry for the rest of the call, exactly
-like a successful one, not just an optimization for the happy path; and
-real `find_string_in_mapping()` (`mapping.c:830-848`) never returns
-null, it returns a static `&const0u` on a missing key, so real code's
-own single `sv->type != T_OBJECT` check already covers "key missing"
-and "key present but not an object" together, ported here as the two
-real cases it actually is since this driver's own `Mapping` has no
-equivalent sentinel to reuse.
-
-**What was built.** `LoadedObjectSet::loadObjects()`/
-`ParserPackage::parseSentence()` both gained a `const Value* nicks =
-nullptr` parameter, matching `envArray`'s own already-established shape
-exactly. New `addNicknames()` (`ParserPackage.cpp`) ports
-`add_nicknames()` at the real call site inside `loadObjects()`, right
-after the fixed `"my"` adjective entry, before the `"num_people"` loop,
-matching real `parser.c:1162-1163` exactly. New `expandNode()` ports
-`expand_node()`, called from `parseObj()`'s own word loop at the real
-position, right before the `isNoun` check gets a chance to read
-whatever it may have just set. `SentenceSession` gained a `nicks`
-field, same per-call-scoped shape as `envArray`, confirmed this is
-not a coincidental simplification but the real observable contract:
-real `free_parse_globals()` (`parser.c:621-639`) explicitly resets
-`parse_nicks = 0;` after every single `parse_sentence()` call, so real
-code's own end-to-end behavior already is "fresh per call, nothing
-leaks across calls." Also confirmed `parse_my_rules()` never resolves a
-nickname in real code either (no `nicks` argument of its own, and
-`parse_nicks` is always 0 by the time it would run): this driver's own
-`parseMyRules()` needed no change at all. `EfunTable.cpp`'s
-`parse_sentence` registration now extracts and passes the real 4th
-argument. One incidental stale comment fixed along the way:
-`addHashEntry()`'s own header comment cited `mark_hash_entry()` as its
-only other real caller; confirmed by grepping the whole vendored driver
-tree that `mark_hash_entry()` (`packages/parser.c:1015-1037`) is itself
-real dead code in FluffOS (declared, defined, zero call sites anywhere)
--- the same category as `get_bb_uid()`/`multiple_adj()`/`err_obs()`
-already found dead elsewhere in this row's own investigation, corrected
-rather than left implying otherwise.
-
-2 new regression tests (`test/test_lexer.cpp`):
-`testParseSentenceNicknameResolvesToAnAlreadyLoadedObject` (a nickname
-word that is not any real noun id of the target object at all resolves
-correctly when the object is reachable) and
-`testParseSentenceNicknamePresentButObjectNotYetLoadedDoesNotResolve`
-(the identical nickname mapping to the identical real object, sitting
-in an unrelated, unreachable room: correctly does not resolve,
-silently). 704 tests
-passing (up from 702), zero regressions.
-
-**Verified live against the real running driver, real bundled
-`mudlib/`** (a scratch config on spare port 4132, a real Python TCP
-client, four temporary scratch objects, removed afterward, no config
-or master changes): a real `eval`-driven `parse_sentence("get sam", 0,
-0, (["sam": widget]))`, where `"sam"` is not `widget`'s own real noun id
-at all, correctly resolved to the real `widget` object when it was in
-the same room as the player (`r == 1`, `probe() == widget`); the
-identical nickname mapping to the identical real object, moved to a
-second, unreachable room, correctly did not resolve (`r == 0`, `probe()`
-stayed its own default `0`); and, confirming backward compatibility, the
-same player with no nicks argument still correctly failed to resolve
-`"sam"` while still correctly resolving `"get widget"` via its own real
-noun id. One real, self-inflicted test-authoring mistake caught and
-correctly diagnosed, not a driver bug: an early attempt called bare
-`parse_sentence()` directly from inside the `eval` body itself, whose
-own scratch object was never `parse_init()`'d, threw the real,
-correct "is not known by the parser" error, an uncaught dispatch error
-that correctly dropped only that one triggering connection, confirmed
-via the driver's own log and a follow-up `eval return 500+1;` on a fresh
-connection returning `501` immediately after. Scratch object files
-removed before stopping the scratch process, confirmed via `git status`
-that `mudlib/` is exactly as found.
-
-**Result: Phase 0 is now genuinely, fully complete**: all 16 rows,
-including 0.13a's own last remaining sub-gap, real and tested. `ROADMAP.md`
-row 0.13a and `COMPARISON.md`'s own Phase 0/`parse_*` sections updated to
-match.
-

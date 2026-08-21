@@ -12,19 +12,24 @@
 // rather than a separate authenticationService daemon (this plan's own
 // deliberately smaller first slice).
 //
-// Character concept intentionally NOT designed yet (that plan's own
-// item 3, still open): a successful login here still just clones/execs
+// Character concept (that plan's own item 3): resolved 2026-08-21, same
+// day as this file's own login integration -- see globals.h's own
+// CHARACTERS_DIR comment for the "merge, not a separate object"
+// decision, and /clone/user.c's own load_character()/save_character()
+// for the actual persistence. A successful login still clones/execs
 // /clone/user exactly the way the old flow did, only gated on a real
-// account now, and using the account name itself as the character name
-// (the same single-character-per-account shape this project's own
-// prior scratch-mudlib live verification already exercised for real,
-// see STATUS-ARCHIVE.md's "Confirm <name> as your account and first
-// character name?" walkthrough) -- no per-account character list, no
-// character creation prompts, no y/n account-name confirm step either
-// (a deliberate simplification against that same historical reference:
-// this slice's own scope, per the plan's build-ordering item 2, is
-// "account name -> password, no character concept yet", not a full
-// port of the fuller flow).
+// account now (and, since item 3, also carrying real persisted state
+// across a disconnect/reconnect), using the account name itself as the
+// character name (the same single-character-per-account shape this
+// project's own prior scratch-mudlib live verification already
+// exercised for real, see STATUS-ARCHIVE.md's "Confirm <name> as your
+// account and first character name?" walkthrough) -- no per-account
+// character list, no character creation prompts, no y/n account-name
+// confirm step either (a deliberate simplification against that same
+// historical reference: this slice's own scope, per the plan's build-
+// ordering item 2, is "account name -> password, no character concept
+// yet", not a full port of the fuller flow; item 3 added persistence,
+// still not multi-character or a character-creation flow, items 4/5).
 
 private string account_name;
 private int tries;
@@ -62,6 +67,16 @@ enter_game()
 #endif
     user = new(USER_OB);
     user->set_name(account_name);
+    // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 3: restores this
+    // character's own persisted state (currently just login_count) if a
+    // save file already exists (a returning account), or leaves every
+    // variable at its just-initialized default and starts counting from
+    // this login if not (a brand-new account, right after
+    // create_account() above) -- load_character() itself handles both
+    // cases identically, no branch needed here.
+    user->load_character(ACCOUNT_D->character_path(account_name));
+    write("Welcome back! You have logged in " + user->query_login_count() +
+        " time(s).\n");
     exec(user, this_object());
     user->setup();
 #ifndef __NO_ENVIRONMENT__

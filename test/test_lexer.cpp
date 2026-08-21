@@ -21977,6 +21977,7 @@ static const char* kLoginTestGlobalsH =
     "#define ACCOUNT_D      \"/single/account_d\"\n"
     "#define ACCOUNT_RECORD \"/single/account_record\"\n"
     "#define ACCOUNTS_DIR   \"/accounts\"\n"
+    "#define CHARACTERS_DIR \"/characters\"\n"
     "#define INPUT_NOECHO 1\n"
     "#define MAX_LOGIN_TRIES    3\n"
     "#define LOGIN_TIMEOUT_SECS 90\n"
@@ -22018,6 +22019,16 @@ static const char* kLoginTestAccountDC =
     "void ensure_dirs(string name) {\n"
     "    mkdir(ACCOUNTS_DIR);\n"
     "    mkdir(ACCOUNTS_DIR + \"/\" + lower_case(name)[0..0]);\n"
+    "}\n"
+    "\n"
+    "string character_path(string name) {\n"
+    "    name = lower_case(name);\n"
+    "    return CHARACTERS_DIR + \"/\" + name[0..0] + \"/\" + name;\n"
+    "}\n"
+    "\n"
+    "void ensure_character_dirs(string name) {\n"
+    "    mkdir(CHARACTERS_DIR);\n"
+    "    mkdir(CHARACTERS_DIR + \"/\" + lower_case(name)[0..0]);\n"
     "}\n"
     "\n"
     "int\n"
@@ -22081,7 +22092,9 @@ static const char* kLoginTestAccountDC =
 // account/login mechanism under test -- each test below seeds "tries"
 // implicitly at its real int-variable zero default and calls
 // got_account_name() directly instead, the same starting point logon()
-// itself would have left the object in).
+// itself would have left the object in). Updated 2026-08-21 (build
+// ordering item 3, character persistence) to match enter_game()'s own
+// new load_character()/query_login_count() calls.
 static const char* kLoginTestLoginC =
     "#include <globals.h>\n"
     "\n"
@@ -22107,6 +22120,9 @@ static const char* kLoginTestLoginC =
     "    write(\"\\n\");\n"
     "    user = new(USER_OB);\n"
     "    user->set_name(account_name);\n"
+    "    user->load_character(ACCOUNT_D->character_path(account_name));\n"
+    "    write(\"Welcome back! You have logged in \" + user->query_login_count() +\n"
+    "        \" time(s).\\n\");\n"
     "    exec(user, this_object());\n"
     "    user->setup();\n"
     "    user->move(START_LOC);\n"
@@ -22206,14 +22222,43 @@ static const char* kLoginTestLoginC =
     "    enter_game();\n"
     "}\n";
 
-// Minimal stand-ins, not real mudlib content -- see this section's own
-// header comment.
+// Minimal stand-in, not real mudlib content -- see this section's own
+// header comment. Extended 2026-08-21 (build ordering item 3) with the
+// real query_login_count()/load_character()/save_character() logic
+// verbatim from /clone/user.c (the actual persistence mechanism under
+// test), but without real user.c's own "inherit BASE" (irrelevant to
+// persistence, would also need a matching /inherit/base.c fixture just
+// to satisfy the inherit statement) -- remove() here calls
+// save_character() then destruct(this_object()) directly instead of
+// "base::remove()", the same net effect BASE's own remove() (inherit/
+// base.c) has, without needing that file's own unrelated id()/move()
+// machinery too.
 static const char* kLoginTestUserC =
+    "#include <globals.h>\n"
     "string name;\n"
+    "int login_count;\n"
     "void set_name(string n) { name = n; }\n"
     "string query_name() { return name; }\n"
+    "int query_login_count() { return login_count; }\n"
     "void setup() {}\n"
-    "void move(mixed dest) { move_object(dest); }\n";
+    "void move(mixed dest) { move_object(dest); }\n"
+    "\n"
+    "void load_character(string path) {\n"
+    "    restore_object(path);\n"
+    "    login_count++;\n"
+    "}\n"
+    "\n"
+    "private\n"
+    "void save_character() {\n"
+    "    string path;\n"
+    "    if (!query_name() || query_name() == \"\") return;\n"
+    "    path = ACCOUNT_D->character_path(query_name());\n"
+    "    ACCOUNT_D->ensure_character_dirs(query_name());\n"
+    "    save_object(path);\n"
+    "}\n"
+    "\n"
+    "void net_dead() { save_character(); }\n"
+    "void remove() { save_character(); destruct(this_object()); }\n";
 
 static const char* kLoginTestStartRoomC = "void create() {}\n";
 
@@ -22409,6 +22454,154 @@ static void testLoginInvalidAccountNameWithSlashReprompts() {
 
     ::close(fds[1]);
     std::cout << "testLoginInvalidAccountNameWithSlashReprompts OK\n";
+}
+
+// ---------------------------------------------------------------------
+// notes/ACCOUNT_LOGIN_PLAN.md build ordering item 3 (character
+// persistence, 2026-08-21): the character-object-shape design question
+// resolved as "merge" (globals.h's own CHARACTERS_DIR comment) --
+// /clone/user.c itself is the persisted character object, real
+// save_object()/restore_object() called directly on itself from
+// load_character()/save_character(), reachable from outside via
+// Connection::boundObject() the same way exec() left it after
+// enter_game() destructed the login object that got it there.
+// ---------------------------------------------------------------------
+
+static void testCharacterLoginCountPersistsAcrossReconnectViaNetDead() {
+    LoginTestHarness t;
+
+    // First connection: brand-new account, drives the full creation
+    // flow directly (same pattern testLoginAccountCreationFlowEnd
+    // ToEndCreatesRealAccountFile above already established) through to
+    // enter_game(). login_count's own default-int-zero start plus
+    // load_character()'s unconditional "++" is what makes a brand-new
+    // character's very first login read back as 1, not 0.
+    auto login1 = t.harness.objects.cloneObject("/clone/login");
+    assert(login1 != nullptr);
+    int fds1[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds1) == 0);
+    amlp::Connection conn1(fds1[0]);
+    conn1.attach(login1);
+
+    amlp::OutputContext::set(&conn1);
+    t.harness.vm.callFunction(login1, "got_account_name",
+        {amlp::Value(std::string("returningplayer"))});
+    assert(conn1.takePendingInputTo()->function == "got_new_password");
+    t.harness.vm.callFunction(login1, "got_new_password",
+        {amlp::Value(std::string("goodpass123"))});
+    assert(conn1.takePendingInputTo()->function == "got_confirm_password");
+    t.harness.vm.callFunction(login1, "got_confirm_password",
+        {amlp::Value(std::string("goodpass123"))});
+    amlp::OutputContext::set(nullptr);
+
+    assert(login1->isDestructed());
+    auto user1 = conn1.boundObject();
+    assert(user1 != nullptr);
+    amlp::Value count1 = t.harness.vm.callFunction(user1, "query_login_count", {});
+    assert(std::get<int64_t>(count1.data) == 1);
+
+    // Simulate link death: the real driver's own net_dead() apply,
+    // called directly the same way Server.cpp's real disconnect path
+    // calls it (src/net/Server.cpp's own "vm.callFunction(obj,
+    // \"net_dead\", {})"), persisting login_count to disk.
+    t.harness.vm.callFunction(user1, "net_dead", {});
+    ::close(fds1[1]);
+
+    std::ifstream characterFile(t.harness.tempDir + "/characters/r/returningplayer.o");
+    assert(characterFile.good());
+    std::string contents((std::istreambuf_iterator<char>(characterFile)),
+        std::istreambuf_iterator<char>());
+    assert(contents.find("returningplayer") != std::string::npos);
+
+    // Second, independent connection, same account: a real login should
+    // restore login_count from disk (1) and increment it (2), not
+    // restart from 0.
+    auto login2 = t.harness.objects.cloneObject("/clone/login");
+    assert(login2 != nullptr);
+    int fds2[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds2) == 0);
+    amlp::Connection conn2(fds2[0]);
+    conn2.attach(login2);
+
+    amlp::OutputContext::set(&conn2);
+    t.harness.vm.callFunction(login2, "got_account_name",
+        {amlp::Value(std::string("returningplayer"))});
+    assert(conn2.takePendingInputTo()->function == "got_login_password");
+    t.harness.vm.callFunction(login2, "got_login_password",
+        {amlp::Value(std::string("goodpass123"))});
+    amlp::OutputContext::set(nullptr);
+
+    assert(login2->isDestructed());
+    auto user2 = conn2.boundObject();
+    assert(user2 != nullptr);
+    amlp::Value count2 = t.harness.vm.callFunction(user2, "query_login_count", {});
+    assert(std::get<int64_t>(count2.data) == 2);
+
+    ::close(fds2[1]);
+    std::cout << "testCharacterLoginCountPersistsAcrossReconnectViaNetDead OK\n";
+}
+
+static void testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead() {
+    // command/quit.c's own real "previous_object()->remove()" path
+    // (BASE's own remove(), overridden in user.c to save first) is a
+    // genuinely separate code path from net_dead() above -- both need
+    // to persist independently, since real players disconnect both
+    // ways. Same shape as the test above, using "remove" as the
+    // simulated disconnect instead of "net_dead", proving remove()'s
+    // own save_character() call is what is actually responsible, not
+    // net_dead() incidentally covering for it.
+    LoginTestHarness t;
+
+    auto login1 = t.harness.objects.cloneObject("/clone/login");
+    assert(login1 != nullptr);
+    int fds1[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds1) == 0);
+    amlp::Connection conn1(fds1[0]);
+    conn1.attach(login1);
+
+    amlp::OutputContext::set(&conn1);
+    t.harness.vm.callFunction(login1, "got_account_name",
+        {amlp::Value(std::string("questsmith"))});
+    assert(conn1.takePendingInputTo()->function == "got_new_password");
+    t.harness.vm.callFunction(login1, "got_new_password",
+        {amlp::Value(std::string("anotherpass1"))});
+    assert(conn1.takePendingInputTo()->function == "got_confirm_password");
+    t.harness.vm.callFunction(login1, "got_confirm_password",
+        {amlp::Value(std::string("anotherpass1"))});
+    amlp::OutputContext::set(nullptr);
+
+    auto user1 = conn1.boundObject();
+    assert(user1 != nullptr);
+
+    // "remove" (the real command/quit.c path), not "net_dead": this is
+    // the assertion that actually distinguishes this test from the one
+    // above.
+    t.harness.vm.callFunction(user1, "remove", {});
+    assert(user1->isDestructed());
+    ::close(fds1[1]);
+
+    auto login2 = t.harness.objects.cloneObject("/clone/login");
+    assert(login2 != nullptr);
+    int fds2[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds2) == 0);
+    amlp::Connection conn2(fds2[0]);
+    conn2.attach(login2);
+
+    amlp::OutputContext::set(&conn2);
+    t.harness.vm.callFunction(login2, "got_account_name",
+        {amlp::Value(std::string("questsmith"))});
+    assert(conn2.takePendingInputTo()->function == "got_login_password");
+    t.harness.vm.callFunction(login2, "got_login_password",
+        {amlp::Value(std::string("anotherpass1"))});
+    amlp::OutputContext::set(nullptr);
+
+    auto user2 = conn2.boundObject();
+    assert(user2 != nullptr);
+    amlp::Value count2 = t.harness.vm.callFunction(user2, "query_login_count", {});
+    assert(std::get<int64_t>(count2.data) == 2);
+
+    ::close(fds2[1]);
+    std::cout << "testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead OK\n";
 }
 
 int main() {
@@ -23146,6 +23339,8 @@ int main() {
     testLoginExistingAccountCorrectPasswordOnASecondConnectionSucceeds();
     testLoginWrongPasswordRejectedAndDisconnectsAfterMaxLoginTries();
     testLoginInvalidAccountNameWithSlashReprompts();
+    testCharacterLoginCountPersistsAcrossReconnectViaNetDead();
+    testCharacterLoginCountPersistsThroughRemoveNotOnlyNetDead();
     std::cout << "all tests passed\n";
     return 0;
 }

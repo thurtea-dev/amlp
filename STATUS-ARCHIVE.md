@@ -57,6 +57,117 @@ recent-sessions rule after this session's new entry (login integration,
 build ordering item 2 of `notes/ACCOUNT_LOGIN_PLAN.md`). Same
 discipline, same insertion placement as the five passes above.
 
+**Seventh archival pass, 2026-08-21 (later still the same day):** moved
+the single oldest entry (the "built row 0.13a's own last remaining
+Phase 0 sub-gap, parse_sentence()'s 4th nicks argument" session) into
+this file, verbatim, no content altered, to keep `STATUS.md` to its own
+5-most-recent-sessions rule after this session's new entry (the
+Mapping/lambda-recursion external-review fact-check, plus login
+integration's build ordering item 3, character persistence, of
+`notes/ACCOUNT_LOGIN_PLAN.md`). Same discipline, same insertion
+placement as the six passes above.
+
+**2026-08-20 (a further session): built row 0.13a's own last remaining
+Phase 0 sub-gap, `parse_sentence()`'s 4th `nicks` argument: real
+`add_nicknames()`/`expand_node()`, already concretely scoped from a
+prior session's own citations, re-confirmed against the real source
+before building anything (704 tests, up from 702).**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Re-confirmed the three cited real source sections before trusting
+them.** `add_nicknames()` (`packages/parser.c:1095-1108`) confirmed
+exactly as the prior session's own note had it, plus one detail the
+note left implicit: `mn->values[0]` is the mapping node's own KEY slot,
+not a value column, confirmed against real `mapping.h`'s own
+`mapping_node_t::values[2]` and `mapping.c:39`'s own
+`MAP_SVAL_HASH(mn->values[0])` (a node is hashed by its own key, the
+only way lookup works at all), settling "for string keys" as
+unambiguous. `expand_node()` re-read in full: the real function is
+`:1302-1323`, four lines longer than the prior session's own `:1302-1319`
+citation (the extra lines are the function's own closing brace, not
+missed logic). Two real quirks confirmed directly and ported faithfully
+rather than smoothed over: the `he->flags &= ~HV_NICKNAME;` clear is
+unconditional, the function's own first statement, before any success/
+failure check, so a *failed* resolution permanently disables
+re-attempting that same hash entry for the rest of the call, exactly
+like a successful one, not just an optimization for the happy path; and
+real `find_string_in_mapping()` (`mapping.c:830-848`) never returns
+null, it returns a static `&const0u` on a missing key, so real code's
+own single `sv->type != T_OBJECT` check already covers "key missing"
+and "key present but not an object" together, ported here as the two
+real cases it actually is since this driver's own `Mapping` has no
+equivalent sentinel to reuse.
+
+**What was built.** `LoadedObjectSet::loadObjects()`/
+`ParserPackage::parseSentence()` both gained a `const Value* nicks =
+nullptr` parameter, matching `envArray`'s own already-established shape
+exactly. New `addNicknames()` (`ParserPackage.cpp`) ports
+`add_nicknames()` at the real call site inside `loadObjects()`, right
+after the fixed `"my"` adjective entry, before the `"num_people"` loop,
+matching real `parser.c:1162-1163` exactly. New `expandNode()` ports
+`expand_node()`, called from `parseObj()`'s own word loop at the real
+position, right before the `isNoun` check gets a chance to read
+whatever it may have just set. `SentenceSession` gained a `nicks`
+field, same per-call-scoped shape as `envArray`, confirmed this is
+not a coincidental simplification but the real observable contract:
+real `free_parse_globals()` (`parser.c:621-639`) explicitly resets
+`parse_nicks = 0;` after every single `parse_sentence()` call, so real
+code's own end-to-end behavior already is "fresh per call, nothing
+leaks across calls." Also confirmed `parse_my_rules()` never resolves a
+nickname in real code either (no `nicks` argument of its own, and
+`parse_nicks` is always 0 by the time it would run): this driver's own
+`parseMyRules()` needed no change at all. `EfunTable.cpp`'s
+`parse_sentence` registration now extracts and passes the real 4th
+argument. One incidental stale comment fixed along the way:
+`addHashEntry()`'s own header comment cited `mark_hash_entry()` as its
+only other real caller; confirmed by grepping the whole vendored driver
+tree that `mark_hash_entry()` (`packages/parser.c:1015-1037`) is itself
+real dead code in FluffOS (declared, defined, zero call sites anywhere)
+-- the same category as `get_bb_uid()`/`multiple_adj()`/`err_obs()`
+already found dead elsewhere in this row's own investigation, corrected
+rather than left implying otherwise.
+
+2 new regression tests (`test/test_lexer.cpp`):
+`testParseSentenceNicknameResolvesToAnAlreadyLoadedObject` (a nickname
+word that is not any real noun id of the target object at all resolves
+correctly when the object is reachable) and
+`testParseSentenceNicknamePresentButObjectNotYetLoadedDoesNotResolve`
+(the identical nickname mapping to the identical real object, sitting
+in an unrelated, unreachable room: correctly does not resolve,
+silently). 704 tests
+passing (up from 702), zero regressions.
+
+**Verified live against the real running driver, real bundled
+`mudlib/`** (a scratch config on spare port 4132, a real Python TCP
+client, four temporary scratch objects, removed afterward, no config
+or master changes): a real `eval`-driven `parse_sentence("get sam", 0,
+0, (["sam": widget]))`, where `"sam"` is not `widget`'s own real noun id
+at all, correctly resolved to the real `widget` object when it was in
+the same room as the player (`r == 1`, `probe() == widget`); the
+identical nickname mapping to the identical real object, moved to a
+second, unreachable room, correctly did not resolve (`r == 0`, `probe()`
+stayed its own default `0`); and, confirming backward compatibility, the
+same player with no nicks argument still correctly failed to resolve
+`"sam"` while still correctly resolving `"get widget"` via its own real
+noun id. One real, self-inflicted test-authoring mistake caught and
+correctly diagnosed, not a driver bug: an early attempt called bare
+`parse_sentence()` directly from inside the `eval` body itself, whose
+own scratch object was never `parse_init()`'d, threw the real,
+correct "is not known by the parser" error, an uncaught dispatch error
+that correctly dropped only that one triggering connection, confirmed
+via the driver's own log and a follow-up `eval return 500+1;` on a fresh
+connection returning `501` immediately after. Scratch object files
+removed before stopping the scratch process, confirmed via `git status`
+that `mudlib/` is exactly as found.
+
+**Result: Phase 0 is now genuinely, fully complete**: all 16 rows,
+including 0.13a's own last remaining sub-gap, real and tested. `ROADMAP.md`
+row 0.13a and `COMPARISON.md`'s own Phase 0/`parse_*` sections updated to
+match.
+
 **2026-08-20 (a further session): audited the prior session's own two
 real-reset/clean_up fixes for independent regression coverage (found and
 fixed a real gap, 2 tests were not one apiece), then produced a full

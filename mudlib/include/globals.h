@@ -55,6 +55,24 @@
 #define ACCOUNT_RECORD "/single/account_record"
 #define ACCOUNTS_DIR   "/accounts"
 
+// notes/ACCOUNT_LOGIN_PLAN.md build ordering item 3 (character
+// persistence, 2026-08-21): the character-object shape's own open
+// design question (item 3's "Proposed architecture" note) is resolved
+// as "merge" -- /clone/user.c stays the one persisted character object
+// (real save_object()/restore_object() called directly on itself, the
+// same current_object()-must-be-the-target reasoning account_record.c's
+// own header comment already established, and user.c is already a
+// fresh per-connection clone the same way account_record.c is a fresh
+// per-operation clone, so no third "record" object is needed the way
+// account_d.c needed one), not a separate character object account_d
+// tracks by file reference. CHARACTERS_DIR is bucketed the same way as
+// ACCOUNTS_DIR, same rationale, and reuses account_d.c's own
+// character_path()/ensure_character_dirs() rather than duplicating the
+// bucketing rule in user.c/login.c too (account_record.c's own header
+// comment already established why one file should own a bucketing rule
+// rather than two files agreeing to keep a copy in sync).
+#define CHARACTERS_DIR "/characters"
+
 // notes/ACCOUNT_LOGIN_PLAN.md build ordering item 2 (login integration,
 // 2026-08-21): the real input_to() flag bit, matching real comm.h's own
 // "#define I_NOECHO 0x1 /* input_to flag */" (confirmed already live in
