@@ -9,6 +9,204 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-21 (a fresh session, later still): the Phase 2 cold-start
+scoping session recommended and deferred for several sessions running.
+Read every Phase 2 row's own `src/*/instruct.md` plus `src/gc/instruct.md`
+(explicitly requested alongside Phase 2 despite living under Phase 3)
+against this driver's actual current architecture, not the abstract
+version of each feature. Scoping only, no implementation, matching the
+same discipline `privilege_violation()`/`parse_*` each got before any
+code was written for either. All 22 Phase 2 rows plus row 3.3 (GC) in
+`ROADMAP.md` rewritten from one-line stubs to real, cited breakdowns.
+727 tests, unchanged, this is a docs-only session.**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Two findings that apply across the whole phase, not just one row,
+found while reading rather than assumed going in.** First: the
+`src/*/instruct.md` files for Phase 2 are not uniformly current.
+`src/gc/instruct.md`'s own testing section cites "374 tests" as the
+regression baseline to protect -- this repo is at 727 today, meaning
+that file predates roughly half of this project's own real history,
+confirmed stale by a concrete number, not an impression. `src/persist/
+instruct.md` and `src/lsp/instruct.md` both assert `nlohmann/json` is
+"already a dependency"; grepped every real `CMakeLists.txt` in this
+repo directly, it is not, anywhere, and `INSTALL.md`'s own confirmed
+prerequisite list (`pcre2-devel`, `libxcrypt-devel` only) does not
+mention it either -- both files need that correction whenever either
+row is actually picked up. `src/apply/instruct.md`, by contrast, carries
+real, dated 2026-08-22 corrections cross-referencing actually-completed
+Phase 1 rows accurately: the staleness is per-file, not uniform, exactly
+matching `CLAUDE.md`'s own standing warning about these files, now with
+concrete evidence behind it rather than just the warning itself. Second:
+Phase 2 is not corpus-driven the way Phase 0/1 was, by this project's
+own repeated prior framing, and a fresh corpus check this session
+confirms why for most of it: zero real hits for `json_encode`/
+`json_decode`/`http_get`/`http_post` anywhere in `temp/`, and every
+`hash(`-substring hit checked was a `rehash`/`eventRehash` false
+positive, not a real efun call. Two real exceptions were found, and they
+matter for the recommendation below.
+
+**Row-by-row findings, full detail in `ROADMAP.md` itself (each row's
+own cell), summarized here rather than duplicated in full.**
+
+- **2a Persistence (2.1-2.4):** 2.1's own real hard problem, not named
+  in its instruct.md, is reference identity -- a world snapshot cannot
+  reuse `save_object()`'s own "object references don't survive a save"
+  shortcut, since two saved objects referencing a third live one need
+  that reference to resolve to the *same* restored object. A real,
+  unsolved design problem, not an extension of existing code. Large,
+  multi-session. 2.2 depends on 2.1's format; its own real risk is
+  integration into `ObjectManager`'s cache lookup, the hottest path in
+  this driver. Medium-large. 2.3 (hotboot) has zero `fork()`/`exec()`
+  precedent anywhere in `src/net` today, and explicitly depends on 2.1.
+  Large, gated. 2.4 is mostly integration testing once 2.1 exists;
+  small, not independently schedulable.
+- **2b Concurrency (2.5-2.8):** 2.5 rearchitects `Scheduler::run()`
+  (492 real lines) and needs new `VM::run()` (2,743 real lines) suspend
+  support -- every one of 727 tests exercises `VM::run()`, the highest
+  blast-radius change available in this phase. Large, highest risk. 2.6
+  and 2.7 are real but fully gated on 2.5 landing first. 2.8 (Hydra) has
+  a real, previously-undocumented hard dependency, found this session:
+  its own instruct.md cites row 1.12's checkpoint/rollback mechanism,
+  confirmed still `[ ]` and itself permanently deferred as a zero-
+  evidence, comparison-only DGD row. Effectively blocked, not just large.
+- **2c Apply cache + JIT (2.9-2.11):** 2.9 is the most concretely
+  scoped row in all of Phase 2, and has real, already-shipped
+  motivation: `heart_beat()` already walks `findFunctionInChain()` on
+  every living object every tick, live since 2026-08-07. Small-medium,
+  real evidence. 2.10 was already investigated and answered by an
+  earlier session, not something this row needs to re-derive --
+  `Value.hpp:160-174`'s own closure-design comment concludes eager vs.
+  lazy resolution are "behaviorally identical for anything this driver
+  runs." No correctness motivation, no measured performance motivation
+  anywhere in this project. **Recommend not building until real
+  evidence exists**, the same standard applied to every zero-evidence
+  Phase 1 row. 2.11 (JIT) needs LLVM 17+, by far the largest new
+  dependency proposed anywhere in Phase 2 (this driver's entire current
+  real dependency footprint is `pcre2-devel` + `libxcrypt-devel`). Its
+  own stated precondition, "bit-identical output for every test," is a
+  real if soft gate. Genuinely unknown size, the single largest and
+  riskiest item in the phase.
+- **2d Efun breadth (2.12-2.18):** 2.12 is the smallest-delta row in
+  all of Phase 2 -- `pcre2-devel` is already linked, `regexp()`/
+  `regexplode()`/`regexp_assoc()` already real and working; this is
+  extending a proven pattern, not standing up anything new. 2.13 (TLS)
+  needs a new OpenSSL dependency, contained to `src/net`. 2.14
+  (WebSocket) has **the strongest real corpus/deployment evidence found
+  anywhere in Phase 2**: `temp/dead-souls/config.deadsouls` and
+  `temp/nightmare3/nm3.cfg` both configure a real production websocket
+  listening port, and `dead-souls/lib/www/example.js` ships real
+  browser JS expecting it to work; also found, worth deciding
+  explicitly rather than assuming: its own instruct.md body never
+  actually references TLS despite the section title, a plain `ws://`
+  implementation may not need 2.13 first at all. 2.15 (SQLite) has
+  **the single strongest real mudlib-code-level evidence in this whole
+  phase**: `temp/core-lib`'s own README and docs describe `db_connect`/
+  `db_exec`/`db_fetch`/`db_error` directly as real driver efuns, and two
+  real files under `lib/modules/secure/dataServices/` contain genuine
+  `db_exec()` call sites -- a corpus this project already treats as its
+  primary LDMud reference directly depends on this efun family. SQLite3
+  is a far lighter dependency than OpenSSL or LLVM. 2.16 (hash efuns)
+  found this driver's own real hashing need already solved by `crypt()`
+  (this project's own shipped `account_d.c`); the specific SHA/MD5/
+  BLAKE2/bcrypt family has zero direct corpus evidence, `bcrypt` as an
+  internal `crypt()` upgrade is a real want, not corpus evidence, and
+  should be named as such if ever picked up. 2.17 (JSON) needs
+  `nlohmann/json`, confirmed not currently a dependency (see the
+  phase-wide finding above); zero external corpus evidence, real value
+  is as a dependency for 2.18/2.22, not standalone. 2.18 (HTTP) is
+  hard-blocked on 2.5/2.6 plus needs libcurl; zero corpus evidence.
+- **2e Developer experience (2.19-2.22):** 2.19 (LSP) needs
+  `nlohmann/json` (same correction as 2.17); the one row in this whole
+  phase with a plausible **direct benefit to this project's own future
+  development velocity** rather than corpus/deployment evidence, a
+  different but real kind of justification worth naming explicitly. Its
+  own instruct.md already gives a real bounded first slice (diagnostics
+  only) distinct from the full large vision. 2.20 (structured errors)
+  needs no new dependency by itself, could be hand-rolled; only real
+  value realized paired with 2.19 or 2.22, speculative alone. 2.21
+  (hot-reload) is narrower than its own instruct.md suggests, a real
+  finding this session: `ObjectManager::reloadObject()` **already
+  exists and is real** (`ObjectManager.cpp:978`+), already doing the
+  hard, risky parts (shadow-chain safety, `LivingNameRegistry` safety,
+  `create()` re-run) that real FluffOS `update` does; what is actually
+  missing is narrower -- a force-recompile path and name-based variable
+  migration layered on top, not a rebuild from scratch. Also found:
+  `LivingNameRegistry` already stores `weak_ptr<LpcObject>`, so this
+  row's own "swap `program_`/`variables_` in place on the same
+  `shared_ptr`" plan needs no changes elsewhere. Medium, smaller than
+  its own instruct.md implies. 2.22 (test runner) is small and
+  mechanical for the core assertion efuns; only its own "JSON file for
+  CI" detail touches the same dependency question as 2.17/2.19/2.20,
+  and is separable from the rest.
+- **Row 3.3 (GC), Phase 3, scoped alongside Phase 2 per this session's
+  own explicit request:** confirmed stale the same concrete way as
+  `src/gc/instruct.md`'s sibling files ("374 tests" vs. 727 today).
+  Grepped every real `shared_ptr<LpcObject>`/`Array`/`Mapping`/`Closure`
+  occurrence across `src/`+`include/` directly: 525 real hits today, a
+  surface roughly double what existed when the instruct.md's own
+  5-layer migration plan was written, meaning layer 4 (`LpcObject`
+  itself, touching `ObjectManager`, `InteractiveRegistry`,
+  `LivingNameRegistry`, `Scheduler`, and `Server` all at once per that
+  file's own text) is almost certainly larger in real scope today.
+  Already, by the instruct.md's own words, "the single most invasive
+  change in the roadmap" -- not re-litigated this session, no evidence
+  surfaced to soften that framing. Large, multi-session, likely larger
+  now than its own estimate, the single riskiest item named in either
+  phase this session touched.
+
+**Recommended ordering, reasoning below, not just a list.** Three real
+tiers, not a flat ranking of 22+1 items:
+
+**Tier 1, real evidence, small-to-medium, buildable without a further
+scoping session: 2.15 (SQLite) first, then 2.12 (PCRE extension) and 2.9
+(apply cache) as low-risk companions or immediate follow-ons.** 2.15 is
+the strongest real evidence found anywhere in this phase, in either the
+mudlib-call-site sense (2.15) or the deployment-config sense (2.14) --
+picked 2.15 over 2.14 specifically because it is mudlib-*code*-level
+evidence (a real corpus's own real logic depends on it), a category
+closer to how every Phase 0/1 priority call was actually made, and
+because SQLite3 is a lighter, more common dependency than the
+OpenSSL 2.14 more plausibly wants first (even though 2.14's own
+instruct.md text does not strictly require TLS, per the finding above).
+2.12 and 2.9 are not evidence-tied to 2.15 at all, named alongside it
+only because they share the same real property that actually matters
+for sequencing: genuinely small, genuinely bounded, buildable today with
+no further design investigation, unlike everything below.
+
+**Tier 2, real but each needs its own dedicated scoping/design session
+before any code, the same discipline `privilege_violation()`/`parse_*`
+each got: 2.1 (statedump's reference-identity design), 2.5 (the
+coroutine scheduler rearchitecture), 2.11 (JIT's own toolchain
+question), and row 3.3 (GC's migration plan against the real, larger-
+than-estimated current codebase).** These four are not "small
+follow-ons" to Tier 1 -- each is its own real, large, multi-session
+body of work this single scoping pass correctly bounded but did not
+(and should not) design in full. Whoever picks up Phase 2's own next
+big investment after Tier 1 should treat each of these four as needing
+the same kind of cold-start investigation this session itself was, not
+jump straight to code from this session's own summary.
+
+**Tier 3, real but either blocked on something else, or explicitly not
+justified yet, or only valuable bundled with something else -- not
+independently worth picking up on their own:** 2.2-2.4, 2.6-2.8, 2.13/
+2.14/2.16-2.18, 2.19/2.20 (a real project-benefit case exists for 2.19,
+but its own full vision is large; its own bounded diagnostics-only
+slice is arguably Tier 1-adjacent if a future session wants exactly
+that narrower scope), 2.21, 2.22. **2.10 and 2.8 specifically are
+recommended against for now**, not merely deprioritized: 2.10 has an
+earlier session's own direct finding that it changes nothing observable
+for anything this driver runs, and 2.8 is architecturally blocked on a
+permanently-deferred row (1.12) this project has already decided not to
+build absent new evidence.
+
+727 tests passing, unchanged -- this was a docs-only session, no source
+touched, confirmed by re-running the suite after the `ROADMAP.md` edits
+rather than assumed.
+
 **2026-08-21 (a further session, continued the same day, the last
 session-worth of the day): `notes/ACCOUNT_LOGIN_PLAN.md`'s build
 ordering item 5, character selection, bounded to selection-only per
