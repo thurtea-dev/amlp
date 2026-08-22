@@ -26,21 +26,26 @@ files under `src/*/CMakeLists.txt` (not assumed):
 - `libcrypt` development files (the `crypt()` password-hashing
   function): `src/efun/CMakeLists.txt` links a plain `crypt` target
   (`-lcrypt`) into the `efun` library.
+- `sqlite3` development headers (ROADMAP.md row 2.15's real db_* efun
+  family, 2026-08-21): the same file also uses
+  `pkg_check_modules(SQLITE3 REQUIRED sqlite3)`, and links
+  `${SQLITE3_LIBRARIES}` into the `efun` library.
 
 On Fedora:
 
 ```
-sudo dnf install gcc-c++ cmake pkgconf-pkg-config pcre2-devel libxcrypt-devel
+sudo dnf install gcc-c++ cmake pkgconf-pkg-config pcre2-devel libxcrypt-devel sqlite-devel
 ```
 
 (`libxcrypt-devel` is what actually provides `libcrypt.so`/`crypt.h` on
 Fedora; `pcre2-devel` provides the `libpcre2-8` pkg-config file
-`pkg_check_modules` looks for.)
+`pkg_check_modules` looks for; `sqlite-devel` provides the `sqlite3`
+pkg-config file.)
 
 On a Debian/Ubuntu-family system the equivalent packages are:
 
 ```
-sudo apt install g++ cmake pkg-config libpcre2-dev libcrypt-dev
+sudo apt install g++ cmake pkg-config libpcre2-dev libcrypt-dev libsqlite3-dev
 ```
 
 No other external libraries are linked anywhere in the tree (checked

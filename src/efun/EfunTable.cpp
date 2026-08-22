@@ -1,4 +1,5 @@
 #include "amlp/efun/EfunTable.hpp"
+#include "amlp/efun/DbRegistry.hpp"
 #include "amlp/core/Errors.hpp"
 #include "amlp/vm/VM.hpp"
 #include "amlp/config/Config.hpp"
@@ -8936,6 +8937,113 @@ void registerCoreEfuns() {
             if (i != j) std::swap(arr->items[i], arr->items[j]);
         }
         return Value(arr);
+    });
+
+    // --- db_* (ROADMAP.md row 2.15, scoped 2026-08-21) ----------------
+    // Real LDMud's own db_* family (temp/ldmud/src/pkg-mysql.c), not
+    // FluffOS's -- see DbRegistry.hpp's own header comment for the full
+    // evidence chain (core-lib's own README.md states it targets LDMud;
+    // real vendored FluffOS 2.9 has a completely different db_connect/
+    // db_exec/db_fetch signature shape and no db_error/db_handles/
+    // db_conv_string at all). Backed by SQLite (DbRegistry) rather than
+    // a live MySQL server. Every real call site here mirrors
+    // pkg-mysql.c's own "check_privilege(name, MY_TRUE, sp)" first --
+    // VM::privilegeViolation("mysql", {efun name}) throwing on denial,
+    // matching real check_privilege()'s own raise_error==MY_TRUE for
+    // every one of these efuns (confirmed directly, every real call site
+    // in pkg-mysql.c passes MY_TRUE). db_conv_string is the one real
+    // exception -- its own real doc/source has no check_privilege() call
+    // at all, so it is not gated here either.
+
+    // int db_connect(string database, string|void user, string|void password)
+    t.registerEfun("db_connect", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("db_connect: expected a database name string");
+        }
+        if (!vm.privilegeViolation("mysql", {Value(std::string("db_connect"))})) {
+            throw LpcRuntimeError("db_connect(): Privilege violation.");
+        }
+        const std::string& database = std::get<std::string>(args[0].data);
+        std::string user, password;
+        bool hasUser = false, hasPassword = false;
+        if (args.size() > 1 && std::holds_alternative<std::string>(args[1].data)) {
+            user = std::get<std::string>(args[1].data);
+            hasUser = true;
+        }
+        if (args.size() > 2 && std::holds_alternative<std::string>(args[2].data)) {
+            password = std::get<std::string>(args[2].data);
+            hasPassword = true;
+        }
+        int handle = DbRegistry::connect(database, user, hasUser, password, hasPassword);
+        return Value(static_cast<int64_t>(handle));
+    });
+
+    // int db_exec(int handle, string statement)
+    t.registerEfun("db_exec", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<int64_t>(args[0].data) ||
+            !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("db_exec: expected (int handle, string statement)");
+        }
+        if (!vm.privilegeViolation("mysql", {Value(std::string("db_exec"))})) {
+            throw LpcRuntimeError("db_exec(): Privilege violation.");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        const std::string& stmt = std::get<std::string>(args[1].data);
+        return Value(static_cast<int64_t>(DbRegistry::exec(handle, stmt)));
+    });
+
+    // mixed db_fetch(int handle)
+    t.registerEfun("db_fetch", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("db_fetch: expected an int handle argument");
+        }
+        if (!vm.privilegeViolation("mysql", {Value(std::string("db_fetch"))})) {
+            throw LpcRuntimeError("db_fetch(): Privilege violation.");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        return DbRegistry::fetch(handle);
+    });
+
+    // int db_close(int handle)
+    t.registerEfun("db_close", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("db_close: expected an int handle argument");
+        }
+        if (!vm.privilegeViolation("mysql", {Value(std::string("db_close"))})) {
+            throw LpcRuntimeError("db_close(): Privilege violation.");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        return Value(static_cast<int64_t>(DbRegistry::close(handle)));
+    });
+
+    // string|int db_error(int handle)
+    t.registerEfun("db_error", [](VM& vm, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<int64_t>(args[0].data)) {
+            throw LpcRuntimeError("db_error: expected an int handle argument");
+        }
+        if (!vm.privilegeViolation("mysql", {Value(std::string("db_error"))})) {
+            throw LpcRuntimeError("db_error(): Privilege violation.");
+        }
+        int handle = static_cast<int>(std::get<int64_t>(args[0].data));
+        return DbRegistry::error(handle);
+    });
+
+    // int *db_handles()
+    t.registerEfun("db_handles", [](VM& vm, std::vector<Value>&) -> Value {
+        if (!vm.privilegeViolation("mysql", {Value(std::string("db_handles"))})) {
+            throw LpcRuntimeError("db_handles(): Privilege violation.");
+        }
+        auto result = std::make_shared<Array>();
+        for (int h : DbRegistry::handles()) result->items.emplace_back(static_cast<int64_t>(h));
+        return Value(result);
+    });
+
+    // string db_conv_string(string str)
+    t.registerEfun("db_conv_string", [](VM&, std::vector<Value>& args) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0].data)) {
+            throw LpcRuntimeError("db_conv_string: expected a string argument");
+        }
+        return Value(DbRegistry::convString(std::get<std::string>(args[0].data)));
     });
 }
 

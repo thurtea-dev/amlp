@@ -277,3 +277,18 @@ int valid_hide() {
 int valid_compile_to_c() {
     return 1;
 }
+
+// This driver's own privilege_violation() gate (real interpret.c:8492-
+// 8722, VM::privilegeViolation() -- see ROADMAP.md row 2.15's own scoped
+// note): with no lfun of this name defined at all, every gated efun call
+// hard-errors instead of getting a real answer, matching real LDMud's
+// "!svp" branch. Permissive like valid_bind()/valid_hide() just above --
+// this mudlib is a single-user test/demo library, not a real multi-user
+// deployment ("This is really unsafe, but testsuite uses it..." -- the
+// same character this lfun matches, not new laxness this row invented).
+// First real trigger point: the db_* efun family (row 2.15), which
+// otherwise could never be exercised live against this bundled mudlib at
+// all -- no db_* call site defined this lfun before this row.
+int privilege_violation(string what, mixed who, mixed arg) {
+    return 1;
+}

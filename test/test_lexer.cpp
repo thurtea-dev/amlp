@@ -10,6 +10,7 @@
 #include "amlp/config/Config.hpp"
 #include "amlp/efun/EfunTable.hpp"
 #include "amlp/efun/ParserPackage.hpp"
+#include "amlp/efun/DbRegistry.hpp"
 #include "amlp/core/Errors.hpp"
 #include "amlp/net/Connection.hpp"
 #include "amlp/net/OutputContext.hpp"
@@ -23136,6 +23137,251 @@ static void testGotCharacterSelectionRejectsOutOfRangeAndNonNumericChoices() {
     std::cout << "testGotCharacterSelectionRejectsOutOfRangeAndNonNumericChoices OK\n";
 }
 
+// --- db_* (ROADMAP.md row 2.15, scoped 2026-08-21) --------------------
+// Real LDMud db_* family backed by SQLite (DbRegistry.hpp's own header
+// comment has the full evidence chain: core-lib is a real LDMud mudlib,
+// not FluffOS, and its own call sites are exactly this efun family).
+// Every test below grants "mysql" via a permissive master
+// privilege_violation() lfun -- the gate itself is covered separately by
+// testDbConnectDeniedByPrivilegeViolationThrows() and
+// testDbConnectWithNoMasterPrivilegeViolationLfunHardErrors() below,
+// matching this row's own real evidence source dialect ("dialect:
+// ldmud\n", the same convention the existing bind_lambda privilege-
+// violation tests above already use for this same real mechanism).
+
+// Full happy-path round trip through every efun in this slice: connect
+// to a fresh scratch file (auto-created, matching real SQLite semantics
+// -- see DbRegistry.hpp's own connect() comment on why this diverges
+// from real MySQL's "must already exist" contract), create a table,
+// insert two rows, select them back one at a time via fetch(), then
+// close. Exercises db_handles() mid-connection too (open, populated;
+// gone after close()).
+static void testDbConnectExecFetchCloseRoundTripAgainstARealScratchSqliteFile() {
+    amlp::DbRegistry::resetForTests();
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/db_probe.c",
+        "int do_connect(string path) { return db_connect(path); }\n"
+        "int do_exec(int h, string sql) { return db_exec(h, sql); }\n"
+        "mixed do_fetch(int h) { return db_fetch(h); }\n"
+        "int do_close(int h) { return db_close(h); }\n"
+        "int *do_handles() { return db_handles(); }\n");
+    auto ob = harness.objects.cloneObject("/db_probe");
+    assert(ob != nullptr);
+
+    std::string dbPath = harness.tempDir + "/scratch.sqlite";
+
+    amlp::Value connResult = harness.vm.callFunction(ob, "do_connect", {amlp::Value(dbPath)});
+    int handle = static_cast<int>(std::get<int64_t>(connResult.data));
+    assert(handle > 0);
+
+    // db_handles() sees the open connection.
+    amlp::Value handlesAfterConnect = harness.vm.callFunction(ob, "do_handles", {});
+    auto handlesArr = std::get<std::shared_ptr<amlp::Array>>(handlesAfterConnect.data);
+    assert(handlesArr->items.size() == 1);
+    assert(std::get<int64_t>(handlesArr->items[0].data) == handle);
+
+    // DDL: no result columns, executed immediately, returns the handle.
+    amlp::Value createResult = harness.vm.callFunction(ob, "do_exec",
+        {amlp::Value(static_cast<int64_t>(handle)),
+         amlp::Value(std::string("create table t (name text, age integer)"))});
+    assert(std::get<int64_t>(createResult.data) == handle);
+
+    amlp::Value insert1 = harness.vm.callFunction(ob, "do_exec",
+        {amlp::Value(static_cast<int64_t>(handle)),
+         amlp::Value(std::string("insert into t values ('alice', 30)"))});
+    assert(std::get<int64_t>(insert1.data) == handle);
+
+    amlp::Value insert2 = harness.vm.callFunction(ob, "do_exec",
+        {amlp::Value(static_cast<int64_t>(handle)),
+         amlp::Value(std::string("insert into t values ('bob', 25)"))});
+    assert(std::get<int64_t>(insert2.data) == handle);
+
+    // SELECT: has result columns, leaves a pending row-walk for fetch().
+    amlp::Value selectResult = harness.vm.callFunction(ob, "do_exec",
+        {amlp::Value(static_cast<int64_t>(handle)),
+         amlp::Value(std::string("select name, age from t order by name"))});
+    assert(std::get<int64_t>(selectResult.data) == handle);
+
+    // Real f_db_fetch(): every column comes back as text, even the
+    // integer "age" column -- matching real mysql_fetch_row()'s own
+    // all-text convention (see DbRegistry.hpp's own fetch() comment).
+    amlp::Value row1 = harness.vm.callFunction(ob, "do_fetch", {amlp::Value(static_cast<int64_t>(handle))});
+    auto row1Arr = std::get<std::shared_ptr<amlp::Array>>(row1.data);
+    assert(row1Arr->items.size() == 2);
+    assert(std::get<std::string>(row1Arr->items[0].data) == "alice");
+    assert(std::get<std::string>(row1Arr->items[1].data) == "30");
+
+    amlp::Value row2 = harness.vm.callFunction(ob, "do_fetch", {amlp::Value(static_cast<int64_t>(handle))});
+    auto row2Arr = std::get<std::shared_ptr<amlp::Array>>(row2.data);
+    assert(row2Arr->items.size() == 2);
+    assert(std::get<std::string>(row2Arr->items[0].data) == "bob");
+    assert(std::get<std::string>(row2Arr->items[1].data) == "25");
+
+    // Real "no more results -> 0": the pending walk is exhausted.
+    amlp::Value row3 = harness.vm.callFunction(ob, "do_fetch", {amlp::Value(static_cast<int64_t>(handle))});
+    assert(row3.isVoid());
+
+    amlp::Value closeResult = harness.vm.callFunction(ob, "do_close", {amlp::Value(static_cast<int64_t>(handle))});
+    assert(std::get<int64_t>(closeResult.data) == handle);
+
+    // db_handles() no longer sees it.
+    amlp::Value handlesAfterClose = harness.vm.callFunction(ob, "do_handles", {});
+    auto handlesArrAfter = std::get<std::shared_ptr<amlp::Array>>(handlesAfterClose.data);
+    assert(handlesArrAfter->items.empty());
+
+    ::unlink(dbPath.c_str());
+    std::cout << "testDbConnectExecFetchCloseRoundTripAgainstARealScratchSqliteFile OK\n";
+}
+
+// Real f_db_error(): 0 after a successful statement, a non-empty string
+// after a bad one -- and db_exec() itself returns 0 (not a thrown error)
+// for a genuine SQL syntax error, matching real "just an error in the
+// SQL-statement" -> put_number(sp, 0), not raise_db_error().
+static void testDbErrorReturnsZeroOnSuccessAndTheMessageAfterABadStatement() {
+    amlp::DbRegistry::resetForTests();
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/db_err_probe.c",
+        "int do_connect(string path) { return db_connect(path); }\n"
+        "int do_exec(int h, string sql) { return db_exec(h, sql); }\n"
+        "mixed do_error(int h) { return db_error(h); }\n");
+    auto ob = harness.objects.cloneObject("/db_err_probe");
+    assert(ob != nullptr);
+
+    std::string dbPath = harness.tempDir + "/err_scratch.sqlite";
+    amlp::Value connResult = harness.vm.callFunction(ob, "do_connect", {amlp::Value(dbPath)});
+    int handle = static_cast<int>(std::get<int64_t>(connResult.data));
+
+    amlp::Value createResult = harness.vm.callFunction(ob, "do_exec",
+        {amlp::Value(static_cast<int64_t>(handle)),
+         amlp::Value(std::string("create table t (x integer)"))});
+    assert(std::get<int64_t>(createResult.data) == handle);
+    amlp::Value errAfterGood = harness.vm.callFunction(ob, "do_error", {amlp::Value(static_cast<int64_t>(handle))});
+    assert(errAfterGood.isVoid());
+
+    amlp::Value badResult = harness.vm.callFunction(ob, "do_exec",
+        {amlp::Value(static_cast<int64_t>(handle)),
+         amlp::Value(std::string("this is not valid sql at all"))});
+    assert(std::get<int64_t>(badResult.data) == 0);
+    amlp::Value errAfterBad = harness.vm.callFunction(ob, "do_error", {amlp::Value(static_cast<int64_t>(handle))});
+    assert(std::holds_alternative<std::string>(errAfterBad.data));
+    assert(!std::get<std::string>(errAfterBad.data).empty());
+
+    ::unlink(dbPath.c_str());
+    std::cout << "testDbErrorReturnsZeroOnSuccessAndTheMessageAfterABadStatement OK\n";
+}
+
+// string db_conv_string(string str) -- this driver's own SQLite-native
+// escaping (doubling a single quote), a deliberate divergence from real
+// LDMud's MySQL backslash-escape convention (see DbRegistry.hpp's own
+// comment on why). Not privilege-gated, matching real f_db_conv_string()
+// having no check_privilege() call at all -- exercised here with no
+// master privilege_violation() lfun defined, proving that.
+static void testDbConvStringDoublesSingleQuotesAndIsNotPrivilegeGated() {
+    amlp::DbRegistry::resetForTests();
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c", "void create() {}\n"); // no privilege_violation() lfun at all
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/db_conv_probe.c",
+        "string do_conv(string s) { return db_conv_string(s); }\n");
+    auto ob = harness.objects.cloneObject("/db_conv_probe");
+    assert(ob != nullptr);
+
+    amlp::Value result = harness.vm.callFunction(ob, "do_conv",
+        {amlp::Value(std::string("O'Brien's"))});
+    assert(std::get<std::string>(result.data) == "O''Brien''s");
+
+    std::cout << "testDbConvStringDoublesSingleQuotesAndIsNotPrivilegeGated OK\n";
+}
+
+// Real "!privilege_violation(...)" denial path (check_privilege()'s own
+// raise_error==MY_TRUE for every gated db_* efun): a master that
+// explicitly denies "mysql" hard-errors, it does not silently no-op the
+// way some other privilege_violation()-gated efuns in this driver do.
+static void testDbConnectDeniedByPrivilegeViolationThrows() {
+    amlp::DbRegistry::resetForTests();
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 0; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/db_deny_probe.c",
+        "int do_connect(string path) { return db_connect(path); }\n");
+    auto ob = harness.objects.cloneObject("/db_deny_probe");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "do_connect",
+            {amlp::Value(harness.tempDir + "/denied.sqlite")});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testDbConnectDeniedByPrivilegeViolationThrows OK\n";
+}
+
+// Real "!svp" branch (interpret.c:8570, shared by every
+// privilege_violation()-gated efun in this driver): a master with no
+// privilege_violation() lfun at all is a hard error too, not a silent
+// grant.
+static void testDbConnectWithNoMasterPrivilegeViolationLfunHardErrors() {
+    amlp::DbRegistry::resetForTests();
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c", "void create() {}\n"); // no privilege_violation() lfun at all
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/db_nomaster_probe.c",
+        "int do_connect(string path) { return db_connect(path); }\n");
+    auto ob = harness.objects.cloneObject("/db_nomaster_probe");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "do_connect",
+            {amlp::Value(harness.tempDir + "/nomaster.sqlite")});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testDbConnectWithNoMasterPrivilegeViolationLfunHardErrors OK\n";
+}
+
+// Real "errorf(\"Illegal handle for database.\\n\")" -- shared by every
+// real db_* call site in pkg-mysql.c: an unknown/already-closed handle
+// is always a hard error, never a soft 0/false return.
+static void testDbExecOnAnUnknownHandleThrowsIllegalHandle() {
+    amlp::DbRegistry::resetForTests();
+    ObjectVarHarness harness("dialect: ldmud\n");
+    harness.writeFile("/unused.c",
+        "void create() {}\n"
+        "int privilege_violation(string what, mixed who, mixed arg) { return 1; }\n");
+    assert(harness.objects.loadMasterObject());
+    harness.writeFile("/db_badhandle_probe.c",
+        "int do_exec(int h, string sql) { return db_exec(h, sql); }\n");
+    auto ob = harness.objects.cloneObject("/db_badhandle_probe");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "do_exec",
+            {amlp::Value(static_cast<int64_t>(999)), amlp::Value(std::string("select 1"))});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::cout << "testDbExecOnAnUnknownHandleThrowsIllegalHandle OK\n";
+}
+
 int main() {
     // Matches src/main.cpp's own real startup sequence exactly (see its
     // own comment) -- this test binary has its own separate main(), so
@@ -23879,6 +24125,12 @@ int main() {
     testExistingAccountLoginLoadsItsOwnChosenCharacterNameNotTheAccountName();
     testGotLoginPasswordShowsMenuAndLoadsTheChosenCharacter();
     testGotCharacterSelectionRejectsOutOfRangeAndNonNumericChoices();
+    testDbConnectExecFetchCloseRoundTripAgainstARealScratchSqliteFile();
+    testDbErrorReturnsZeroOnSuccessAndTheMessageAfterABadStatement();
+    testDbConvStringDoublesSingleQuotesAndIsNotPrivilegeGated();
+    testDbConnectDeniedByPrivilegeViolationThrows();
+    testDbConnectWithNoMasterPrivilegeViolationLfunHardErrors();
+    testDbExecOnAnUnknownHandleThrowsIllegalHandle();
     std::cout << "all tests passed\n";
     return 0;
 }

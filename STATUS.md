@@ -9,6 +9,133 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-21 (a fresh session, later than every session above): row
+2.15 (SQLite/`db_*` efuns), the top Tier 1 pick from the prior Phase 2
+scoping session. Confirmed real scope from source before writing any
+code, the same discipline used throughout this project, and it changed
+what this row actually is.**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules: `git add` only, no commits/pushes;
+no em dashes or emojis).
+
+**Real finding, before any implementation: `core-lib` (this row's own
+cited evidence) is not a FluffOS corpus, it is an LDMud corpus, and the
+`db_*` efun family it uses is LDMud's own real family, not FluffOS's.**
+`core-lib/README.md` states directly it "targets the LDMud driver."
+Checked real vendored FluffOS 2.9 (`temp/reference/fluffos-2.9-ds2.08/
+packages/db.c`) directly rather than assuming the row's own "SQLite
+built-in" title implied a FluffOS-shaped implementation: real FluffOS's
+db package has a `db_connect(host, database, user, type)` signature
+LDMud's never had, `db_exec` returns rows-affected-or-an-error-*string*
+rather than a handle-or-zero, `db_fetch(handle, row)` is row-indexed,
+there is no SQLite backend of any kind (only mSQL/MySQL), and no
+`db_error`/`db_handles`/`db_conv_string` efuns exist at all. This
+project also has a real vendored LDMud source tree (`temp/ldmud`),
+confirmed via `temp/ldmud/doc/efun/db_*` and `temp/ldmud/src/
+pkg-mysql.c` directly: an exact match for every one of core-lib's own
+real call sites -- `db_connect`/`db_exec`/`db_fetch`/`db_close`/
+`db_error`/`db_handles`/`db_conv_string`, confirmed all seven genuinely
+called somewhere in core-lib; `db_affected_rows`/`db_insert_id`/
+`db_coldefs` also real LDMud efuns, confirmed zero call sites anywhere
+in core-lib, so not built this slice, per this session's own explicit
+instruction to bound scope to exactly what the real evidence uses.
+Built the real LDMud family (signatures, return shapes, and error
+semantics all cited directly from `pkg-mysql.c`, not guessed), backed
+by SQLite instead of a live MySQL server -- a deliberate engine
+substitution this session made explicitly and documented inline rather
+than silently assuming, since SQLite was always this project's own
+lighter-dependency preference (the prior scoping session's own note),
+not something any corpus asks for by name. Registered unconditionally
+(not gated behind `dialect == "ldmud"`): there is no competing
+FluffOS-named `db_connect` this driver also implements to disambiguate
+against the way `valid_read`/`valid_write`'s dialect gate exists for,
+and real LDMud's own "OPTIONAL, available only if compiled with mySQL
+support" gate maps onto "always registered, since SQLite is always
+linked now" with `privilege_violation("mysql", ...)` as the real
+per-call access gate, exactly matching upstream's own `check_privilege()`
+-> `master->privilege_violation("mysql", efun_name)` pattern (confirmed
+every one of the seven real call sites in `pkg-mysql.c` passes
+`MY_TRUE` for `raise_error`, i.e. a denial hard-errors, it does not
+silently no-op) -- `db_conv_string` is the one real exception, its own
+real source has no `check_privilege()` call at all, ported the same way
+here.
+
+**Dependency: `sqlite-devel` was not installed on this Fedora
+workstation**, confirmed directly (`pkg-config --modversion sqlite3`
+failed, `rpm -q sqlite-devel` reported not installed, `find /usr/include
+-iname sqlite3.h` found nothing -- only the runtime `sqlite-libs`
+package was already present). Installed via `sudo dnf install
+sqlite-devel` (now resolves, version 3.51.2). `src/efun/CMakeLists.txt`
+gained `pkg_check_modules(SQLITE3 REQUIRED sqlite3)` alongside the
+existing `PCRE2` line, matching that exact established convention
+precisely as this session's own instructions asked; `INSTALL.md`'s own
+prerequisite list and both Fedora/Debian package-install lines updated
+to match, the same kind of correction this project's own prior Phase 2
+scoping session flagged for `nlohmann/json` elsewhere but did not itself
+fix.
+
+**Built:** new `DbRegistry` class (`include/amlp/efun/DbRegistry.hpp` +
+`src/efun/DbRegistry.cpp`), a monotonic-handle global registry matching
+`SocketRegistry`'s own established precedent in this driver (not real
+LDMud's own chained-list slot-reuse allocator -- a real implementation
+detail with zero LPC-visible contract depending on it). Real per-quirk
+fidelity worth naming explicitly, not just "ported the signatures":
+`db_fetch()`'s row values are all formatted as strings, even for a
+SQLite-native integer/float column, matching real MySQL's own C client
+API returning every column as raw text regardless of underlying type
+(`f_db_fetch()`'s own unconditional `put_c_string()`, confirmed by
+direct read, not assumed from the doc's "mixed" return type alone);
+`db_conv_string()` doubles a single quote (SQLite's own literal-escaping
+rule) rather than real MySQL's backslash-escape convention -- a
+necessary, explicitly documented divergence, since a MySQL-shaped
+escape is not valid SQLite syntax and this helper's entire real purpose
+is producing safe input for whatever backend is actually running.
+Seven efuns registered in `EfunTable.cpp`: `db_connect`, `db_exec`,
+`db_fetch`, `db_close`, `db_error`, `db_handles`, `db_conv_string`.
+
+**Tests:** 6 new regression tests in `test/test_lexer.cpp`, 733 total
+(up from 727, confirmed unchanged going in): a full connect/exec/fetch/
+close/`db_handles` round trip against a real scratch SQLite file
+(covering a `CREATE TABLE`, two inserts, a `SELECT`, sequential
+`db_fetch()` reads, and the exhausted-result 0 return); `db_error()`
+returning 0 after a successful statement and the real error message
+after a genuinely bad one (also confirming `db_exec()` itself returns 0
+rather than throwing for a bad-SQL failure, matching real "just an
+error in the SQL-statement" semantics, not a hard error); `db_conv_string()`'s
+real escaping behavior and its confirmed lack of privilege-gating
+(mirroring this driver's own existing `bind_lambda` privilege-violation
+test precedent exactly, including a no-master-lfun-at-all hard-error
+case); a denied-privilege hard-error case; an unknown-handle hard error
+shared by every gated call (`pkg-mysql.c`'s own `errorf("Illegal handle
+for database.\n")`, confirmed the same across every real call site
+checked).
+
+**Live verification:** `mudlib/single/master.c` gained a permissive
+`privilege_violation()` lfun -- this file previously had none at all,
+meaning no `db_*` call could ever have been exercised live against this
+driver's own bundled mudlib before this row; matches that file's own
+already-permissive `valid_bind()`/`valid_hide()` character rather than
+introducing new laxness. Booted the real driver (`./build/amlp
+etc/driver.cfg`) and drove a real TCP client through this mudlib's own
+real login flow (account creation, password confirmation, character
+naming) into a real `eval` command session: `db_connect` to a real
+scratch SQLite file, `db_exec` a `CREATE TABLE` and two `INSERT`s (one
+routed through `db_conv_string()` with a real embedded apostrophe,
+`O'Brien`), `db_fetch` both rows back correctly (apostrophe intact,
+alphabetical `ORDER BY` order confirmed), `db_error` reading 0 after the
+successful sequence, `db_close`. A separate check confirmed two
+simultaneously open connections tracked independently via `db_handles()`
+(`[1, 2]`, then `[2]` after closing only the first). Test-account/
+character save state created during this live verification
+(`mudlib/accounts/`, `mudlib/characters/`, both git-confirmed fully
+untracked/nonexistent beforehand) deleted afterward, matching row 3.9's
+own already-established precedent for live-verification cleanup rather
+than inventing a new convention.
+
+733 tests passing, up from 727 -- confirmed by running the suite
+directly both before touching any code and again after, not assumed.
+
 **2026-08-21 (a fresh session, later still): the Phase 2 cold-start
 scoping session recommended and deferred for several sessions running.
 Read every Phase 2 row's own `src/*/instruct.md` plus `src/gc/instruct.md`
