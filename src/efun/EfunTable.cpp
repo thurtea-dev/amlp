@@ -696,13 +696,16 @@ bool isVisibleToObserver(VM& vm, const std::shared_ptr<LpcObject>& ob) {
 // directly rather than assumed.
 using Pcre2CodePtr = std::unique_ptr<pcre2_code, void (*)(pcre2_code*)>;
 
-Pcre2CodePtr compileRegex(const std::string& pattern) {
+// compileOptions defaults to 0 (regexp()/regexplode()/reg_assoc()'s own
+// original Phase 0 behavior, unchanged). pcre_match()/pcre_assoc() below
+// (Phase 2 row 2.12) are the only callers that ever pass anything else.
+Pcre2CodePtr compileRegex(const std::string& pattern, uint32_t compileOptions = 0) {
     int errorcode = 0;
     PCRE2_SIZE erroroffset = 0;
     pcre2_code* code = pcre2_compile(
         reinterpret_cast<PCRE2_SPTR>(pattern.data()),
         static_cast<PCRE2_SIZE>(pattern.size()),
-        0, &errorcode, &erroroffset, nullptr);
+        compileOptions, &errorcode, &erroroffset, nullptr);
     if (!code) {
         PCRE2_UCHAR msg[256];
         pcre2_get_error_message(errorcode, msg, sizeof(msg) / sizeof(PCRE2_UCHAR));
@@ -717,13 +720,17 @@ Pcre2CodePtr compileRegex(const std::string& pattern) {
 // same "search the remainder of the string" semantics real
 // regexec(reg, tmp) has when tmp is a pointer into the middle of the
 // original string). Returns false with no match found.
+// matchOptions defaults to 0, same "unchanged for every pre-existing
+// caller" rule as compileRegex()'s compileOptions above; only
+// pcre_match()/pcre_assoc()'s own PCRE_A (anchored) flag passes anything
+// else, via PCRE2_ANCHORED.
 bool regexFindNext(pcre2_code* code, const std::string& subject, size_t byteOffset,
-                    size_t& matchStart, size_t& matchEnd) {
+                    size_t& matchStart, size_t& matchEnd, uint32_t matchOptions = 0) {
     if (byteOffset > subject.size()) return false;
     pcre2_match_data* md = pcre2_match_data_create_from_pattern(code, nullptr);
     int rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(subject.data()),
                           static_cast<PCRE2_SIZE>(subject.size()),
-                          static_cast<PCRE2_SIZE>(byteOffset), 0, md, nullptr);
+                          static_cast<PCRE2_SIZE>(byteOffset), matchOptions, md, nullptr);
     bool found = false;
     if (rc >= 0) {
         PCRE2_SIZE* ov = pcre2_get_ovector_pointer(md);
@@ -7891,6 +7898,253 @@ void registerCoreEfuns() {
     // above found nothing), added for the same reason: the task's own
     // spec explicitly calls for it as a second name for reg_assoc.
     t.registerEfun("regexp_assoc", regAssocImpl);
+
+    // pcre_match()/pcre_assoc() -- Phase 2 row 2.12 ("Full PCRE regexp
+    // suite -- already started in Phase 0 - extend"). Real scope
+    // confirmed from source before writing any code, the same
+    // discipline row 2.15 used: grepped the entire pinned
+    // temp/reference/fluffos-2.9-ds2.08 tree (func_spec.c, efun_defs.c,
+    // and a plain "pcre" text search across every file in it) and found
+    // zero hits anywhere -- that pinned 2.9-ds2.08 driver has no PCRE
+    // package at all, only regexp()/reg_assoc() on its own bundled
+    // Henry Spencer engine (the same finding the comment atop this
+    // block already documents). This row's own real evidence is a
+    // *different* real, separately-vendored FluffOS source tree,
+    // temp/fluffos (a modern/master checkout, not the pinned
+    // fluffos-2.9-ds2.08 patchlevel): src/packages/pcre/pcre.spec,
+    // pcre.cc, and src/include/pcre_flags.h, a real package that only
+    // exists in later FluffOS history, after it moved off the Henry
+    // Spencer engine onto real PCRE. Documented explicitly rather than
+    // silently treated as if it were 2.9-ds2.08 evidence, matching row
+    // 2.15's own precedent of naming exactly which real vendored source
+    // a citation comes from when it isn't the primary pinned tree.
+    //
+    // pcre_match()/pcre_assoc() are real, current FluffOS efuns
+    // documented (pcre.cc's own header comment, docs/efun/pcre/
+    // pcre_match.md, docs/efun/pcre/pcre_assoc.md, all confirmed
+    // directly) as drop-in PCRE-backed analogs of regexp()/reg_assoc():
+    // "analog with regexp efun for backwards compatibility reasons but
+    // utilizing the PCRE library" -- i.e. same selection/tokenizing
+    // contract as the existing regexp()/reg_assoc() above, plus an
+    // extra optional "pcre_flags" bitmask argument regexp()/reg_assoc()
+    // never had. Real call-site evidence confirmed in the vendored lima
+    // corpus (lib/daemons/xterm256_d.c, lib/std/modules/m_frame.c):
+    // pcre_assoc() and pcre_match() only, zero real call sites anywhere
+    // in any vendored corpus (core-lib, dead-souls, es2_mudlib, lima,
+    // nightmare3, reference-lpc-mud-library) for the real package's
+    // other six efuns (pcre_version/pcre_match_all/pcre_extract/
+    // pcre_replace/pcre_replace_callback/pcre_cache) -- those six are
+    // out of scope this slice, the same bounded-to-real-evidence
+    // discipline row 2.15 used for db_affected_rows/db_insert_id/
+    // db_coldefs.
+    //
+    // pcre_flags bit values and their compile/exec-option mapping are
+    // cited directly from src/include/pcre_flags.h and pcre.cc's own
+    // compute_compile_options()/compute_exec_options() (confirmed
+    // directly, not guessed): PCRE_I/PCRE_M/PCRE_S/PCRE_U/PCRE_X are
+    // compile-time options (PCRE_CASELESS/MULTILINE/DOTALL/UNGREEDY/
+    // EXTENDED); PCRE_A (anchored) is exec-time only. Real
+    // compute_compile_options() also always ORs in PCRE_UTF8
+    // unconditionally regardless of flags -- ported as PCRE2's own
+    // PCRE2_UTF (PCRE2's renamed equivalent; PCRE2 has no PCRE2_UTF8
+    // constant, confirmed against the linked pcre2.h directly) -- a
+    // real, deliberate divergence from regexp()/reg_assoc()/
+    // regexplode() above, which stay byte-oriented (compileOptions 0)
+    // exactly as Phase 0 row 0.11 built and tested them; only these two
+    // new efuns get PCRE2_UTF, matching what real pcre_match()/
+    // pcre_assoc() actually do that real regexp()/reg_assoc() don't.
+    constexpr int64_t kPcreFlagI = 1LL << 16;  // PCRE_I / PCRE_CASELESS
+    constexpr int64_t kPcreFlagM = 1LL << 17;  // PCRE_M / PCRE_MULTILINE
+    constexpr int64_t kPcreFlagS = 1LL << 18;  // PCRE_S / PCRE_DOTALL
+    constexpr int64_t kPcreFlagU = 1LL << 19;  // PCRE_U / PCRE_UNGREEDY
+    constexpr int64_t kPcreFlagX = 1LL << 20;  // PCRE_X / PCRE_EXTENDED
+    constexpr int64_t kPcreFlagA = 1LL << 21;  // PCRE_A / PCRE_ANCHORED (exec-time)
+
+    auto pcreCompileOptions = [](int64_t flags) -> uint32_t {
+        uint32_t opts = PCRE2_UTF;
+        if (flags & kPcreFlagI) opts |= PCRE2_CASELESS;
+        if (flags & kPcreFlagM) opts |= PCRE2_MULTILINE;
+        if (flags & kPcreFlagS) opts |= PCRE2_DOTALL;
+        if (flags & kPcreFlagU) opts |= PCRE2_UNGREEDY;
+        if (flags & kPcreFlagX) opts |= PCRE2_EXTENDED;
+        return opts;
+    };
+    auto pcreMatchOptions = [](int64_t flags) -> uint32_t {
+        return (flags & kPcreFlagA) ? PCRE2_ANCHORED : 0u;
+    };
+
+    // mixed pcre_match(string | string *, string pattern, void | int
+    // flag, void | int pcre_flags) -- string form returns plain int
+    // 1/0 exactly like regexp(string, string); the 3rd argument in that
+    // form IS pcre_flags directly (confirmed against pcre_match.md's
+    // own "For string input, the 3rd argument is treated as
+    // pcre_flags" and f_pcre_match()'s own real argument parsing), no
+    // 4th argument exists in the string form. Array form is identical
+    // to regexp(string*, string, flag)'s own selection contract above
+    // (flag&2 inverts to non-matching elements, flag&1 interleaves each
+    // matching element's original 1-based index -- confirmed identical
+    // against pcre_match()'s own real "match = !(flag & 2)" plus the
+    // "flag &= 1" index-doubling below it), with pcre_flags as the
+    // optional 4th argument. Real f_pcre_match() computes is_string
+    // from a stack slot that used to be wrong whenever a 3rd argument
+    // was present (a real, now-fixed driver bug pcre_match.lpc's own
+    // testsuite regression-tests directly) -- moot here since this
+    // driver's own calling convention passes args as a plain vector
+    // (args[0] is always the real 1st argument regardless of arg
+    // count), so that bug class cannot occur in the first place, not
+    // something to reproduce.
+    t.registerEfun("pcre_match", [pcreCompileOptions, pcreMatchOptions](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[1].data)) {
+            throw LpcRuntimeError("pcre_match: expected a pattern string as the second argument");
+        }
+        const std::string& pattern = std::get<std::string>(args[1].data);
+
+        if (std::holds_alternative<std::string>(args[0].data)) {
+            if (args.size() > 3) {
+                throw LpcRuntimeError("4th argument illegal for pcre_match(string, string)");
+            }
+            int64_t pcreFlags = 0;
+            if (args.size() > 2) {
+                if (!std::holds_alternative<int64_t>(args[2].data)) {
+                    throw LpcRuntimeError("Bad argument 3 to pcre_match()");
+                }
+                pcreFlags = std::get<int64_t>(args[2].data);
+            }
+            const std::string& subject = std::get<std::string>(args[0].data);
+            auto code = compileRegex(pattern, pcreCompileOptions(pcreFlags));
+            size_t s = 0, e = 0;
+            bool matched = regexFindNext(code.get(), subject, 0, s, e, pcreMatchOptions(pcreFlags));
+            return Value(static_cast<int64_t>(matched ? 1 : 0));
+        }
+
+        if (!std::holds_alternative<std::shared_ptr<Array>>(args[0].data)) {
+            throw LpcRuntimeError("pcre_match: expected a string or an array of strings as the first argument");
+        }
+        auto arr = std::get<std::shared_ptr<Array>>(args[0].data);
+        int64_t flag = 0;
+        if (args.size() > 2) {
+            if (!std::holds_alternative<int64_t>(args[2].data)) {
+                throw LpcRuntimeError("Bad argument 3 to pcre_match()");
+            }
+            flag = std::get<int64_t>(args[2].data);
+        }
+        int64_t pcreFlags = 0;
+        if (args.size() > 3) {
+            if (!std::holds_alternative<int64_t>(args[3].data)) {
+                throw LpcRuntimeError("Bad argument 4 to pcre_match()");
+            }
+            pcreFlags = std::get<int64_t>(args[3].data);
+        }
+        bool invert = (flag & 2) != 0;
+        bool withIndex = (flag & 1) != 0;
+
+        auto code = compileRegex(pattern, pcreCompileOptions(pcreFlags));
+        uint32_t matchOpts = pcreMatchOptions(pcreFlags);
+        auto result = std::make_shared<Array>();
+        if (arr) {
+            for (size_t i = 0; i < arr->items.size(); ++i) {
+                const Value& item = arr->items[i];
+                if (!std::holds_alternative<std::string>(item.data)) continue;
+                const std::string& line = std::get<std::string>(item.data);
+                size_t s = 0, e = 0;
+                bool matched = regexFindNext(code.get(), line, 0, s, e, matchOpts);
+                if (matched == invert) continue;
+                result->items.push_back(item);
+                if (withIndex) result->items.push_back(Value(static_cast<int64_t>(i + 1)));
+            }
+        }
+        return Value(result);
+    });
+
+    // mixed *pcre_assoc(string str, string *patterns, mixed *tokens,
+    // mixed | void default, void | int pcre_flags) -- identical
+    // selection/tokenizing contract to reg_assoc() above (pcre.cc's own
+    // pcre_assoc() is a direct, acknowledged copy: "This is mostly
+    // copy/paste from reg_assoc", confirmed directly), plus the same
+    // pcre_flags bitmask applied uniformly to every pattern in the
+    // array (real rgpp[i]->compile_flags = compute_compile_options(
+    // pcre_flags) inside the same per-pattern compile loop for every
+    // i, not a per-pattern flag).
+    t.registerEfun("pcre_assoc", [pcreCompileOptions, pcreMatchOptions](VM&, std::vector<Value>& args) -> Value {
+        if (args.size() < 3 ||
+            !std::holds_alternative<std::string>(args[0].data) ||
+            !std::holds_alternative<std::shared_ptr<Array>>(args[1].data) ||
+            !std::holds_alternative<std::shared_ptr<Array>>(args[2].data)) {
+            throw LpcRuntimeError("pcre_assoc: expected (string, string *patterns, mixed *tokens, mixed|void default, void|int pcre_flags)");
+        }
+        const std::string& str = std::get<std::string>(args[0].data);
+        auto patternsArr = std::get<std::shared_ptr<Array>>(args[1].data);
+        auto tokensArr = std::get<std::shared_ptr<Array>>(args[2].data);
+        Value defaultVal = args.size() > 3 ? args[3] : Value(int64_t{0});
+        int64_t pcreFlags = 0;
+        if (args.size() > 4) {
+            if (!std::holds_alternative<int64_t>(args[4].data)) {
+                throw LpcRuntimeError("Bad argument 5 to pcre_assoc()");
+            }
+            pcreFlags = std::get<int64_t>(args[4].data);
+        }
+        uint32_t compileOpts = pcreCompileOptions(pcreFlags);
+        uint32_t matchOpts = pcreMatchOptions(pcreFlags);
+
+        const size_t size = patternsArr ? patternsArr->items.size() : 0;
+        if (size != (tokensArr ? tokensArr->items.size() : 0)) {
+            throw LpcRuntimeError("Pattern and token array sizes must be identical.");
+        }
+
+        auto textResult = std::make_shared<Array>();
+        auto tokenResult = std::make_shared<Array>();
+
+        if (size == 0) {
+            textResult->items.push_back(Value(str));
+            tokenResult->items.push_back(defaultVal);
+        } else {
+            std::vector<Pcre2CodePtr> codes;
+            codes.reserve(size);
+            for (size_t i = 0; i < size; ++i) {
+                if (!std::holds_alternative<std::string>(patternsArr->items[i].data)) {
+                    throw LpcRuntimeError("Non-string found in pattern array.");
+                }
+                codes.push_back(compileRegex(std::get<std::string>(patternsArr->items[i].data), compileOpts));
+            }
+
+            struct Match { size_t begin, end, tokIdx; };
+            std::vector<Match> matches;
+            size_t scan = 0;
+            while (scan < str.size()) {
+                size_t bestStart = std::string::npos, bestEnd = 0, bestIdx = 0;
+                for (size_t i = 0; i < size; ++i) {
+                    size_t s = 0, e = 0;
+                    if (!regexFindNext(codes[i].get(), str, scan, s, e, matchOpts)) continue;
+                    if (bestStart == std::string::npos || s < bestStart) {
+                        bestStart = s; bestEnd = e; bestIdx = i;
+                    }
+                }
+                if (bestStart == std::string::npos) break;
+                matches.push_back({bestStart, bestEnd, bestIdx});
+                scan = bestEnd;
+                if (bestStart == bestEnd) {
+                    if (scan >= str.size()) break;
+                    ++scan;
+                }
+            }
+
+            size_t cursor = 0;
+            for (const auto& m : matches) {
+                textResult->items.push_back(Value(str.substr(cursor, m.begin - cursor)));
+                tokenResult->items.push_back(defaultVal);
+                textResult->items.push_back(Value(str.substr(m.begin, m.end - m.begin)));
+                tokenResult->items.push_back(tokensArr->items[m.tokIdx]);
+                cursor = m.end;
+            }
+            textResult->items.push_back(Value(str.substr(cursor)));
+            tokenResult->items.push_back(defaultVal);
+        }
+
+        auto outer = std::make_shared<Array>();
+        outer->items.push_back(Value(textResult));
+        outer->items.push_back(Value(tokenResult));
+        return Value(outer);
+    });
 
     // -------------------------------------------------------------------------
     // Phase 0.13 efun growth batch (post-restructure) - test_bit/set_bit/

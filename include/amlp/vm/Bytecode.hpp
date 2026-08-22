@@ -211,6 +211,85 @@ struct CompiledProgram {
     // duplicate the ancestor's slots per path) rather than silently
     // picking one.
     std::unordered_map<const CompiledProgram*, int> ancestorBaseOffsets;
+
+    // Phase 2 row 2.9's apply cache: memoizes VM.cpp's own
+    // findFunctionInChain(*this, name) -- the walk that resolves a bare
+    // call/apply name against this program's own functions first, then
+    // depth-first against inheritedPrograms, real motivation confirmed
+    // already live: Scheduler.cpp's own call_heart_beat() equivalent
+    // calls vm_.callFunction(obj, "heart_beat", {}) -- which bottoms out
+    // in exactly this walk -- on every living object every real-time
+    // tick.
+    //
+    // Deliberately keyed and stored differently from src/apply/
+    // instruct.md's own literal sketch of this row
+    // ("unordered_map<pair<LpcObject*,string>, FunctionEntry*>" with
+    // manual invalidation on recompile and on destructObject()) --
+    // confirmed real scope from source before writing any code, the
+    // same discipline every prior Phase 2 row has used, and it changed
+    // this row's actual shape:
+    //
+    //  - findFunctionInChain() takes a "const CompiledProgram&", not an
+    //    LpcObject* -- its result depends only on program identity, not
+    //    on which object asked. ObjectManager's own programCache_
+    //    (keyed by filename) hands the *same* shared_ptr<CompiledProgram>
+    //    to every clone of a blueprint (confirmed directly,
+    //    ObjectManager.cpp's own cloneObject()/compile()), so an
+    //    LpcObject*-keyed cache would populate one redundant entry per
+    //    clone for what is provably always the same answer -- keying by
+    //    program instead means every clone of a blueprint shares one
+    //    entry, a strictly bigger real win against the row's own cited
+    //    heart_beat() hot path (many living clones, one shared program).
+    //  - "Invalidate on recompile" turns out to need no explicit code at
+    //    all: ObjectManager::compile()'s own recompile branch (confirmed
+    //    directly, its own comment right above "programCache_[filename]
+    //    = program;") never mutates an existing CompiledProgram in
+    //    place -- a recompile always std::make_shared's a brand new one,
+    //    leaving already-loaded objects running the old, untouched
+    //    instance. Storing the cache as a member of CompiledProgram
+    //    itself (here) rather than in an external map means a fresh
+    //    recompile automatically starts with an empty cache (a freshly
+    //    default-constructed unordered_map, per this same field on the
+    //    new instance) with no explicit purge step, and the old
+    //    program's own now-superseded cache simply stops being
+    //    reachable, right along with the rest of that no-longer-current
+    //    CompiledProgram, once nothing (LpcObject::program_,
+    //    ObjectManager::programCache_, or another program's
+    //    inheritedPrograms) still holds it.
+    //  - "Invalidate on destructObject()" likewise needs no explicit
+    //    code: an external map keyed by raw CompiledProgram* would risk
+    //    a genuine dangling-pointer read once every owner of some
+    //    program let go and nothing pruned that map's own entries for
+    //    it first -- a real memory-safety hazard the literal sketch's
+    //    own two-event invalidation plan was implicitly trying to avoid.
+    //    A cache stored as a member here can't dangle: it shares this
+    //    struct's own lifetime exactly, so it is destroyed together with
+    //    the functions/inheritedPrograms data it caches pointers into,
+    //    never separately from it.
+    //  - replace_program() (VM.cpp's own ob->setProgram(...) call,
+    //    LDMud dialect) reassigns a live object's program_ pointer to
+    //    one of its own already-compiled ancestors rather than
+    //    constructing a new program -- handled correctly for free too,
+    //    since every lookup re-reads obj->program()'s *current* pointer
+    //    fresh and reuses (or populates) that specific program's own
+    //    cache, never a stale one captured earlier.
+    //
+    // FunctionEntry pointers cached here stay valid for this program's
+    // entire lifetime: CodeGen.cpp is the only writer of `functions`,
+    // and only during this program's own initial construction (confirmed
+    // directly, no other call site appends to it afterward), so the
+    // vector never reallocates once a shared_ptr<CompiledProgram> exists
+    // to hand pointers into it out from.
+    struct FunctionChainCacheEntry {
+        // nullptr on both fields is the real, valid "confirmed not
+        // present anywhere in the chain" negative-cache entry -- e.g.
+        // most objects have no reset()/clean_up()/heart_beat() at all,
+        // and functionExists()/the scheduler's own optional-hook probes
+        // re-ask that every tick just as often as a real hit.
+        const CompiledProgram* program = nullptr;
+        const FunctionEntry* fn = nullptr;
+    };
+    mutable std::unordered_map<std::string, FunctionChainCacheEntry> functionChainCache_;
 };
 
 } // namespace amlp

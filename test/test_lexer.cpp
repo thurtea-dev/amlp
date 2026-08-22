@@ -7289,6 +7289,214 @@ static void testRegexpAssocAliasProducesSameResultAsRegAssoc() {
     std::cout << "testRegexpAssocAliasProducesSameResultAsRegAssoc OK\n";
 }
 
+static void testPcreMatchStringFormReturnsOneAndNoMatchReturnsZero() {
+    // pcre_match(string, pattern) -- real doc: "analog with regexp
+    // efun ... but utilizing the PCRE library". Same 1/0 contract as
+    // regexp(string, string) above, confirmed against the real vendored
+    // lima corpus's own use (xterm256_d.c's "return pcre_match(text,
+    // PINKFISH_COLOURS)").
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrematchprobe.c",
+        "int probe(string s, string pat) { return pcre_match(s, pat); }\n");
+    auto ob = harness.objects.cloneObject("/pcrematchprobe");
+    assert(ob != nullptr);
+
+    amlp::Value matched = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("the quick brown fox")),
+         amlp::Value(std::string("qu[a-z]+"))});
+    assert(std::holds_alternative<int64_t>(matched.data));
+    assert(std::get<int64_t>(matched.data) == 1);
+
+    amlp::Value noMatch = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("the quick brown fox")),
+         amlp::Value(std::string("^slow"))});
+    assert(std::holds_alternative<int64_t>(noMatch.data));
+    assert(std::get<int64_t>(noMatch.data) == 0);
+
+    std::cout << "testPcreMatchStringFormReturnsOneAndNoMatchReturnsZero OK\n";
+}
+
+static void testPcreMatchStringFormThirdArgIsPcreFlagsNotIllegal() {
+    // Real pcre_match_match.md: "For string input, the 3rd argument is
+    // treated as pcre_flags" -- unlike regexp(string, string, N), which
+    // real f_regexp() hard-errors on ("3rd argument illegal..."),
+    // pcre_match's 3rd argument in string form is legal and meaningful:
+    // PCRE_I (case-insensitive) here makes an otherwise-failing match
+    // succeed.
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrematchflag.c",
+        "int probe() { return pcre_match(\"ABC\", \"abc\", PCRE_I); }\n"
+        "int noflag() { return pcre_match(\"ABC\", \"abc\"); }\n");
+    auto ob = harness.objects.cloneObject("/pcrematchflag");
+    assert(ob != nullptr);
+
+    amlp::Value withFlag = harness.vm.callFunction(ob, "probe", {});
+    assert(std::get<int64_t>(withFlag.data) == 1);
+
+    amlp::Value withoutFlag = harness.vm.callFunction(ob, "noflag", {});
+    assert(std::get<int64_t>(withoutFlag.data) == 0);
+
+    std::cout << "testPcreMatchStringFormThirdArgIsPcreFlagsNotIllegal OK\n";
+}
+
+static void testPcreMatchStringFormFourthArgThrows() {
+    // No 4th argument exists in the string form (only the array form
+    // has both a legacy flag AND pcre_flags -- see pcre_match.md).
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrematch4th.c",
+        "int probe() { return pcre_match(\"abc\", \"a\", 0, 0); }\n");
+    auto ob = harness.objects.cloneObject("/pcrematch4th");
+    assert(ob != nullptr);
+
+    bool threw = false;
+    try {
+        harness.vm.callFunction(ob, "probe", {});
+    } catch (const amlp::LpcRuntimeError&) {
+        threw = true;
+    }
+    assert(threw);
+    std::cout << "testPcreMatchStringFormFourthArgThrows OK\n";
+}
+
+static void testPcreMatchArrayFormSelectsMatchingLinesWithIndexAndInvertFlags() {
+    // Array form: identical selection contract to regexp()'s own array
+    // form (confirmed directly against real pcre_match()'s own "match =
+    // !(flag & 2)" plus its own index-doubling "flag &= 1"), matching
+    // the real vendored lima corpus's own use of the array form
+    // filtering colour codes (xterm256_d.c).
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrematcharr.c",
+        "mixed *plain(mixed *lines, string pat) { return pcre_match(lines, pat); }\n"
+        "mixed *withIndex(mixed *lines, string pat) { return pcre_match(lines, pat, 1); }\n"
+        "mixed *inverted(mixed *lines, string pat) { return pcre_match(lines, pat, 2); }\n");
+    auto ob = harness.objects.cloneObject("/pcrematcharr");
+    assert(ob != nullptr);
+
+    auto lines = std::make_shared<amlp::Array>();
+    lines->items.push_back(amlp::Value(std::string("apple")));
+    lines->items.push_back(amlp::Value(std::string("banana")));
+    lines->items.push_back(amlp::Value(std::string("cherry")));
+    lines->items.push_back(amlp::Value(std::string("date")));
+
+    amlp::Value plain = harness.vm.callFunction(ob, "plain",
+        {amlp::Value(lines), amlp::Value(std::string("an"))});
+    auto* plainArr = std::get_if<std::shared_ptr<amlp::Array>>(&plain.data);
+    assert(plainArr != nullptr && (*plainArr)->items.size() == 1);
+    assert(std::get<std::string>((*plainArr)->items[0].data) == "banana");
+
+    amlp::Value withIdx = harness.vm.callFunction(ob, "withIndex",
+        {amlp::Value(lines), amlp::Value(std::string("^[ab]"))});
+    auto* withIdxArr = std::get_if<std::shared_ptr<amlp::Array>>(&withIdx.data);
+    assert(withIdxArr != nullptr && (*withIdxArr)->items.size() == 4);
+    assert(std::get<std::string>((*withIdxArr)->items[0].data) == "apple");
+    assert(std::get<int64_t>((*withIdxArr)->items[1].data) == 1);
+    assert(std::get<std::string>((*withIdxArr)->items[2].data) == "banana");
+    assert(std::get<int64_t>((*withIdxArr)->items[3].data) == 2);
+
+    amlp::Value inv = harness.vm.callFunction(ob, "inverted",
+        {amlp::Value(lines), amlp::Value(std::string("^[ab]"))});
+    auto* invArr = std::get_if<std::shared_ptr<amlp::Array>>(&inv.data);
+    assert(invArr != nullptr && (*invArr)->items.size() == 2);
+    assert(std::get<std::string>((*invArr)->items[0].data) == "cherry");
+    assert(std::get<std::string>((*invArr)->items[1].data) == "date");
+
+    std::cout << "testPcreMatchArrayFormSelectsMatchingLinesWithIndexAndInvertFlags OK\n";
+}
+
+static void testPcreMatchArrayFormFourthArgIsPcreFlags() {
+    // Array form with all 4 real arguments (flag + pcre_flags), the
+    // exact call shape pcre_match.lpc's own real testsuite regression
+    // -tests against the historical wrong-stack-slot driver bug.
+    ObjectVarHarness harness;
+    harness.writeFile("/pcrematcharr4.c",
+        "mixed *probe(mixed *lines, string pat) { return pcre_match(lines, pat, 0, PCRE_I); }\n");
+    auto ob = harness.objects.cloneObject("/pcrematcharr4");
+    assert(ob != nullptr);
+
+    auto lines = std::make_shared<amlp::Array>();
+    lines->items.push_back(amlp::Value(std::string("CAT")));
+    lines->items.push_back(amlp::Value(std::string("dog")));
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(lines), amlp::Value(std::string("^cat"))});
+    auto* arr = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(arr != nullptr && (*arr)->items.size() == 1);
+    assert(std::get<std::string>((*arr)->items[0].data) == "CAT");
+
+    std::cout << "testPcreMatchArrayFormFourthArgIsPcreFlags OK\n";
+}
+
+static void testPcreAssocMatchesRealDocCommentExampleWithPcreFlags() {
+    // pcre_assoc(): identical contract to reg_assoc() (pcre.cc's own
+    // "This is mostly copy/paste from reg_assoc" comment) plus the
+    // extra optional pcre_flags argument. Reuses reg_assoc's own real
+    // worked doc-comment example (testRegAssocMatchesRealDocCommentExample),
+    // with an all-uppercase subject and PCRE_I to confirm the flag is
+    // actually threaded into every pattern's own compile options.
+    ObjectVarHarness harness;
+    harness.writeFile("/pcreassocprobe.c",
+        "mixed *probe(string s, mixed *pats, mixed *toks, mixed def, int flags) { "
+        "return pcre_assoc(s, pats, toks, def, flags); }\n");
+    auto ob = harness.objects.cloneObject("/pcreassocprobe");
+    assert(ob != nullptr);
+
+    auto pats = std::make_shared<amlp::Array>();
+    pats->items.push_back(amlp::Value(std::string("haha")));
+    pats->items.push_back(amlp::Value(std::string("te")));
+    auto toks = std::make_shared<amlp::Array>();
+    toks->items.push_back(amlp::Value(int64_t{2}));
+    toks->items.push_back(amlp::Value(int64_t{3}));
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("TESTHAHATEST")), amlp::Value(pats),
+         amlp::Value(toks), amlp::Value(int64_t{4}), amlp::Value(int64_t{65536})});  // PCRE_I
+    auto* outer = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    assert(outer != nullptr && (*outer)->items.size() == 2);
+    auto* texts = std::get_if<std::shared_ptr<amlp::Array>>(&(*outer)->items[0].data);
+    auto* toksOut = std::get_if<std::shared_ptr<amlp::Array>>(&(*outer)->items[1].data);
+    assert(texts != nullptr && (*texts)->items.size() == 7);
+    // Same shape as real reg_assoc("testhahatest", ...) == ({"", "te",
+    // "st", "haha", "", "te", "st"}), ({4,3,4,2,4,3,4}) -- uppercase
+    // input only matches at all here because PCRE_I is set.
+    assert(std::get<std::string>((*texts)->items[0].data) == "");
+    assert(std::get<std::string>((*texts)->items[1].data) == "TE");
+    assert(std::get<std::string>((*texts)->items[2].data) == "ST");
+    assert(std::get<std::string>((*texts)->items[3].data) == "HAHA");
+    assert(std::get<std::string>((*texts)->items[4].data) == "");
+    assert(std::get<std::string>((*texts)->items[5].data) == "TE");
+    assert(std::get<std::string>((*texts)->items[6].data) == "ST");
+    assert(toksOut != nullptr && (*toksOut)->items.size() == 7);
+    assert(std::get<int64_t>((*toksOut)->items[3].data) == 2);
+
+    std::cout << "testPcreAssocMatchesRealDocCommentExampleWithPcreFlags OK\n";
+}
+
+static void testPcreAssocWithoutFlagsOnUppercaseSubjectFindsNoMatches() {
+    // Same call, no PCRE_I this time: confirms the flag in the test
+    // above is actually load-bearing, not incidental.
+    ObjectVarHarness harness;
+    harness.writeFile("/pcreassocnoflag.c",
+        "mixed *probe(string s, mixed *pats, mixed *toks, mixed def) { "
+        "return pcre_assoc(s, pats, toks, def); }\n");
+    auto ob = harness.objects.cloneObject("/pcreassocnoflag");
+    assert(ob != nullptr);
+
+    auto pats = std::make_shared<amlp::Array>();
+    pats->items.push_back(amlp::Value(std::string("haha")));
+    auto toks = std::make_shared<amlp::Array>();
+    toks->items.push_back(amlp::Value(int64_t{2}));
+
+    amlp::Value result = harness.vm.callFunction(ob, "probe",
+        {amlp::Value(std::string("TESTHAHATEST")), amlp::Value(pats),
+         amlp::Value(toks), amlp::Value(int64_t{4})});
+    auto* outer = std::get_if<std::shared_ptr<amlp::Array>>(&result.data);
+    auto* texts = std::get_if<std::shared_ptr<amlp::Array>>(&(*outer)->items[0].data);
+    assert(texts != nullptr && (*texts)->items.size() == 1);
+    assert(std::get<std::string>((*texts)->items[0].data) == "TESTHAHATEST");
+
+    std::cout << "testPcreAssocWithoutFlagsOnUppercaseSubjectFindsNoMatches OK\n";
+}
+
 // remove_action(act, verb): removes an action previously registered by
 // the calling object on the resolved command giver's own table (real
 // add_action.c's own remove_action()). Must run from the same "current
@@ -19343,6 +19551,84 @@ static void testLoadObjectReusesCachedProgramWithoutRecompilingWhenSourceIsUncha
     std::cout << "testLoadObjectReusesCachedProgramWithoutRecompilingWhenSourceIsUnchanged OK\n";
 }
 
+static void testFunctionChainCacheStaysCorrectAcrossARecompileForObjectsHoldingTheOldProgram() {
+    // Phase 2 row 2.9's apply cache (CompiledProgram::functionChainCache_,
+    // see Bytecode.hpp's own long comment on it). Warms the cache on an
+    // object holding the *old* program (two calls: one cold miss that
+    // populates the cache, one hit that must return the same, still-
+    // correct answer), then recompiles the same path with different
+    // source, and confirms the pre-existing object's own warmed cache
+    // entry is still correct (its program was never mutated in place,
+    // so there is nothing to invalidate) while a freshly cloned object
+    // against the *new* program resolves independently and correctly --
+    // exactly the "no explicit invalidation needed" design this row's
+    // own citation trail argues for, exercised rather than just argued.
+    ObjectVarHarness harness;
+    harness.writeFile("/cachedmarker.c", "int marker() { return 1; }\n");
+
+    auto oldOb = harness.objects.cloneObject("/cachedmarker");
+    assert(oldOb != nullptr);
+    assert(std::get<int64_t>(harness.vm.callFunction(oldOb, "marker", {}).data) == 1);  // cold
+    assert(std::get<int64_t>(harness.vm.callFunction(oldOb, "marker", {}).data) == 1);  // warm
+
+    harness.writeFile("/cachedmarker.c", "int marker() { return 2; }\n");
+    auto newOb = harness.objects.cloneObject("/cachedmarker");
+    assert(newOb != nullptr);
+    assert(newOb->programPtr() != oldOb->programPtr());
+    assert(std::get<int64_t>(harness.vm.callFunction(newOb, "marker", {}).data) == 2);  // cold
+    assert(std::get<int64_t>(harness.vm.callFunction(newOb, "marker", {}).data) == 2);  // warm
+
+    // The old object's own warmed cache entry must still be correct --
+    // this is the whole point: nothing invalidated it, and nothing
+    // needed to.
+    assert(std::get<int64_t>(harness.vm.callFunction(oldOb, "marker", {}).data) == 1);
+
+    std::cout << "testFunctionChainCacheStaysCorrectAcrossARecompileForObjectsHoldingTheOldProgram OK\n";
+}
+
+static void testFunctionChainCacheResolvesInheritedFunctionsSharedAcrossClones() {
+    // Two clones of the same child blueprint share the exact same
+    // CompiledProgram instance (ObjectManager::programCache_ is keyed
+    // by filename, confirmed directly), so this exercises the cache's
+    // own real reason for being keyed per-program rather than per-
+    // object: both clones' repeated calls hit the same cache entry
+    // (on the *parent* program, since greet() is only ever defined
+    // there) and must both keep resolving correctly.
+    ObjectVarHarness harness;
+    harness.writeFile("/cacheparent.c", "int greet() { return 42; }\n");
+    harness.writeFile("/cachechild.c", "inherit \"/cacheparent\";\n");
+
+    auto clone1 = harness.objects.cloneObject("/cachechild");
+    auto clone2 = harness.objects.cloneObject("/cachechild");
+    assert(clone1 != nullptr && clone2 != nullptr);
+    assert(clone1->programPtr() == clone2->programPtr());
+
+    assert(std::get<int64_t>(harness.vm.callFunction(clone1, "greet", {}).data) == 42);  // cold
+    assert(std::get<int64_t>(harness.vm.callFunction(clone2, "greet", {}).data) == 42);  // hits clone1's cache entry
+    assert(std::get<int64_t>(harness.vm.callFunction(clone1, "greet", {}).data) == 42);  // still correct
+
+    std::cout << "testFunctionChainCacheResolvesInheritedFunctionsSharedAcrossClones OK\n";
+}
+
+static void testFunctionChainCacheNegativeResultStaysConsistentForAMissingFunction() {
+    // functionExists() bottoms out in the same cache -- a real, hot,
+    // repeated probe in this driver's own scheduler (optional hooks
+    // like reset()/clean_up() that most objects never define). The
+    // cached "not found" entry (both pointers null, a real, valid
+    // negative-cache state, not an error) must keep answering false
+    // consistently, not flip to a stale true or throw on a repeated ask.
+    ObjectVarHarness harness;
+    harness.writeFile("/nohook.c", "int marker() { return 1; }\n");
+    auto ob = harness.objects.cloneObject("/nohook");
+    assert(ob != nullptr);
+
+    assert(harness.vm.functionExists(ob, "reset") == false);  // cold miss, caches negative
+    assert(harness.vm.functionExists(ob, "reset") == false);  // hits the cached negative
+    assert(harness.vm.functionExists(ob, "marker") == true);  // a real hit still resolves correctly
+
+    std::cout << "testFunctionChainCacheNegativeResultStaysConsistentForAMissingFunction OK\n";
+}
+
 static void testCloneObjectKeepsServingLastCompiledProgramWhenSourceFileIsDeletedAfterwards() {
     // Deliberately exercised through cloneObject(), not loadObject():
     // loadObject() has its own separate sourceFileExists() gate *before*
@@ -23588,6 +23874,13 @@ int main() {
     testTrigAndLog10EfunsMatchKnownExactValues();
     testAsinAcosThrowOutsideDomainButAtanDoesNot();
     testRegexpAssocAliasProducesSameResultAsRegAssoc();
+    testPcreMatchStringFormReturnsOneAndNoMatchReturnsZero();
+    testPcreMatchStringFormThirdArgIsPcreFlagsNotIllegal();
+    testPcreMatchStringFormFourthArgThrows();
+    testPcreMatchArrayFormSelectsMatchingLinesWithIndexAndInvertFlags();
+    testPcreMatchArrayFormFourthArgIsPcreFlags();
+    testPcreAssocMatchesRealDocCommentExampleWithPcreFlags();
+    testPcreAssocWithoutFlagsOnUppercaseSubjectFindsNoMatches();
     testRemoveActionRemovesPreviouslyAddedActionAndReturnsZeroWhenNothingToRemove();
     testRmDeletesFileAndReturnsZeroForMissingPath();
     testSetEvalLimitActuallyChangesTheEnforcedCeiling();
@@ -24058,6 +24351,9 @@ int main() {
     testLoadObjectRecompilesWhenSourceIsDestructedAndRewrittenWithDifferentContent();
     testCloneObjectRecompilesWhenSourceChangesEvenWithoutAnIntermediateLoadObjectCall();
     testLoadObjectReusesCachedProgramWithoutRecompilingWhenSourceIsUnchanged();
+    testFunctionChainCacheStaysCorrectAcrossARecompileForObjectsHoldingTheOldProgram();
+    testFunctionChainCacheResolvesInheritedFunctionsSharedAcrossClones();
+    testFunctionChainCacheNegativeResultStaysConsistentForAMissingFunction();
     testCloneObjectKeepsServingLastCompiledProgramWhenSourceFileIsDeletedAfterwards();
     testFluffOsAndLdmudBootApiMasterUidApplyNamesReflectTheRealDialectDivergence();
     testBootApiMasterFileAndSimulEfunFileReadThroughConfig();

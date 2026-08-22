@@ -230,16 +230,41 @@ struct FunctionLookupResult {
     const FunctionEntry* fn = nullptr;
 };
 
+// Phase 2 row 2.9: memoized via CompiledProgram::functionChainCache_ --
+// see that field's own long comment in Bytecode.hpp for the real,
+// source-confirmed reasoning behind keying this per-program rather than
+// per-object, and why no separate invalidation logic is needed anywhere.
+// The recursive structure and its result (own functions first, then
+// each inheritedPrograms entry depth-first, first match wins) are
+// unchanged from before this row -- only the cache check/store wrapping
+// each call is new.
 FunctionLookupResult findFunctionInChain(const CompiledProgram& program, const std::string& name) {
+    auto cached = program.functionChainCache_.find(name);
+    if (cached != program.functionChainCache_.end()) {
+        return FunctionLookupResult{cached->second.program, cached->second.fn};
+    }
+
+    FunctionLookupResult result{};
     for (const auto& fn : program.functions) {
-        if (fn.name == name) return FunctionLookupResult{&program, &fn};
+        if (fn.name == name) {
+            result = FunctionLookupResult{&program, &fn};
+            break;
+        }
     }
-    for (const auto& parent : program.inheritedPrograms) {
-        if (!parent) continue;
-        FunctionLookupResult found = findFunctionInChain(*parent, name);
-        if (found.program) return found;
+    if (!result.program) {
+        for (const auto& parent : program.inheritedPrograms) {
+            if (!parent) continue;
+            FunctionLookupResult found = findFunctionInChain(*parent, name);
+            if (found.program) {
+                result = found;
+                break;
+            }
+        }
     }
-    return FunctionLookupResult{};
+
+    program.functionChainCache_.emplace(
+        name, CompiledProgram::FunctionChainCacheEntry{result.program, result.fn});
+    return result;
 }
 
 // Run-time half of OpCode::CallParent (see Bytecode.hpp's own comment

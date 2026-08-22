@@ -140,6 +140,38 @@ constexpr PredefinedMacro kFluffosRuntimePredefinedMacros[] = {
     // NotImplementedError.
 };
 
+// __PACKAGE_PCRE__ and the PCRE_* flag constants (Phase 2 row 2.12,
+// backing the new pcre_match()/pcre_assoc() efuns in EfunTable.cpp --
+// see that file's own much longer citation comment for the full real
+// scope-check). Unlike every macro in the two tables above, these are
+// NOT sourced from the pinned temp/reference/fluffos-2.9-ds2.08 tree --
+// that tree has no PCRE package at all (confirmed: zero "pcre" hits
+// anywhere in it). Real source is instead the separately-vendored
+// modern FluffOS tree, temp/fluffos (a master-branch checkout): its
+// own src/CMakeLists.txt "option(PACKAGE_PCRE ...)" feeds the same
+// "__PACKAGE_X__ compiled in" predefine convention __PACKAGE_SOCKETS__
+// etc. above already use (confirmed via that package's own testsuite,
+// every pcre_*.lpc test file there guards itself with
+// "#ifdef __PACKAGE_PCRE__"), and the flag values themselves are
+// copied verbatim from that tree's src/include/pcre_flags.h.
+// Values given as plain decimal literals (1<<16 etc, pre-computed), not
+// as "(1 << 16)"-shaped expressions like pcre_flags.h's own source: the
+// -D flags below are assembled into one unquoted shell command string
+// (popen(), same real constraint __VERSION__'s own comment above
+// documents) and both the embedded spaces and the parens in that literal
+// form would break shell parsing (parens unescaped and unquoted open a
+// subshell in bash), not just get word-split.
+constexpr PredefinedMacro kPcrePackagePredefinedMacros[] = {
+    {"__PACKAGE_PCRE__", ""},
+    {"PCRE_DEFAULT", "0"},
+    {"PCRE_I", "65536"},
+    {"PCRE_M", "131072"},
+    {"PCRE_S", "262144"},
+    {"PCRE_U", "524288"},
+    {"PCRE_X", "1048576"},
+    {"PCRE_A", "2097152"},
+};
+
 // compiledFilename is the object being compiled's own normalized LPC
 // path (leading '/', no ".c" -- ObjectManager::compile()'s own
 // "filename", not the real on-disk path).
@@ -149,6 +181,9 @@ std::string buildPredefinedMacroFlags(const Config& config, const std::string& c
         flags << " -D" << macro.name << "=" << macro.value;
     }
     for (const auto& macro : kFluffosRuntimePredefinedMacros) {
+        flags << " -D" << macro.name << "=" << macro.value;
+    }
+    for (const auto& macro : kPcrePackagePredefinedMacros) {
         flags << " -D" << macro.name << "=" << macro.value;
     }
     flags << " -D__PORT__=" << config.port();

@@ -9,6 +9,216 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-21 (same session as row 2.12 immediately below, continuing
+with session time left per that session's own prompt): row 2.9 (apply
+cache), the second Tier 1 pick. Confirmed real scope from source before
+writing any code, and it changed this row's actual shape -- not a
+dialect mismatch this time, an architecture-fidelity one.**
+
+**Real finding: `src/apply/instruct.md`'s own literal design sketch
+(`unordered_map<pair<LpcObject*,string>, FunctionEntry*>`, manual
+invalidation on recompile and on `destructObject()`) does not match how
+this driver's real architecture actually works.** Read `findFunctionInChain()`
+(`VM.cpp`) and `ObjectManager::compile()`/`cloneObject()` directly rather
+than trusting the sketch or the prior scoping session's "confirmed still
+accurate" framing: `findFunctionInChain()` takes a `const
+CompiledProgram&`, not an `LpcObject*` -- its result depends only on
+program identity, and `ObjectManager::programCache_` (keyed by filename)
+hands the identical `shared_ptr<CompiledProgram>` to every clone of a
+blueprint (confirmed directly), so an `LpcObject*`-keyed cache would
+populate one redundant entry per clone for what is provably always the
+same answer -- a real, measurable loss against the row's own cited
+motivation (many living clones sharing one blueprint's `heart_beat()`).
+Worse than just suboptimal: `ObjectManager::compile()`'s own recompile
+branch, read in full, never mutates an existing `CompiledProgram` in
+place -- a recompile always `std::make_shared`'s a brand new instance
+(confirmed via that function's own comment, already regression-tested by
+row 0.15's `testCloneObjectRecompilesWhenSourceChangesEvenWithoutAnIntermediateLoadObjectCall`).
+An external map keyed by raw `CompiledProgram*` would therefore risk a
+genuine dangling-pointer read once every real owner of some old program
+let go and nothing pruned that map's own entries first -- a real memory-
+safety hazard the literal sketch's own two-event invalidation plan was
+implicitly trying to head off, not just an inefficiency.
+
+**Built:** a `functionChainCache_` member directly on `CompiledProgram`
+itself (`Bytecode.hpp`, new nested `FunctionChainCacheEntry` struct plus
+a `mutable std::unordered_map<std::string, FunctionChainCacheEntry>`,
+with a long inline citation comment carrying the full reasoning above)
+rather than an external map. This one change resolves every concern at
+once: the cache's lifetime is now identical to the program's own by
+construction, so a fresh recompile automatically starts with an empty
+cache (nothing to explicitly invalidate) and an old, superseded
+program's own cache is destroyed together with the rest of that no-
+longer-referenced program, never separately from it -- so neither
+"invalidate on recompile" nor "invalidate on `destructObject()`" needed
+any code at all; both are structurally guaranteed by composition
+instead. `replace_program()`'s own live `ob->setProgram(...)` hotswap
+(`VM.cpp`, LDMud dialect) is handled correctly for free too, since every
+lookup re-reads `obj->program()`'s current pointer fresh rather than
+ever caching a stale one. `findFunctionInChain()` itself (`VM.cpp`)
+rewritten to check/populate the per-program cache, preserving its exact
+original recursive resolution order (own functions first, then each
+`inheritedPrograms` entry depth-first, first match wins) -- confirmed by
+reading the diff side by side, not just by the tests passing.
+`findParentFunction()` (the separate, colder `::name()`/
+`qualifier::name()` explicit-parent-call path) deliberately left
+uncached, out of scope this slice: real, already-shipped motivation
+(`Scheduler.cpp`'s own real `call_heart_beat()`-equivalent,
+`vm_.callFunction(obj, "heart_beat", {})` on every living object every
+real tick) only ever bottoms out in `findFunctionInChain()`, confirmed
+unchanged from the prior scoping session's own citation.
+
+**3 new regression tests** (743 total, up from 740 -- row 2.12,
+immediately below in this same session, took the count from 733 to 740
+first): warms the cache on an object holding the *old* program across a
+real recompile and confirms both the old object's own warmed entry and a
+freshly cloned object against the *new* program stay correct with zero
+explicit invalidation; two clones of one blueprint sharing one
+`CompiledProgram` both correctly resolve an inherited function through
+the same shared cache entry (the exact real win the per-program keying
+decision above was made for); `functionExists()`'s own negative-cache
+path (both pointers null, a real, valid "confirmed absent" state, not an
+error -- most objects define no `reset()`/`clean_up()`/`heart_beat()` at
+all, and this driver's own scheduler re-asks that every tick just as
+often as a real hit) stays consistently false across repeated asks and
+does not corrupt a later real hit on a function that does exist.
+
+Live-verified against the real running driver (`./build/amlp
+etc/driver.cfg`) and the real bundled mudlib over a real TCP session: 5
+repeated `eval` calls (each recompiling `/tmp_eval_file` fresh, stressing
+per-program cache creation/discard under rapid, real repeated
+recompilation, matching `eval.c`'s own real rm-then-write_file-then-
+reload cycle) all returned correct results (`0, 1, 4, 9, 16`), followed
+by 3 real heartbeat intervals (~7s at the configured 2000ms interval)
+elapsing on a live connected player object -- `mudlib/clone/user.c` has
+`set_heart_beat(1)` active with no `heart_beat()` function defined
+anywhere in its own real inherit chain, confirmed directly by grep
+across the whole mudlib, so every real tick during that wait exercised
+the negative-cache path specifically, not a hypothetical one -- with a
+final `eval return 6 * 7;` afterward still correctly returning 42 and the
+driver's own log showing no errors, crashes, or exceptions across the
+whole session. Test-account/character state created during that
+verification deleted afterward, matching row 2.15/2.12's own established
+cleanup precedent.
+
+**2026-08-21 (a further fresh session, later than every session below,
+resuming after a disconnect): row 2.12 (`pcre_match`/`pcre_assoc`), the
+second Tier 1 pick, picked up right where the disconnected session's own
+prompt left off. Confirmed real scope from source before writing any
+code, the same discipline every prior row has used, and it changed what
+this row actually is, the same shape row 2.15's own correction took.**
+
+Oriented fresh per this session's own instructions: read `CLAUDE.md`
+(confirmed both non-negotiable rules), then confirmed row 2.15's own
+work was already committed and pushed -- by the project owner directly
+(`git log`: author `Thurtea <itsthurtea@gmail.com>`, commit `767e0ba`),
+not by this session, consistent with the `git add`-only rule never
+having been violated.
+
+**Real finding, before any implementation: this row's own "FluffOS
+`pcre_*`-family efun names" framing is real, but not from the tree this
+repo cites for everything else.** The pinned `temp/reference/
+fluffos-2.9-ds2.08` tree (`CLAUDE.md`'s own named citation source) has
+no PCRE package at all -- confirmed via a plain "pcre" text grep across
+the entire tree, zero hits anywhere; `func_spec.c`/`efun_defs.c` list
+only `regexp()`/`reg_assoc()`, backed by a bundled Henry Spencer engine,
+not PCRE (the same finding the `EfunTable.cpp` Phase 0 row 0.11 comment
+already documented). The real `pcre_*` family instead lives in a
+*different*, separately-vendored FluffOS source tree already present in
+this repo, `temp/fluffos` (a modern/master checkout): `src/packages/
+pcre/pcre.spec`/`pcre.cc`/`src/include/pcre_flags.h` -- a package that
+only exists in FluffOS history after it moved off the Henry Spencer
+engine onto real PCRE, well after the pinned 2.9-ds2.08 patchlevel.
+Documented explicitly as a divergent citation source in both `EfunTable
+.cpp`'s new comment block and this row's own `ROADMAP.md` entry, rather
+than silently treated as 2.9-ds2.08 evidence -- the same kind of named,
+explicit dialect correction row 2.15's LDMud-vs-FluffOS finding made,
+just a version-lineage split within FluffOS itself rather than a
+different driver family entirely.
+
+**Real call-site evidence swept across every vendored mudlib corpus**
+(`core-lib`, `dead-souls`, `es2_mudlib`, `lima`, `nightmare3`,
+`reference-lpc-mud-library`): of the real package's eight efuns
+(`pcre_version`/`pcre_match`/`pcre_match_all`/`pcre_assoc`/
+`pcre_extract`/`pcre_replace`/`pcre_replace_callback`/`pcre_cache`),
+only `pcre_assoc()` and `pcre_match()` have any real call sites anywhere
+-- both in the vendored `lima` corpus (`lib/daemons/xterm256_d.c`,
+`lib/std/modules/m_frame.c`, filtering/tokenizing ANSI colour-code
+text). The other six efuns have zero call-site evidence in any vendored
+corpus and are out of scope this slice, the same bounded-to-real-
+evidence discipline row 2.15 used for `db_affected_rows`/`db_insert_id`/
+`db_coldefs`.
+
+**Built:** `pcre_match()`/`pcre_assoc()` (`EfunTable.cpp`) as PCRE-backed
+drop-in analogs of the already-existing `regexp()`/`reg_assoc()`
+(confirmed directly against `pcre.cc`'s own real header comment, "analog
+with regexp efun ... for backwards compatibility reasons but utilizing
+the PCRE library", and the real upstream docs for both efuns) -- same
+selection/tokenizing contracts (string-form 1/0, array-form matching-
+elements-with-optional-index/invert for `pcre_match()`; identical
+earliest-match-wins multi-pattern scan for `pcre_assoc()`), plus a new
+optional `pcre_flags` bitmask argument neither existing efun has. Flag
+values and their compile/exec-option mapping cited directly from
+`pcre_flags.h` and `pcre.cc`'s own `compute_compile_options()`/
+`compute_exec_options()`: `PCRE_I`/`PCRE_M`/`PCRE_S`/`PCRE_U`/`PCRE_X`
+are compile-time (mapped onto PCRE2's own `PCRE2_CASELESS`/
+`MULTILINE`/`DOTALL`/`UNGREEDY`/`EXTENDED`), `PCRE_A` is exec-time only
+(`PCRE2_ANCHORED`). Real `compute_compile_options()` also always ORs in
+`PCRE_UTF8` unconditionally regardless of flags -- ported as PCRE2's own
+renamed `PCRE2_UTF` (confirmed directly against the linked `pcre2.h`:
+PCRE2 has no `PCRE2_UTF8` constant at all) -- a real, deliberate
+divergence from `regexp()`/`reg_assoc()`/`regexplode()`, which stay
+byte-oriented exactly as Phase 0 row 0.11 built and tested them; only
+these two new efuns validate UTF. `compileRegex()`/`regexFindNext()`
+(row 0.11's own shared helpers) both gained optional trailing options
+parameters defaulting to 0, so every pre-existing caller's behavior is
+unchanged.
+
+`__PACKAGE_PCRE__` and six `PCRE_*` flag constants added as new driver-
+injected compiler predefines (`ObjectManager.cpp`'s
+`buildPredefinedMacroFlags()`), in a new, separately-commented table
+explicitly kept apart from the existing verbatim-copied-from-2.9-ds2.08
+predefine tables, since these aren't from that tree -- cited instead to
+`temp/fluffos`'s own `option(PACKAGE_PCRE ...)` plus its testsuite's own
+`#ifdef __PACKAGE_PCRE__` convention, matching the same `__PACKAGE_X__`
+pattern this driver's existing tables already use for its own real
+packages. Values given as pre-computed plain decimal literals rather
+than `(1 << N)`-shaped expressions: the `-D` flags are all assembled
+into one unquoted `popen()` shell command string, and unescaped parens
+there open a bash subshell rather than just getting word-split -- the
+same real constraint the existing `__VERSION__` entry's own comment
+already documents for embedded spaces, caught before it ever reached a
+build.
+
+**6 new regression tests, actually 7:** (740 total, up from 733):
+`pcre_match()` string-form match/no-match; its 3rd argument being a
+real, legal `pcre_flags` (`PCRE_I` turning a would-otherwise-fail match
+into a match, unlike `regexp()`'s own real hard error there); its real
+4-arg-in-string-form illegality; array-form index/invert selection
+(identical to `regexp()`'s own, reusing that test's own fixture data);
+a real all-4-argument array-form call (the exact shape `pcre_match.lpc`
+'s own real upstream testsuite regression-tests against a historical
+wrong-stack-slot driver bug -- confirmed moot for this driver, since its
+own calling convention passes efun arguments as a plain vector rather
+than a raw interpreter stack, documented inline rather than reproduced
+as a bug); `pcre_assoc()` reproducing `reg_assoc()`'s own real worked
+doc-comment example against an all-uppercase subject with and without
+`PCRE_I`, confirming the flag is actually threaded into every pattern's
+own compile options rather than merely accepted and silently ignored.
+
+Live-verified against the real running driver (`./build/amlp etc/
+driver.cfg`) and the real bundled mudlib over a real TCP session, via
+the bundled `eval` command after a real account-creation ->
+character-naming login flow: all seven probes (`pcre_match()` string
+form plain and with `PCRE_I`, array form plain and inverted,
+`pcre_assoc()` with and without `PCRE_I` against an uppercase subject,
+plus `__PACKAGE_PCRE__` resolving as an empty-value feature-guard macro
+the same way `__PACKAGE_SOCKETS__` etc. already do) returned exactly
+the expected real values. Test-account/character state created during
+that verification (`mudlib/accounts/p/pcretestacct.o`, `mudlib/
+characters/p/pcretestchar.o`) deleted afterward, matching row 2.15's own
+established cleanup precedent.
+
 **2026-08-21 (a fresh session, later than every session above): row
 2.15 (SQLite/`db_*` efuns), the top Tier 1 pick from the prior Phase 2
 scoping session. Confirmed real scope from source before writing any
