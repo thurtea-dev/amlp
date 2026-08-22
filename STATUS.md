@@ -9,6 +9,89 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-22: Tier 2 cold-start scoping session, row 2.1 (world-level
+statedump) picked over 2.5 (coroutine scheduler), 2.11 (LLVM JIT), and
+3.3 (generational GC). Docs-only session per the prompt's own
+instruction -- no implementation code written, ROADMAP.md row 2.1's own
+scaffolding text replaced with a concrete first-slice design. 743 tests
+still passing (verified by rebuilding and running `build/test/amlp_tests`
+directly, not just trusting the last-known count), unchanged from the
+prior session -- this was expected, no code touched this session.**
+
+**Why 2.1 over the other three, weighed on real evidence, not just
+listed order:** 2.1 gates the most real follow-on work of the four --
+rows 2.2, 2.3, and 2.4 all explicitly block on its format, each
+confirmed directly in its own ROADMAP.md note, not assumed. It also
+carries the least architectural risk to start without a full plan: its
+first slice lives entirely inside a new, currently-empty module
+(`src/persist` holds only `instruct.md` today), not inside `VM::run()`
+(2,743 real lines, exercised by all 743 of this project's own real
+passing tests today -- 2.5's own note still cited 727, a count that has
+already moved on since 2026-08-21) the way 2.5's `Suspend`-opcode work
+would need to. And it needs no new external dependency, unlike 2.11
+(LLVM 17+ against a driver whose entire real dependency footprint today,
+re-confirmed directly against `CMakeLists.txt` this session, is
+`pcre2-devel` + `libxcrypt-devel` + `sqlite3`). 3.3 was re-checked too,
+not skipped on the strength of last session's own words alone: its cited
+525 real `shared_ptr<LpcObject>`/`Array`/`Mapping`/`Closure` hits are 546
+now, a direct re-grep this session -- confirming, not just repeating,
+that row's "likely larger than its own instruct.md estimate" flag. None
+of the other three had a lower-risk, more-bounded story than 2.1 once
+actually compared side by side against real source, so 2.1 got this
+session's real scoping pass.
+
+**Real scope findings, from reading the actual architecture, not the
+abstract feature:** the 2026-08-21 scoping pass had already correctly
+identified reference identity as the real hard sub-problem (`save_object()`'s
+own working `serializeValue()`/`deserializeValue()`, `EfunTable.cpp`,
+drops object references and closures to void on write -- fine for one
+object's own save file, wrong for a world snapshot where two saved
+objects sharing a reference to a third live object need to resolve back
+to the *same* restored object). This session found two concrete things
+that pass missed, and both changed the actual first-slice shape:
+
+1. Enumeration is already solved. `LiveObjectRegistry` (`include/amlp/object/LiveObjectRegistry.hpp`,
+   `src/object/LiveObjectRegistry.cpp`) is a real, already-working global
+   `weak_ptr<LpcObject>` registry, populated by `ObjectManager::loadObject()`/
+   `cloneObject()` already (confirmed directly in `ObjectManager.cpp`) and
+   already backing the live `objects()`/`livings()` efuns.
+   `LiveObjectRegistry::all()` is exactly the "walk every live object,
+   blueprint or clone" primitive a world dump's enumeration pass needs --
+   nothing new to build there.
+2. Object placement is a second, separate reference-identity problem the
+   prior note never named. `LpcObject::environment_`/`::inventory_` are
+   driver-internal placement fields, not part of `variables()` --
+   `save_object()`'s own precedent has never had to serialize them at
+   all. A world dump that drops room/inventory placement is not really a
+   world dump, so the first slice includes it, reusing the same id-table
+   mechanism variables need rather than a second one.
+
+Also confirmed directly, not just re-asserted: `src/persist/instruct.md`'s
+own CBOR/`nlohmann::json` choice has no real dependency behind it
+anywhere in this repo's actual build -- no `find_package`/`pkg_check_modules`
+for it in `CMakeLists.txt`, no vendored header under `include/`/`src/`
+(the only real hits are other unbuilt `instruct.md` proposals and one
+copy vendored inside `temp/fluffos/` that this build does not link).
+
+**Concrete first-slice proposal (written into ROADMAP.md row 2.1, not
+left in chat only):** a new `StateSerializer` in `src/persist`, id-table
+based, two dump sections written in reconstruction order -- section A
+(id, filename, isClone, environment id, inventory ids) lets restore
+fully rebuild every object's identity and placement via the *existing*
+`lookupLoadedObject()`/`loadObject()`/`cloneObject()` paths before
+section B (each object's `variables()`, via a `serializeWorldValue()`
+that extends the existing `I`/`F`/`S`/`A`/`M`/`N` tag scheme with `O<id>`
+for object references and `C` for ordinary closures) ever needs to
+resolve an id. Explicitly deferred out of this slice, each independently
+bounded and non-blocking: `Scheduler`'s call_outs/heartbeats (already
+isolated, read-only-accessible state), `actions_`/shadow/snoop fields
+(mechanically the same id-table treatment, just more of them), parse-info/
+`totalLight_`, and reset/cleanup timing bookkeeping (restored fresh via
+the existing `armResetAndCleanup()` path, matching real-driver-reboot
+practice). Full reasoning, including the exact file-format tag layout
+and the closure/`unbound_lambda()` failure-mode decision, is in
+ROADMAP.md row 2.1 itself now, not just here.
+
 **2026-08-21 (same session as row 2.12 immediately below, continuing
 with session time left per that session's own prompt): row 2.9 (apply
 cache), the second Tier 1 pick. Confirmed real scope from source before
