@@ -54,6 +54,39 @@ documents; if this file and either of those disagree on a specific row's
 status, trust `ROADMAP.md`'s own checkbox and re-derive this file's own
 summary from it rather than the reverse.
 
+**Re-swept 2026-08-22 (a fresh full-project status sweep, row 1.7's own
+remaining `call_out_info()`/`input_to()` privilege-gate follow-on now
+real too): the Phase 2/3 "not started" framing two paragraphs below was
+stale and is corrected here.** Re-counted every phase directly against
+`ROADMAP.md`'s own current checkboxes (`awk`-counted per phase section,
+not eyeballed, and cross-checked against a fresh local build/test run)
+rather than trusted forward from the 2026-08-21 sweep above: Phase 0 is
+still 16/16 (100%, unchanged); Phase 1 is still 10/11 real-blockers-only
+(91%, unchanged -- row 1.7 was already checked off before this pass and
+stays so, its own remaining cell items, `H_LOAD_UIDS`/`H_CLONE_UIDS`/
+`H_INCLUDE_DIRS`, type-map validation, plain `lambda()`, and
+`inaugurate_master()`'s own arg=1/2/3 reload cases, all confirmed still
+either zero real corpus evidence or the same weak, single-file evidence
+already on record, not newly re-derived); but **Phase 2 is 3/22 (2.9
+apply cache, 2.12 full PCRE suite, and 2.15 SQLite, all built and landed
+2026-08-21, one sweep before this one) and Phase 3 is 1/9 (3.9, a real
+third-party mudlib boot-and-play confirmation, also landed 2026-08-21;
+row 3.9 itself is new since the 2026-08-21 sweep above, so Phase 3's own
+row count moved from 8 to 9, not just its done count)** -- both phases
+had already moved off 0% by the time of the 2026-08-21 sweep two
+paragraphs below, which undercounted them; this pass corrects it rather
+than repeating the same stale number forward again. One real
+documentation inconsistency found and worth naming rather than quietly
+smoothing over: `ROADMAP.md` row 1.7's own "715 tests passing" note
+undercounts the actual suite size at that point in real history, since
+it measured only that row's own local delta (709 to 715) without
+accounting for the ~28 additional tests rows 2.9/2.12/2.15 had already
+added in an intervening session; the real, freshly-measured total as of
+this sweep, rebuilt and re-run directly rather than trusted from any
+prior note, is **743**, matching `STATUS.md`'s own current dated entry,
+not 715. See that entry for the full sweep and the recommendation
+written there for what to pick up next.
+
 ---
 
 ## How far along is AMLP, in plain language
@@ -66,9 +99,12 @@ a substantial fraction of real FluffOS's own efun surface plus the start
 of genuine LDMud and DGD dialect support behind a config switch. It is
 not yet a drop-in replacement for either real driver: Phase 2 and Phase 3
 (the features meant to eventually *exceed* what either real driver
-offers) each have a planning document but zero implemented code, though
-Phase 1's own real, corpus-driven dialect-compatibility work is now
-substantially exhausted: see immediately below.
+offers) are still mostly planning documents rather than implemented
+code, though three Phase 2 rows (apply cache, full PCRE suite, built-in
+SQLite) and one Phase 3 row (a real third-party mudlib boot-and-play
+confirmation) are now real and landed, not just planned, and Phase 1's
+own real, corpus-driven dialect-compatibility work is now substantially
+exhausted: see immediately below.
 
 **Phase 0 (stabilize the current base): complete.**
 16 of 16 rows checked off, including `parse_*` (0.13a), the large
@@ -100,21 +136,27 @@ counting every unchecked box regardless of what is actually left in it:
 citations for the underlying evidence on every count below, not repeated
 here.
 
-**Phase 2 and Phase 3: not started.** Every directory Phase 2/3 work
-would live in (`src/jit`, `src/gc`, `src/lsp`, `src/persist`,
-`src/security`) contains nothing but its own planning `instruct.md`.
-This is stated plainly rather than implied by an unchecked box: nothing
-in this repository currently does coroutine scheduling, JIT compilation,
-hotboot, world-level statedump, TLS, or any of the other Phase 2/3
-items. They are real, considered plans, not real code.
+**Phase 2 and Phase 3: mostly still planning, but no longer zero code.**
+Most of the directories Phase 2/3 work would live in (`src/jit`,
+`src/gc`, `src/lsp`, `src/persist`, `src/security`) still contain
+nothing but their own planning `instruct.md`, and the large novel-
+architecture items (coroutine scheduling, JIT compilation, hotboot,
+world-level statedump, TLS, generational GC) are all still real,
+considered plans, not real code. But three Phase 2 rows and one Phase 3
+row are now real, landed code, not plans: the apply cache (2.9), the
+full PCRE `pcre_match`/`pcre_assoc` suite (2.12), built-in SQLite
+`db_*` efuns (2.15), and a real third-party mudlib boot-and-play
+confirmation (3.9). See the table immediately below for the current
+fraction of each phase, not the "zero" framing an earlier revision of
+this file gave both.
 
 | Phase | Rows | Done | Open | % done |
 |---|---|---|---|---|
 | 0, Stabilize | 16 | 16 | 0 | 100% |
 | 1, Dialect universality (real blockers only, DGD-only rows excluded) | 11 | 10 | 1 | 91% |
 | 1, Dialect universality (including 5 DGD-only comparison rows) | 16 | 10 | 6 | 63% |
-| 2, Beyond both (novel features) | 22 | 0 | 22 | 0% |
-| 3: Production hardening + docs | 8 | 0 | 8 | 0% |
+| 2, Beyond both (novel features) | 22 | 3 | 19 | 14% |
+| 3: Production hardening + docs | 9 | 1 | 8 | 11% |
 
 **What is left open in Phase 1, and why each item stays open** (each
 with its own detailed, source-cited scoping note in `ROADMAP.md`, not
@@ -269,7 +311,7 @@ applicable).
 | Hotboot (fd-passing exec, connections survive) | No (Phase 2, not started) | Yes | Yes | Yes (via statedump/restart, different mechanism) |
 | World-level statedump / object swapout | No (Phase 2, not started) |, |, | Yes (DGD's own signature architecture) |
 | TLS / WebSocket | No (Phase 2, not started) | Not in this vendored ds2.08 snapshot | Not checked | Not checked |
-| Built-in SQLite / hash / JSON efuns | No (Phase 2, not started) | Some (own DB package options) | Some | Some |
+| Built-in SQLite / hash / JSON efuns | Partial (SQLite `db_connect`/`db_exec`/`db_fetch`/`db_close`, row 2.15, built and landed; hash/JSON efuns, rows 2.16/2.17, not started) | Some (own DB package options) | Some | Some |
 | LSP server (`--lsp`) | No (Phase 2, not started) |, |, |: |
 | Generational GC (replacing `shared_ptr`) | No (Phase 3, not started) | Real GC | Real GC | Real GC |
 | Full privilege/uid trust hierarchy | Partial (`privs()`, no full uid/euid/domain hierarchy) | Yes | Yes | Yes (own model) |
@@ -289,10 +331,14 @@ applicable).
   documented category of memory a genuine GC would reclaim that this
   driver currently never does. Phase 3's own `src/gc` item is exactly
   this, and is entirely unstarted.
-- **Every Phase 2/3 differentiator is a plan, not code.** Coroutines,
-  JIT, hotboot, statedump, TLS, LSP, hot-reload, a conformance suite --
-  all have a real `instruct.md` and zero implementation. None of them
-  should be described as "in progress."
+- **Most Phase 2/3 differentiators are still a plan, not code.**
+  Coroutines, JIT, hotboot, statedump, TLS, LSP, hot-reload, a
+  conformance suite, generational GC -- all still have a real
+  `instruct.md` and zero implementation, and none of them should be
+  described as "in progress." Three Phase 2 rows are the exception,
+  real and landed rather than planned: the apply cache (2.9), the full
+  PCRE suite (2.12), and built-in SQLite (2.15) -- along with Phase 3's
+  own row 3.9, a real third-party mudlib boot-and-play confirmation.
 - **Master/boot apply coverage is currently one name deep**
   (`masterUidApply()` only) against each real driver's own much larger
   master-object callback surface: see the section above. LDMud's
@@ -329,7 +375,7 @@ undersells what already works: AMLP is not a wrapper or a fork of any
 of the three real drivers: its own lexer, parser, code generator,
 bytecode VM, object system, and network layer are original
 implementations, verified continuously against real vendored source and
-a real bundled mudlib rather than against assumption. 727 regression
+a real bundled mudlib rather than against assumption. 743 regression
 tests pass as of this writing (see `STATUS.md` for the current count,
 which changes every session), and the discipline behind every checked
 row above is the same: read the real source, port the real behavior

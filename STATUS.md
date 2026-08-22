@@ -9,6 +9,224 @@ own header used to point at it. This file no longer trims itself to a
 fixed recent-session count now that there is nowhere to move older
 entries to -- it is expected to keep growing.
 
+**2026-08-22 (a later session, same day): fresh full-project status
+sweep, requested after row 1.7's own remaining `call_out_info()`/
+`input_to()` privilege-gate follow-on landed. Docs-only session --
+`ROADMAP.md`/`STATUS.md`/`COMPARISON.md` only, no implementation code
+written.**
+
+**Real, measured numbers, re-derived from source this session, not
+carried forward from any prior note:**
+
+| Phase | Rows | Done | % done |
+|---|---|---|---|
+| 0, Stabilize | 16 | 16 | 100% |
+| 1, Dialect universality (real blockers only, 5 DGD-only rows excluded) | 11 | 10 | 91% |
+| 2, Beyond both (novel features) | 22 | 3 | 14% |
+| 3, Production hardening + docs | 9 | 1 | 11% |
+
+Phase 0: unchanged, 16/16, re-confirmed by direct `awk`-count over
+`ROADMAP.md`'s own Phase 0 section rather than trusted forward.
+
+Phase 1: also unchanged at 10/11 real-blocker rows (row 1.7 was already
+checked off before this session; what closed this session was one of
+its own remaining sub-items, `call_out_info()`/`input_to()`'s
+`privilege_violation()` gates, not the row's own checkbox). The prompt
+that opened this session asked for the row's own scope note to be
+re-confirmed as "essentially exhausted of real, well-evidenced items" --
+re-read the row 1.7 cell in full rather than trusting that framing on
+its face, and it holds up: what remains is `H_LOAD_UIDS`/`H_CLONE_UIDS`/
+`H_INCLUDE_DIRS` dispatch (3 real call sites total, all in one file,
+`core-lib/secure/master/hooks.c`, plus a handful more inside LDMud's own
+bundled driver test fixtures, not independent gameplay corpora -- weak,
+single-source evidence, not the multi-corpus bar this project's own
+`parse_*`/two-object-rule work cleared), real per-hook type-map
+validation (no corpus signal either way, a structural completeness item
+not an observed gap), plain dialect-agnostic `lambda()` (zero real
+corpus hits, confirmed fresh by an earlier session and not re-disputed
+here), and `inaugurate_master()`'s own arg=1/2/3 master-reload/
+reactivation cases (a real trigger point this driver has never wired,
+but no session has yet corpus-checked it specifically -- flagged here as
+an actual gap in the evidence record, not assumed zero just because
+everything else on this row turned out to be). Row 1.8
+(`#'lfun::`/`#'sefun::`/`#'var::`) stays the one fully open row, zero
+real corpus hits confirmed by an earlier session, not re-disputed here
+either. Net: Phase 1's real-blocker fraction has not moved, but its own
+remaining surface really is now almost entirely zero-or-near-zero-
+evidence work, matching the prompt's own framing.
+
+**Phase 2 and Phase 3 are not "still 0%, planning docs only."** This is
+the one place this session's own findings genuinely correct the
+premise it started from, not just confirm it. Direct evidence: `git
+log` shows three Phase 2 rows already built and committed in an earlier
+session on 2026-08-21 -- 2.9 (apply cache), 2.12 (full PCRE
+`pcre_match`/`pcre_assoc` suite), 2.15 (SQLite `db_*` efuns) -- plus one
+Phase 3 row, 3.9 (a real third-party mudlib, "AetherMUD", confirmed
+booting and playable against this driver). `ROADMAP.md`'s own Phase 2
+section already carried a full "cold-start scoping session, 2026-08-21"
+pass across every remaining row too (the same session that later built
+2.9/2.12/2.15), and this project's own prior session (also dated
+2026-08-22, immediately below this entry) had already picked row 2.1
+(world-level statedump) for a dedicated deeper scoping pass and written
+a concrete first-slice design directly into that row's own cell. None
+of this matches "zero implemented code, planning documents only" --
+`COMPARISON.md` had exactly that stale framing in three separate places
+(its own summary paragraph, its "Phase 2 and Phase 3: not started"
+section, and its "every Phase 2/3 differentiator is a plan, not code"
+bullet), left over from its own 2026-08-21 sweep, which itself predated
+the 2.9/2.12/2.15 landings by hours on the same day and was never
+re-swept after. All three corrected in this session (see `COMPARISON.md`'s
+own new "Re-swept 2026-08-22" dated note and the sections it points at).
+
+**Test count discrepancy, found and worth naming rather than quietly
+smoothing over:** this session's own opening prompt cited "715 tests
+passing," matching `ROADMAP.md` row 1.7's own dated note ("715 tests
+passing (up from 709)"). Rebuilding and running the real test binary
+directly this session (not trusted from any note) gives **743**, not
+715. Root cause, confirmed by reading `git log` timestamps directly:
+row 1.7's own "(709 to 715)" commit (`91f1a58`, 2026-08-22 14:32) landed
+*after* 2.9/2.12/2.15's own commit (`a5690fb`, 2026-08-21 23:30), which
+had already pushed the real suite total well past 715 by the time row
+1.7's own slice ran. Row 1.7's own commit message measured only its own
+local before/after delta (709 to 715) without re-checking the actual
+interim whole-suite total, so its own "715" was already stale relative
+to the real repository the moment it was written, not a regression
+introduced by this sweep. No action taken on the historical commit
+message itself (this project does not rewrite `git` history), but
+**743 is the real, current, freshly-verified count**, and both
+`ROADMAP.md` and `COMPARISON.md` should be read against that number
+going forward, not 715.
+
+**`COMPARISON.md` refreshed** (see its own file for the full text):
+Phase 2's table row corrected from `22 | 0 | 22 | 0%` to
+`22 | 3 | 19 | 14%`; Phase 3's from `8 | 0 | 8 | 0%` to `9 | 1 | 8 | 11%`
+(row count also moved 8 to 9, row 3.9 itself being new since the last
+sweep, not just its done count changing); the SQLite differentiator-
+table row updated from a flat "No" to "Partial (`db_*`, row 2.15,
+built)"; the "every Phase 2/3 differentiator is a plan" bullet and the
+top-of-file summary paragraph both reworded to name the three real
+Phase 2 exceptions plus row 3.9; and the closing regression-count
+mention updated from a stale 727 to 743. A new dated "Re-swept
+2026-08-22" note was added to the file's own header block rather than
+silently overwriting the 2026-08-21 note it corrects, matching this
+file's own established convention of layering dated corrections rather
+than erasing prior ones.
+
+---
+
+**Recommendation for the next session, written here in full so it
+survives independently of this conversation (the prior session's own
+equivalent recommendation was given only in chat and was lost
+afterward, a real, named gap in this project's own history -- this
+entry exists specifically so that does not happen again).**
+
+**Pick: continue Phase 2, specifically building row 2.1's (world-level
+statedump) already-designed first slice next. Do not pick up Phase 1's
+remaining low-evidence items for completeness, and do not pick up
+`notes/ACCOUNT_LOGIN_PLAN.md` under the assumption it still has open
+scope waiting -- both were checked directly this session, not assumed,
+and both turned out weaker candidates than they looked from the prompt
+alone.**
+
+**Candidate 1: closing Phase 1's remaining low-corpus-usage items
+anyway, for completeness. Rejected, on this project's own established
+precedent, not a fresh judgment call.** Every item left on row 1.7 and
+all of row 1.8 was deliberately deferred by an earlier session
+specifically *because* it had zero or near-zero real corpus evidence,
+using the exact same discipline this project has now applied
+repeatedly and explicitly: `bind_lambda()`'s cross-object form rejected
+as a stand-in (row 1.7's own 2026-08-17 decision, "(c)", no partial
+stand-in built on invented demand), row 1.9's five mapping-width
+sub-items left open on zero evidence, row 1.8 deferred the moment its
+own fresh corpus check came back zero. Building any of row 1.7's
+remaining items or row 1.8 now, for completeness rather than evidence,
+would directly reverse a standing, repeatedly-reaffirmed project
+discipline, not extend it. The one partial exception worth flagging for
+whoever picks this area up again, not built this session: this sweep
+found `inaugurate_master()`'s own arg=1/2/3 cases have never actually
+been corpus-checked at all (every other row 1.7 item has a fresh
+zero-or-near-zero finding on record; this one does not), so a future
+session should run that check specifically before either building it or
+formally recording it as zero-evidence-deferred like its neighbors --
+that is a real, bounded, half-day investigation task in its own right,
+not a reason to reopen this candidate broadly.
+
+**Candidate 2: picking up `notes/ACCOUNT_LOGIN_PLAN.md`. Available in
+principle but a materially weaker pick than the prompt's own framing
+implied, confirmed by reading the file directly rather than assumed
+still-open from its filename.** The file's own header states plainly:
+"build ordering items 1 through 5 are real -- this plan's own originally
+scoped build ordering is closed out" (dated 2026-08-21, a session
+before this one). Account creation, login, password checking, character
+creation with race-safe name reservation, and character selection are
+all implemented, tested, and live-verified end to end -- there is no
+remaining item in this plan's own original five-item scope to "pick up
+where it left off." The file does name one genuinely open thread beyond
+that original scope, "character management" for an already-authenticated
+account (switching between existing characters, not just selecting one
+at login) -- but its own text is explicit that this is "a natural
+candidate for a future session's own fresh scoping pass," not
+scoped work sitting ready to build. Picking this up would mean running
+a cold-start scoping investigation first, the same real cost as picking
+a fresh, previously-unscoped Phase 2 row -- it does not have the
+"momentum already built up" advantage the candidate framing implies.
+Also worth noting for whoever revisits this file: its own closing
+"Explicit non-status" section (the file's last few lines) still reads
+"Nothing above has been implemented," left over unedited from the
+file's original 2026-08-19 draft and now flatly contradicted by its own
+header two sections above -- a stale-prose loose end, not a status
+signal, worth a one-line fix whenever this file is next touched, not
+urgent enough to justify a dedicated session on its own.
+
+**Candidate 3: beginning real Phase 2 planning-to-code work. Picked,
+and picked specifically at row 2.1 rather than any other open Phase 2
+row, on the following real evidence:**
+
+- **Momentum and precedent already exist here, unlike either other
+  candidate.** Three Phase 2 rows (2.9, 2.12, 2.15) already landed real,
+  tested, live-verified code in the immediately preceding session,
+  proving the "cold-start scope, then build" pattern this project uses
+  works for this phase specifically, not just Phase 0/1. Candidate 1 is
+  being deliberately *not* extended past its own evidence limit;
+  candidate 2's own real momentum already fully spent itself on 2026-08-21.
+  Phase 2 is the only one of the three with real forward motion still
+  live.
+- **Row 2.1 specifically, not an arbitrary Phase 2 row, because it is
+  the one already carrying a genuine first-slice design, not just a
+  scoping note.** A dedicated cold-start scoping session earlier today
+  (see this file's own immediately-following entry, "Tier 2 cold-start
+  scoping session") picked row 2.1 over 2.5/2.11/3.3 on real evidence
+  (gates the most real follow-on work, rows 2.2/2.3/2.4 all block on
+  it; lowest architectural blast radius of the four, a new empty module
+  rather than surgery on `VM::run()`; no new external dependency, unlike
+  2.11's LLVM requirement) and wrote a concrete, implementable design
+  directly into `ROADMAP.md` row 2.1's own cell: an id-table-based
+  two-pass serializer, reusing the already-existing `LiveObjectRegistry`
+  for enumeration and extending the already-working `serializeValue()`/
+  `deserializeValue()` tag format rather than inventing a new dependency.
+  What remains for row 2.1 is real implementation work against an
+  already-settled design, not another scoping pass -- a materially
+  different, lower-risk starting position than every other open Phase 2
+  row, all of which are still at the single-paragraph scoping-note stage
+  only.
+- **Matches this project's own stated end goal more directly than
+  either other candidate.** `ROADMAP.md`'s own opening line states the
+  actual goal is "the best LPC runtime available... surpassing both [FluffOS
+  and LDMud] on the dimensions neither addressed" -- Phase 2 *is* that
+  goal; Phase 1 is dialect-compatibility table stakes, already 91% done,
+  and candidate 1 would spend a session pushing a table-stakes number
+  from 91% toward 100% on evidence this project has repeatedly said does
+  not justify the work. Candidate 2 is real, valuable mudlib content but
+  not the project's own stated differentiator.
+
+**Not started this session** (docs-only per this sweep's own scope; row
+2.1's own first-slice design was written in the earlier session today,
+not this one) -- implementing row 2.1 is the explicit, on-record next
+step for whoever picks this project up next, LLM or human, without
+needing this conversation's own context to know why.
+
+---
+
 **2026-08-22: Tier 2 cold-start scoping session, row 2.1 (world-level
 statedump) picked over 2.5 (coroutine scheduler), 2.11 (LLVM JIT), and
 3.3 (generational GC). Docs-only session per the prompt's own
